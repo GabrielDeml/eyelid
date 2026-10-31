@@ -143,7 +143,7 @@ There is no `declareUserActivity`; "Look busy" is cut (see the Decisions log). W
 | Lid | `RootDomain.observeClamshell` | Clamshell notifications; also re-read on `NSWorkspace.didWakeNotification` / `screensDidWakeNotification`. **No 2 s poll.** `ClosedLidController` adds a 5 s poll only while engaged. |
 | External displays | Online display list | `NSApplication.didChangeScreenParametersNotification` (while engaged and closed, dropping to 0 triggers `displaysleepnow`) |
 
-Post `.insomniaPowerDidChange` only when a value actually changes.
+Post `.insomniaPowerDidChange` only when a value actually changes, once per refresh and only after every field of that refresh is updated (observers never see a half-updated state).
 
 ### `Core/Privileged/PrivilegedBackend.swift`, `HelperBackend.swift`, `SudoersBackend.swift`, `Watchdog.swift`
 ```swift
@@ -367,7 +367,9 @@ struct LidCloseCounters { advance(to:mode:), lidOpened(at:), capDeadline(…), b
     var notifier: (any NotificationPosting.Type)?  // M4 Notifier.self
     var stats: (any StatsRecording)?               // M4 Stats
     init(settings: Settings = .shared, power: any PowerReading = PowerMonitor.shared,
-         assertions: any AssertionApplying = PowerAssertions(), clock: @escaping @MainActor () -> Date = { Date() })
+         assertions: any AssertionApplying = PowerAssertions(), clock: @escaping @MainActor () -> Date = { Date() },
+         uptime: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         bootID: @escaping @MainActor () -> String? = { /* kern.boottime */ })
 }
 enum Banner: Equatable {
     case batteryFloor(percent: Int), guardTripped(GuardReason), recovered
@@ -383,7 +385,7 @@ enum Banner: Equatable {
   3. Expire timed holds (`DeactivationReason.timerExpired`).
   4. Run `Policy.evaluate`. If `endManualForBatteryFloor`, call `deactivate(.batteryFloor)`.
   5. Apply the assertions.
-  6. Update the latch (set when a lid guard trips while `isLidClosed`; cleared by a clamshell-open event or a user action). Call `ClosedLidController.setDesired(lidAllowed && hasLid && helper == .installed && !latched)`.
+  6. Update the latch (set when a lid guard trips while `isLidClosed`; cleared by a clamshell-open event or a user action). Call `ClosedLidController.setDesired(lidAllowed && hasLid && helper == .installed && !latched)`. On a user action while that is true and the controller is in an alarming `.error` (not `foreignFlag` / `otherUser`), also call `retry()` (CLOSED_LID.md §7).
   7. Compute `lid`:
      - controller `.stuck` → `.stuck` (always shown);
      - `wantLid` false → `.off`;
@@ -398,10 +400,10 @@ enum Banner: Equatable {
 - **Timers** (pure plan: `Core/TickPlan.swift`, `TickPlanner.plan`). No timer runs while asleep and the panel is closed.
   - **1 Hz** while the panel is visible, or while a timed hold has ≤ 60 s left.
   - Otherwise **one-shot** timers at the next event: the end time, end − 5 min (the heads-up notification), end − 60 s, the next whole minute (only when the menu bar or Dock shows text), and the escalation thresholds (2/8/24/72 h).
-  - Use wall-clock `Date`s, and re-evaluate on `didWakeNotification` and `NSSystemClockDidChange`.
+  - Use wall-clock `Date`s, and re-evaluate on `didWakeNotification` and `NSSystemClockDidChange`. On a clock change, the jump (wall-clock minus monotonic `systemUptime` since the last pass) moves the duration anchors (`awakeSince`, accounting, lid counters, quip budget, thermal windows) with it; hold end times stay wall-clock. The escalation quip is skipped between `willSleep` and `didWake`.
 - **Notifications** follow `UX.md` §10 (ids and gates). Guard notifications fire **once per engagement per guard**.
 - **Quip budget:** at most one rotating `activated`/`deactivated` quip per 4 h (`PRODUCT.md` §4 rule 11); earned moments are exempt.
-- **Rate limits:** `Stats.addAwakeTime` gets elapsed wall time on each re-evaluation, never per-second increments. The poke counter resets after 8 s idle.
+- **Rate limits:** `Stats.addAwakeTime` gets elapsed wall time on each re-evaluation (never more than the monotonic time that passed), never per-second increments. The poke counter resets after 8 s idle.
 - **First engagement on battery:** if `lidBatteryCalloutShown` is false, set `banner = .lidBatteryCallout` and set the flag.
 
 ### `Core/Narrator.swift` + `Core/Copy/Copy+Professional.swift`, `Copy+Cheeky.swift`, `Copy+Unhinged.swift`
@@ -409,8 +411,10 @@ enum Banner: Equatable {
 @MainActor final class Narrator {
     static let shared: Narrator
     /// Shuffle bag per (moment kind, personality); never the same line twice in a row; bag empties before repeats.
-    /// Returns nil for decorative moments in .professional (idle, awake, poke, milestone, date lines).
+    /// Returns nil for every moment in .professional (no quip row), and never a date line.
     func line(_ m: Moment, _ p: Personality, now: Date = Date()) -> String?
+    /// Earned date line for an `activated` / `idle` moment: 1 in 3 inside a window, at most once per window.
+    func dateLine(_ p: Personality, now: Date) -> String?
     /// Plain in every tier (docs/PRODUCT.md §5 headlines).
     func headline(status: AwakeStatus, lid: LidStatus) -> String
     func subline(status: AwakeStatus, lid: LidStatus, remaining: TimeInterval?, now: Date) -> String
@@ -424,7 +428,7 @@ enum Banner: Equatable {
 ```
 - **Pools:** `[MomentKind: [String]]` static arrays in the Copy files, with placeholders `{name}`, `{floor}`, `{cap}` and `{duration}`.
 - **Pool sizes:** Cheeky and Unhinged each need **≥ 40 lines** in total, and **≥ 10** each for `activated`, `deactivated`, `idle` and `awake` (UX.md §11 has the seeds).
-- **Date-aware lines** (3–5 AM, Oct 31, New Year): replace an `activated` or `idle` line with 1-in-3 probability. Never in Professional.
+- **Date-aware lines** (3–5 AM, Oct 31, New Year): replace an `activated` or `idle` line with 1-in-3 probability, at most once per window. Earned: the engine shows them outside the quip budget without spending it. Never in Professional.
 - **Never in titles:** notification titles and headlines contain no jokes.
 
 ### `Core/Stats.swift`
@@ -465,8 +469,9 @@ Backed by UserDefaults (`stats.*`). Saves at most every 30 s of added time, plus
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable {}
 ```
 - **Gating:** `sessionNotifications` gates `ending-soon`, `ended` and `target-exited`. All other ids always post.
-- **While frontmost:** `willPresent` returns `[.banner]`.
-- **Actions** map to `extend(minutes: 15)`, `deactivate(.user(.notification))`, `ClosedLidController.retry()`, `resetWithPassword()` and `AppRouter.showWhyAwake()`.
+- **Queue:** only posts made before macOS answers the authorization question are queued. At drain time the session gate is re-checked and session notifications older than 5 min are dropped. A cached denial never drops a post (macOS enforces the permission itself).
+- **While frontmost:** `willPresent` returns `[.banner, .list]`.
+- **Actions** map to `extend(minutes: 15)`, "Allow Sleep" = `toggle(source: .notification)` when awake (like the eyes: ends manual/babysit holds and pauses satisfied rules), `ClosedLidController.retry()`, `resetWithPassword()` and `AppRouter.showWhyAwake()`.
 
 ### `Core/HotKeyManager.swift`
 ```swift
@@ -771,7 +776,7 @@ struct URLCommand: Equatable { /* parsed, pure */ static func parse(_ url: URL) 
 | 13 | **Dock on by default (welcome card chooses); time drawn inside the tile, `badgeLabel` only for errors. A Dock-sent reopen toggles; any other reopen opens the panel.** | Dock off by default; every reopen toggles | The user asked for a Dock widget. Spotlight/Finder relaunches also send reopen and must never silently change sleep state. |
 | 14 | **Menu bar: never `statusItem.menu`. Expanded-interface delegate on 27 (after a spike). Timer text defaults to "Last 10 min".** | Always-on timer (draft), `statusItem.menu` | 27.0.1 drops clicks on multi-display setups with `statusItem.menu`, and macOS 27 ejects wide items. |
 | 15 | **No idle animation in the menu bar.** Panel eyes animate only while visible. | Draft blinked or glanced every 6–14 s | Motion in the menu bar wears thin after a week and costs CPU. The panel is where the fun lives. |
-| 16 | **`Narrator` is separate from the engine.** Shuffle-bag pools live in Swift source. Professional returns nil for decorative lines. | `Quips` owned by the engine. JSON resources | Keeps the engine testable and copy swappable. `Bundle.module` breaks in hand-assembled bundles. |
+| 16 | **`Narrator` is separate from the engine.** Shuffle-bag pools live in Swift source. Professional returns nil for every quip line. | `Quips` owned by the engine. JSON resources | Keeps the engine testable and copy swappable. `Bundle.module` breaks in hand-assembled bundles. |
 | 17 | **Typed `GuardReason` / `LidError`**, with no user-facing strings in models | `.suspended("Too hot 🔥")` (draft) | Copy changes by personality, VoiceOver needs stable values, and hysteresis needs typed reasons. |
 | 18 | **Four settings tabs** (General, Automations, Lid & Safety, Diagnostics). About is a sheet. | Five tabs (draft and P2), three tabs (P1) | Diagnostics earns a tab because it holds Why awake and the event log. Shortcuts folds into Automations. |
 | 19 | **Presets 30m/1h/2h/4h/8h/∞ plus Until…, with no Custom stepper.** Default duration is ∞. | P3 default of 60 min, a 15m preset | ∞ matches what Caffeine users expect, and the lid cap covers the bag case. Until… and the CLI cover any odd duration. |

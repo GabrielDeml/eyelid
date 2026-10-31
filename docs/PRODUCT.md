@@ -85,10 +85,10 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 4. **Copy never blocks.** No modal exists to deliver a joke, and a joke never delays a toggle.
 5. **Rotation.** Lines come from a shuffle bag per (moment, personality). A line never shows twice in a row, and the bag empties before any line repeats. The same line never appears in the panel and a notification at once: the notification gets the line, the banner states the plain fact.
 6. **Pool sizes.** Cheeky and Unhinged each have **≥ 40 lines** in total, with **≥ 10** for each of `activated`, `deactivated`, `idle` and `awake`. Rare moments have ≥ 3 each.
-7. **Professional is really plain.** `Narrator.line()` returns `nil` for decorative moments (`idle`, `poke`, `milestone`, `awake`), and the UI hides the row.
+7. **Professional is really plain.** `Narrator.line()` returns `nil` for every moment, so a Professional moment never spends the quip budget, and the UI hides the row. Its plain lines appear only in notification bodies.
 8. **Labels are plain in every tier.** Control labels, VoiceOver labels and menu items never change with personality. Nicknames live only in tooltips and copy.
 9. **Silence is a valid line.** Most state changes update only the headline. The quip row changes at most once per state change.
-10. **Earned moments** (exempt from the budget): milestones (each once, ever), the first lid engagement of the day, the mission report, crash recovery, the poke egg, date lines. Four are **epic** (panel only; Reduce Motion crossfades, `UX.md` §2.4):
+10. **Earned moments** (exempt from the budget): milestones (each once, ever), the first lid engagement of the day, the mission report, crash recovery, the poke egg, date lines (1 in 3, at most once per date window). Four are **epic** (panel only; Reduce Motion crossfades, `UX.md` §2.4):
     - **First wake:** on first launch the eyes slowly open (600 ms), blink twice, find the cursor, then the welcome card appears.
     - **Night vision:** the first lid engagement each day sweeps an indigo glow across the eyes (400 ms); the Dock tile pulses once.
     - **Mission report:** reopening after ≥ 5 min closed turns the banner into a card with counting-up numbers and one line.

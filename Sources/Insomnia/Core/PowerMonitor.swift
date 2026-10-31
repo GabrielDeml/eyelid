@@ -27,7 +27,9 @@ extension PowerReading {
 
 /// Battery, AC, thermal, Low Power Mode, lid and display state. Event-driven only: no polling timers
 /// (ClosedLidController adds a 5 s clamshell poll while engaged). Posts `.insomniaPowerDidChange` only when a value
-/// actually changes. ARCHITECTURE.md "Core/PowerMonitor.swift".
+/// actually changes, and at most once per refresh, after every field of that refresh is updated: observers never see
+/// a half-updated state (e.g. the new battery percent with the old power source). ARCHITECTURE.md
+/// "Core/PowerMonitor.swift".
 @MainActor
 @Observable
 final class PowerMonitor: PowerReading {
@@ -74,7 +76,7 @@ final class PowerMonitor: PowerReading {
         // Lid: clamshell interest notifications (no 2 s poll).
         if hasLid {
             clamshellToken = RootDomain.observeClamshell { [weak self] closed, _ in
-                self?.set(\.isLidClosed, closed)
+                self?.batched { $0.set(\.isLidClosed, closed) }
             }
         }
 
@@ -102,39 +104,47 @@ final class PowerMonitor: PowerReading {
     /// Re-reads the lid from IORegistry. ClosedLidController's 5 s engaged-only poll calls this.
     func refreshLid() {
         let closed = RootDomain.clamshellClosed()
-        set(\.hasLid, closed != nil)
-        set(\.isLidClosed, closed ?? false)
+        batched {
+            $0.set(\.hasLid, closed != nil)
+            $0.set(\.isLidClosed, closed ?? false)
+        }
     }
 
     // MARK: Refresh
 
     private func refreshAll(post: Bool) {
-        let before = snapshot
-        suppressPosting = true
-        refreshPowerSources()
-        refreshThermalAndLPM()
-        refreshLid()
-        refreshDisplays()
-        suppressPosting = false
-        if post, snapshot != before { postChange() }
+        batched(post: post) { monitor in
+            monitor.refreshPowerSources()
+            monitor.refreshThermalAndLPM()
+            monitor.refreshLid()
+            monitor.refreshDisplays()
+        }
     }
 
     private func refreshPowerSources() {
-        let reading = PowerSourceReading.current()
-        set(\.hasBattery, reading.hasBattery)
-        set(\.batteryPercent, reading.percent)
-        set(\.isOnAC, reading.isOnAC)
-        set(\.isCharging, reading.isCharging)
+        apply(PowerSourceReading.current())
+    }
+
+    /// One IOPS reading, applied as a unit (internal so tests can drive it without IOKit).
+    func apply(_ reading: PowerSourceReading) {
+        batched {
+            $0.set(\.hasBattery, reading.hasBattery)
+            $0.set(\.batteryPercent, reading.percent)
+            $0.set(\.isOnAC, reading.isOnAC)
+            $0.set(\.isCharging, reading.isCharging)
+        }
     }
 
     private func refreshThermalAndLPM() {
         let info = ProcessInfo.processInfo
-        set(\.thermalState, info.thermalState)
-        set(\.isLowPowerMode, info.isLowPowerModeEnabled)
+        batched {
+            $0.set(\.thermalState, info.thermalState)
+            $0.set(\.isLowPowerMode, info.isLowPowerModeEnabled)
+        }
     }
 
     private func refreshDisplays() {
-        set(\.externalDisplayCount, Self.countExternalDisplays())
+        batched { $0.set(\.externalDisplayCount, Self.countExternalDisplays()) }
     }
 
     private static func countExternalDisplays() -> Int {
@@ -147,7 +157,9 @@ final class PowerMonitor: PowerReading {
 
     // MARK: Change tracking
 
-    @ObservationIgnored private var suppressPosting = false
+    /// Nesting depth of `batched` and the snapshot taken when the outermost batch began.
+    @ObservationIgnored private var batchDepth = 0
+    @ObservationIgnored private var batchStart: Snapshot?
 
     private struct Snapshot: Equatable {
         var hasBattery: Bool, percent: Int?, isOnAC: Bool, isCharging: Bool
@@ -160,11 +172,22 @@ final class PowerMonitor: PowerReading {
                  ext: externalDisplayCount)
     }
 
-    /// Assigns only real changes (so @Observable doesn't churn SwiftUI) and posts once per change.
+    /// Runs `body` as one refresh: posts once at the end of the outermost batch if anything changed (and `post`).
+    /// Nestable, so `refreshAll` can call the single-source refreshes.
+    private func batched(post: Bool = true, _ body: (PowerMonitor) -> Void) {
+        if batchDepth == 0 { batchStart = snapshot }
+        batchDepth += 1
+        body(self)
+        batchDepth -= 1
+        guard batchDepth == 0, let before = batchStart else { return }
+        batchStart = nil
+        if post, snapshot != before { postChange() }
+    }
+
+    /// Assigns only real changes (so @Observable doesn't churn SwiftUI). Call inside `batched`, which posts.
     private func set<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<PowerMonitor, T>, _ value: T) {
         guard self[keyPath: keyPath] != value else { return }
         self[keyPath: keyPath] = value
-        if !suppressPosting { postChange() }
     }
 
     private func postChange() {

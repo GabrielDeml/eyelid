@@ -143,7 +143,7 @@ Height budget: header 96 · chips 28 · F 28 · G+H+H′ 72 · J 34, plus separa
 Variants:
 
 - **Asleep:** the eyes are closed with a floating "z", the headline is "Sleep allowed", and the subline is "Click the eyes to stay awake".
-- **Safety banner** (battery floor, heat, crash recovery, mission report): **replaces row J** with an icon, plain text and a ✕. Stays until dismissed or the next state change.
+- **Safety banner** (battery floor, heat, crash recovery, mission report): **replaces row J** with an icon, plain text and a ✕. Stays until dismissed or the next state change (the lid opening or closing while lid mode stays engaged isn't one). The crash-recovery banner stays until dismissed.
 - **First-run card** (§7.1): shown above row E on first launch only.
 
 ### 2.2 Element specs
@@ -534,21 +534,22 @@ The egg is off in Professional (the toggles still work).
 | `recovered` | Launch recovery reset the flag | always | "Normal sleep restored" | `recovered` pool | none |
 | `target-exited` | Babysit target exited and the hold ended | `sessionNotifications` | "ffmpeg finished" | e.g. "Babysitting shift over." | none |
 
-- **Authorization:** requested at welcome-card "Got it", at lid setup success (step 3), and when `sessionNotifications` is switched on. Posts made before the answer are queued, so the first safety notification is never lost.
-- **While the app is frontmost:** `willPresent` returns `[.banner]` only.
+- **Authorization:** requested at welcome-card "Got it", at lid setup success (step 3), and when `sessionNotifications` is switched on. Posts made before the answer are queued, so the first safety notification is never lost. When the queue drains, the gate is checked again and session notifications (`ending-soon`, `ended`, `target-exited`) older than 5 minutes are dropped. A remembered denial never drops a post: macOS enforces it, so turning notifications on in System Settings takes effect without a relaunch.
+- **Allow Sleep** does what clicking the eyes does: ends manual and While… holds and pauses satisfied rules.
+- **While the app is frontmost:** `willPresent` returns `[.banner, .list]` (still no sound), so the notification also stays in Notification Center.
 
 ---
 
 ## 11. Copy deck (seed lines; full pools live in `Sources/Insomnia/Core/Copy/Copy+<Tier>.swift`)
 
-Professional has one or two lines per moment; `nil` means the row is hidden.
+Professional has no quip row: `Narrator.line` is `nil` for every moment. Its one or two lines per pool exist only for notification bodies (and `lid engaged` for the Settings sample); `nil` means no pool.
 
 | Moment | Professional | Cheeky | Unhinged |
 |---|---|---|---|
-| **activated** | Keeping your Mac awake for {duration}. | Eyes open. Blinking is for quitters. | I have had eleven espressos and I can see sounds. |
+| **activated** | nil | Eyes open. Blinking is for quitters. | I have had eleven espressos and I can see sounds. |
 |  |  | Wide awake. Coffee optional. | Sleep is a construct. Constructs are optional. |
 |  |  | On it. Nobody naps on my watch. | I HAVE NOT BLINKED SINCE TUESDAY. |
-| **deactivated** (user) | Sleep is allowed. | Okay, okay. Resting my eyes. | Fine. FINE. Goodnight. (I'll be thinking.) |
+| **deactivated** (user) | nil | Okay, okay. Resting my eyes. | Fine. FINE. Goodnight. (I'll be thinking.) |
 |  |  | Clocking out. Sweet dreams, little Mac. | Closing my eyes. Not sleeping. Never sleeping. |
 | **deactivated** (timer) | The timer ran out. | Timer's up. Goodnight, sweet Mac. | The prophecy is fulfilled. I may rest. |
 | **idle** (panel opens while asleep, ≤ 1/day) | nil | Off duty. One eye open. Metaphorically. | zzz… (I am pretending. Click me.) |
@@ -557,16 +558,16 @@ Professional has one or two lines per moment; `nil` means the row is hidden.
 | **awake 8h+** | nil | A full workday. The owl union sends regards. | Eight hours. I've started naming the fans. |
 | **awake 24h+** | nil | A whole day. I've seen things. Mostly your tabs. | 24 hours. The progress ring went all the way round. So did I. |
 | **awake 72h+** | nil | Three days. Respectfully, have you tried rebooting? | I can see new colours. One of them is "uptime". |
-| **watching** | Keeping awake while ffmpeg is running. | Watching ffmpeg like a hawk. A sleepy hawk. | Babysitting `claude`. We've agreed nobody naps. |
+| **watching** | nil | Watching ffmpeg like a hawk. A sleepy hawk. | Babysitting `claude`. We've agreed nobody naps. |
 | **target exited** | Insomnia stopped keeping your Mac awake. | ffmpeg's done. Babysitting shift over. | The child has left the nest. I may now weep and nap. |
 | **lid engaged** | Lid mode is on. | Lid mode on. I'll watch through the lid. Don't ask. | The lid is a suggestion. I reject suggestions. |
 | **lid reopened** | (report only) | Welcome back. I kept the lights on in here. | You opened the lid. I never closed my eyes. One of us is a professional. |
 | **thermal** | Make sure it has airflow and isn't in a bag. | Getting toasty in here. Is this a bag? | IT IS HOT IN HERE. Is there a bag involved? Pausing. |
-| **low power mode** | Paused: Low Power Mode is on. | Low Power Mode. I'll keep it low-key. | Low Power Mode detected. Entering a whisper. |
+| **low power mode** | nil | Low Power Mode. I'll keep it low-key. | Low Power Mode detected. Entering a whisper. |
 | **battery floor** | Your Mac will sleep normally. | {floor}%. Lid mode's tapping out so your Mac doesn't. | Battery at {floor}%. I go down with the ship. Your Mac doesn't. |
 | **recovered** | Restored normal sleep after an unexpected quit. | I left the lights on last time. Fixed. | Crashed last time. I cleaned up after myself. Sleep works normally. |
-| **setup done** | Lid mode is ready. | All set. Lid mode is standing by. | The ritual is complete. The lid holds no power over us now. |
-| **setup cancelled** | Setup skipped. | No worries. The lid wins this round. | Declined. Respect. I'll be here. Waiting. |
+| **setup done** | nil | All set. Lid mode is standing by. | The ritual is complete. The lid holds no power over us now. |
+| **setup cancelled** | nil | No worries. The lid wins this round. | Declined. Respect. I'll be here. Waiting. |
 | **poke 5** | n/a | Ow. | You've poked me 5 times. HR has been notified. |
 | **poke 10** | n/a | I'm going to need you to stop. | I'm calling my lawyer. My lawyer is also an app. |
 | **poke 20** | n/a | Now I'm cross-eyed. Happy? | I CAN SEE MY OWN NOSE AND I DON'T HAVE ONE. |
@@ -579,7 +580,7 @@ Professional has one or two lines per moment; `nil` means the row is hidden.
 
 **Escalation buckets:** `.awake(hours:)` fires on entering 2, 8, 24 and 72 h of continuous awake. Each bucket fires once per hold. **Quip budget** and Professional placement: `PRODUCT.md` §4 rules 7 and 11 (Professional lines appear only in notification bodies). `{floor}`, `{cap}` (battery cap), `{acCap}` and `{duration}` are filled from Settings and the hold; never hard-code them.
 
-**Date lines:** they replace an `activated` or `idle` line with 1-in-3 probability when their window matches. Never in Professional.
+**Date lines:** they replace an `activated` or `idle` line with 1-in-3 probability when their window matches, at most once per window. They are earned, so they neither wait for nor spend the quip budget, and a date line on panel open doesn't use up the day's `idle` line. Never in Professional.
 
 ---
 

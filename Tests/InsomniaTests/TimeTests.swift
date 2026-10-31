@@ -173,7 +173,6 @@ struct MultiDayHoldTests {
         let end = now.addingTimeInterval(2 * 86_400 + 47 * 60)
         let hold = Hold(owner: .manual(.cli), options: .systemOnly, start: now, end: end)
         #expect(WhyAwakeReport.durationText(hold) == "until " + TimeFormat.endTime(end))
-        #expect(Narrator.durationPhrase(.until(end)) == "until " + TimeFormat.endTime(end))
     }
 }
 

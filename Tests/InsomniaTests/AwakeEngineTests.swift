@@ -7,7 +7,13 @@ import Testing
 @MainActor
 final class TestClock {
     var now = Date(timeIntervalSinceReferenceDate: 800_000_000)
-    func advance(_ seconds: TimeInterval) { now = now.addingTimeInterval(seconds) }
+    /// Monotonic time: moves with `advance`, not with `jump` (a wall-clock change).
+    var uptime: TimeInterval = 1_000
+    func advance(_ seconds: TimeInterval) {
+        now = now.addingTimeInterval(seconds)
+        uptime += seconds
+    }
+    func jump(_ seconds: TimeInterval) { now = now.addingTimeInterval(seconds) }
 }
 
 @MainActor
@@ -44,13 +50,20 @@ final class FakeLid: LidControlling {
     var reopenReport: ReopenReport?
     var onChange: (@MainActor () -> Void)?
     private(set) var desiredLog: [Bool] = []
+    private(set) var retries = 0
+    private(set) var quitReleases = 0
     var desired: Bool? { desiredLog.last }
 
     func start() async {}
-    func recoverIfNeeded() async -> Bool { false }
+    var recovers = false
+    func recoverIfNeeded() async -> Bool { recovers }
     func refreshHelper() async {}
     func setDesired(_ engaged: Bool) { desiredLog.append(engaged) }
-    func releaseForQuit(timeout: Duration) async { status = .off }
+    func retry() { retries += 1 }
+    func releaseForQuit(timeout: Duration) async {
+        quitReleases += 1
+        status = .off
+    }
     func sleepNow() async {}
 
     /// Simulates the reconciler converging on the desired flag.
@@ -102,11 +115,13 @@ struct Harness {
     let settings: Settings
     let engine: AwakeEngine
 
-    init(lidController: Bool = true) {
-        let defaults = ScratchDefaults.make("Engine")
+    /// `defaults`: share one store between harnesses (state that outlives a run); `bootID`: the boot the engine sees.
+    init(lidController: Bool = true, defaults: UserDefaults = ScratchDefaults.make("Engine"),
+         bootID: String? = "boot-1") {
         settings = Settings(defaults: defaults)
         let clock = clock
-        engine = AwakeEngine(settings: settings, power: power, assertions: assertions, clock: { clock.now })
+        engine = AwakeEngine(settings: settings, power: power, assertions: assertions, clock: { clock.now },
+                             uptime: { clock.uptime }, bootID: { bootID })
         if lidController { engine.lidController = lid }
         engine.watchMonitor = watch
         engine.stats = stats
