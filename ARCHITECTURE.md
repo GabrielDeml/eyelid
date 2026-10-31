@@ -33,26 +33,27 @@ Read these first. They are the product and UX source of truth, and this file imp
 |---|---|---|---|
 | `Insomnia` | executable | `Contents/MacOS/Insomnia` | The app, CLI dispatch, `HelperBackend` + `SudoersBackend` |
 | `InsomniaHelper` | executable | `Contents/MacOS/InsomniaHelper` | Root launchd daemon (`CLOSED_LID.md` §2.5). Foundation + IOKit + Security only, no AppKit. |
-| `InsomniaShared` | library (static, linked into both) | n/a | `HelperProtocol` (the XPC `@objc` protocol), `HelperResult`, `HelperInfo` (label, Mach name, plist name, install path, constants, requirement builders + validator), `CodeSignature` (own Team ID + kernel cdhash, `readSelf()`), `InstallLocation` (root-owned bundle check) |
+| `InsomniaShared` | library (static, linked into both) | n/a | `HelperProtocol` (the XPC `@objc` protocol), `HelperResult`, `HelperInfo` (label, Mach name, plist name, install path, constants, requirement builders + validator), `CodeSignature` (own Team ID + kernel cdhash, `readSelf()`), `InstallLocation` (root-owned bundle check), `Spawn` (fixed argv, explicit environment, timeout), `HelperPolicy` + `HelperPaths` (the helper's decisions as pure, unit-tested functions) |
 
 - **No Xcode project, no app extensions, no third-party dependencies.**
 - **Frameworks:** AppKit, SwiftUI, IOKit, Carbon (hotkey), ServiceManagement (launch at login, helper daemon), Security (code signatures), UserNotifications.
 - **`scripts/build.sh`** (the build/sign pipeline; `set -euo pipefail`):
-  1. **Identity.** `$INSOMNIA_SIGN_IDENTITY`; unset → `security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1`; none found → **exit 1** ("set `INSOMNIA_SIGN_IDENTITY=-` for an unsigned build, which uses the sudoers fallback"). Ad hoc only when `-` is given explicitly, and then refuse (exit 1) if `/Applications/Insomnia.app/Contents/MacOS/Insomnia --helper-status` exits 0 (a signed helper is registered; remove it first with `make uninstall`). Optional `INSOMNIA_SIGN_KEYCHAIN`: `security unlock-keychain` (prompts), sign with `--keychain`, `security lock-keychain` in an `EXIT` trap (`CLOSED_LID.md` §2.2).
+  1. **Identity.** `$INSOMNIA_SIGN_IDENTITY`; unset → `security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1`; none found → **exit 1** ("set `INSOMNIA_SIGN_IDENTITY=-` for an unsigned build, which uses the sudoers fallback"). Ad hoc only when `-` is given explicitly, and then refuse (exit 1) if `/Applications/Insomnia.app/Contents/MacOS/Insomnia --helper-status` exits 0 (a signed helper is registered; remove it first with `make uninstall`). A named identity that `security find-identity` doesn't list → **exit 1** before compiling. Optional `INSOMNIA_SIGN_KEYCHAIN`: `security unlock-keychain` (prompts), sign with `--keychain`, `security lock-keychain` in an `EXIT` trap (`CLOSED_LID.md` §2.2).
   2. `swift build -c release` (all three targets); `BIN=$(swift build -c release --show-bin-path)` (Xcode 27: `.build/out/Products/Release`).
   3. **Assemble fresh** in a staging dir (`mktemp -d build/.stage.XXXXXX`): `ditto` `$BIN/Insomnia` and `$BIN/InsomniaHelper` into `Contents/MacOS/` (no `.dSYM`), `Resources/Info.plist` → `Contents/Info.plist`. Never copy onto an existing signed binary (per-vnode signature cache → SIGKILL).
   4. Generate `AppIcon.icns` by running the built binary with `--export-icon <dir>.iconset`, then `iconutil -c icns`.
-  5. **Strip rpaths** from both binaries (`install_name_tool -delete_rpath` for every `LC_RPATH`), then require `otool -l | grep LC_RPATH` to be empty and `otool -L` to list only `/usr/lib/` and `/System/`.
+  5. **Strip rpaths** from both binaries (`install_name_tool -delete_rpath` for every `LC_RPATH`), then require `otool -l | grep LC_RPATH` to be empty and `otool -L` to list only `/usr/lib/` and `/System/`. **Stamp the real SDK** (`vtool -set-build-version macos <min> $(xcrun --sdk macosx --show-sdk-version) -replace`): SwiftPM records sdk = the deployment target, and AppKit picks "linked on or after" behaviour from it.
   6. Sign the helper: `codesign --force --options runtime --timestamp=none --identifier com.gdeml.Insomnia.helper --sign "$ID" …/MacOS/InsomniaHelper` (`--identifier` is required: SwiftPM's own signature says `InsomniaHelper`).
   7. **Signed builds, once the helper is implemented (M2):** read the helper's `CDHash` and `TeamIdentifier` (`codesign -dvvv`), fill `Resources/com.gdeml.Insomnia.helper.plist.in` (`__TEAM_ID__`, `__HELPER_CDHASH_BASE64__`, `CLOSED_LID.md` §2.3), `plutil -lint`, place it at `Contents/Library/LaunchDaemons/com.gdeml.Insomnia.helper.plist`. Ad-hoc builds and the M1 stub get **no** daemon plist.
   8. Sign the app (no `--deep`), which seals the plist: `codesign --force --options runtime --timestamp=none --sign "$ID" <stage>/Insomnia.app`. No entitlements file.
-  9. **Verify:** `codesign --verify --strict --deep`; `plutil -lint` both plists; signed builds: `TeamIdentifier` equal for both, `flags=0x10000(runtime)` on both, `codesign -v -R "=<HelperInfo.clientRequirement>"` on the app and `helperRequirement` on the helper; fail if `codesign -d --entitlements -` shows any of `get-task-allow`, `disable-library-validation`, `allow-dyld-environment-variables`, `allow-unsigned-executable-memory`, `disable-executable-page-protection`, `allow-jit`.
+  9. **Verify:** `codesign --verify --strict --deep`; `plutil -lint` both plists; signed builds: `TeamIdentifier` equal for both, `flags=0x10000(runtime)` on both, `codesign -v -R "=<HelperInfo.clientRequirement>"` on the app and `helperRequirement` on the helper; daemon plist `Label`, `MachServices`, `BundleProgram`, `KeepAlive {SuccessfulExit: false}`, `RunAtLoad true`, `SpawnConstraint` team/identifier/cdhash; every binary's `vtool -show-build` sdk equals the SDK; `Insomnia --version` equals `CFBundleShortVersionString`; fail if `codesign -d --entitlements -` shows any of `get-task-allow`, `disable-library-validation`, `allow-dyld-environment-variables`, `allow-unsigned-executable-memory`, `disable-executable-page-protection`, `allow-jit`.
   10. Rename the staging bundle over `build/Insomnia.app` (old one renamed aside, then deleted).
   - No notarization for local use (pending `CLOSED_LID.md` §10 #6). Developer ID + notarization only for distributing to others (Later).
 - **`Makefile`:**
   - `make` builds the app; `make run`.
-  - `make install`: requires a signed build. `sudo ditto build/Insomnia.app /Applications/.Insomnia.app.new`, `sudo chown -R root:wheel` and `sudo chmod -R go-w` it, rename any old copy aside, rename the new one to `/Applications/Insomnia.app`, delete the old one. Lid mode is set up **only** from this copy (`CLOSED_LID.md` §2.3); the next launch re-registers a changed helper silently.
-  - `make uninstall`: `/Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper`, then `sudo rm -rf /Applications/Insomnia.app`.
+  - `make install`: requires a signed build. `sudo mktemp -d /Applications/.insomnia.XXXXXX` (root-owned, `0755`, same volume), `sudo ditto build/Insomnia.app` into it, `sudo chown -R root:wheel` and `sudo chmod -R go-w` it, then **verify the staged copy** (`scripts/lid-verify.sh --staged`: seal, both code requirements, the pinned helper cdhash, `RunAtLoad`, root ownership); only then rename any old copy into the staging dir, rename the new one to `/Applications/Insomnia.app`, and delete the staging dir. Lid mode is set up **only** from this copy (`CLOSED_LID.md` §2.3); the next launch re-registers a changed helper silently.
+  - `make uninstall`: `/Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper`, removes sudoers-fallback leftovers if present (`CLOSED_LID.md` §9: bootout the safety daemon, its plist, the sudoers rule, the lid marker), then `sudo rm -rf /Applications/Insomnia.app`.
+  - `make snapshot`: debug build, `Insomnia --snapshot build/snapshots` (the snapshot renderer is compiled into debug builds only).
   - `make clean`: `rm -rf build .build` (no registration ever points into `build/`).
 - **Identifiers:**
   - bundle id `com.gdeml.Insomnia`; URL scheme `insomnia://`
@@ -68,13 +69,13 @@ Read these first. They are the product and UX source of truth, and this file imp
   - `main.swift` starts with `signal(SIGPIPE, SIG_IGN)`; sockets also set `SO_NOSIGPIPE` and the watchdog pipe `F_SETNOSIGPIPE`.
   - C callbacks (IOKit, IOPS, Carbon) re-enter with `MainActor.assumeIsolated { }`. Use this **not** `Task { }`, so events stay ordered. The callbacks are registered on the main run loop.
   - The helper keeps all state on one serial queue; XPC exported-object methods hop onto it.
-- **Tests (optional, encouraged):** a `Tests/InsomniaTests` target using `@testable import Insomnia` for `Policy`, `Narrator`, `URLCommand` and `ControlProtocol` parsing, plus `HelperInfo` requirement strings. These are pure, so they need no AppKit runtime.
+- **Tests:** the `InsomniaTests` target (`Tests/InsomniaTests`, Swift Testing, `@testable import Insomnia`; run `swift test`) covers `Policy`, the lid latch/counters, `TickPlanner`, durations/`TimeFormat`, and `AwakeEngine` wired to fakes (`PowerReading`, `AssertionApplying`, `LidControlling`, … — no real assertions or IORegistry writes). Add `Narrator`, `URLCommand` and `ControlProtocol` parsing and `HelperInfo` requirement strings as those land.
 
 ## Shared files (WRITTEN; code against them, don't change signatures without updating the docs)
 
 | File | Contents |
 |---|---|
-| `Sources/Insomnia/Core/Models.swift` | `AwakeDuration` (presets 30m/1h/2h/4h/8h/∞, `nextOccurrence`), `SessionSource`, `WatchTarget`, `AwakeOptions`, `HoldOwner`, `Hold`, `RuleCondition`, `Rule`, `GuardReason`, `PrivilegeBackendKind`, `HelperStatus`, `LidError`, `LidSetupError`, `LidStatus`, `AwakeStatus`, `EyeMood(status:lid:)`, `DeactivationReason`, `Moment`, `Personality`, `ClickAction`, `MenuBarTimerStyle`, `SettingsTab`, `Notification.Name.insomnia*`, `AppRouter`, `TimeFormat` |
+| `Sources/Insomnia/Core/Models.swift` | `AwakeDuration` (presets 30m/1h/2h/4h/8h/∞, `nextOccurrence`), `SessionSource`, `WatchTarget`, `AwakeOptions`, `HoldOwner`, `Hold`, `RuleCondition`, `Rule`, `GuardReason`, `PrivilegeBackendKind`, `HelperStatus`, `LidError`, `LidSetupError`, `LidStatus`, `ReopenReport`, `NotificationID`, `AwakeStatus`, `EyeMood(status:lid:)`, `DeactivationReason`, `Moment`, `Personality`, `ClickAction`, `MenuBarTimerStyle`, `SettingsTab`, `Notification.Name.insomnia*`, `AppRouter`, `TimeFormat` |
 | `Sources/Insomnia/Core/Settings.swift` | `Settings.shared`: `@Observable`, backed by UserDefaults, posts `.insomniaSettingsDidChange` with `userInfo["key"]` = the UserDefaults key. Clamps the battery floor to 10–50 and snaps the caps in setters (no `didSet` recursion): `lidMaxOnBatteryMinutes` to 15/30/60/120/240/480 (default 60, always on), `lidMaxOnACMinutes` to 60/120/240/480/720/1440 (default 240, used only when `lidCapOnACEnabled`, default false). Bookkeeping: `helperRegisteredCDHash` (bundled helper cdhash at the last `register()`). |
 | `Sources/InsomniaShared/HelperProtocol.swift` | `@objc(INSHelperProtocol) HelperProtocol` (`status`, `engage`, `release`, `heartbeat`), `HelperResult` (incl. `.otherUser`) |
 | `Sources/InsomniaShared/HelperInfo.swift` | `HelperInfo` (label, Mach service, plist name, `installedAppPath`, bundled paths, `version`, `sleepDisabledKey`, heartbeat 10 s / timeout 45 s, backstop 10% / poll ≤ 15% every 60 s, `clientRequirement(teamID:)`, `helperRequirement(teamID:)`, `isValidRequirement(_:)`), `CodeSignature` (`readSelf()` → Team ID + kernel cdhash + `matchesDisk`, `currentTeamID()`, `cdhash(ofFileAt:)`), `InstallLocation.check(bundle:)` |
@@ -103,7 +104,8 @@ Service lookup: `IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatchi
 ### `Core/PowerAssertions.swift`
 ```swift
 /// Thin IOKit wrapper. Idempotent: creates/releases only when the desired set changes.
-@MainActor final class PowerAssertions {
+@MainActor protocol AssertionApplying: AnyObject { /* update, releaseAll, hasSystemAssertion, hasDisplayAssertion */ }  // tests inject a fake
+@MainActor final class PowerAssertions: AssertionApplying {
     init()
     /// system → kIOPMAssertionTypePreventUserIdleSystemSleep; display → kIOPMAssertionTypePreventUserIdleDisplaySleep.
     /// `reason` shows in `pmset -g assertions`, e.g. "Insomnia: 1h timer" / "Insomnia: watching ffmpeg".
@@ -117,7 +119,8 @@ There is no `declareUserActivity`; "Look busy" is cut (see the Decisions log). W
 
 ### `Core/PowerMonitor.swift`
 ```swift
-@MainActor @Observable final class PowerMonitor {
+@MainActor protocol PowerReading: AnyObject { /* the read-only properties below */ }   // + isClosedWithoutExternalDisplay, isBag; tests inject a fake
+@MainActor @Observable final class PowerMonitor: PowerReading {
     static let shared: PowerMonitor
     private(set) var hasBattery: Bool
     private(set) var batteryPercent: Int?        // nil when no battery
@@ -129,6 +132,7 @@ There is no `declareUserActivity`; "Look busy" is cut (see the Decisions log). W
     private(set) var isLidClosed: Bool            // RootDomain; false on desktops
     private(set) var externalDisplayCount: Int    // online displays where !CGDisplayIsBuiltin
     func start()                                  // idempotent
+    func refreshLid()                             // re-read IORegistry; ClosedLidController's engaged-only 5 s poll
 }
 ```
 | Value | Source | Refreshed by |
@@ -223,7 +227,7 @@ final class Watchdog {
     /// Sleep Now: release the flag (await), then `/usr/bin/pmset sleepnow`.
     func sleepNow() async
 }
-struct ReopenReport: Equatable { var closedFor: TimeInterval; var batteryStart: Int?; var batteryEnd: Int?; var worstThermal: ProcessInfo.ThermalState }
+// ReopenReport { closedFor, batteryStart, batteryEnd, worstThermal } is declared in Models.swift (the engine needs it from M1).
 ```
 
 **Internal `actor LidReconciler`.** It owns the backend session and runs the **Engage**, **Release**, **Drift**, **Quit** and **Launch recovery** sequences from `docs/CLOSED_LID.md` §4.3, plus every `SMAppService` and signature read. The marker file is `~/Library/Application Support/Insomnia/lid-engaged`. While engaged: a 10 s main-actor heartbeat timer (`backend.heartbeat()`, added with `RunLoop.main.add(_:forMode: .common)`, tolerance 1 s) and `ProcessInfo.beginActivity(.userInitiatedAllowingIdleSystemSleep)` (no App Nap).
@@ -274,8 +278,9 @@ This is called only on demand: the ⌥-click menu, the Diagnostics tab and `inso
 
 ### `Core/Policy.swift`: pure evaluation (unit-test this)
 ```swift
-struct PolicyInput: Equatable {
+struct PolicyInput: Equatable {                    // every field has a default (tests set what they need)
     var holds: [Hold]
+    var ruleConditions: [Rule.ID: RuleCondition]   // for .automatic([RuleCondition])
     var hasBattery: Bool; var batteryPercent: Int?; var isOnAC: Bool
     var thermal: ProcessInfo.ThermalState; var lowPowerMode: Bool
     var batteryFloor: Int; var awakeBatteryFloorEnabled: Bool; var lidRequiresAC: Bool
@@ -293,12 +298,24 @@ struct PolicyOutput: Equatable {
     var lidAllowed: Bool                           // wantLid && no lid guards (helper, hasLid, latch checked by engine)
     var status: AwakeStatus
     var endManualForBatteryFloor: Bool
+    var thermalBagFairSince: Date?; var thermalClearSince: Date?   // fed back into the next PolicyInput
+    var recheckAt: Date?                           // thermal 5 min / 60 s windows; the engine schedules a re-evaluation
+    var lidGuards: [GuardReason] { get }           // tripped lid guards in Policy.lidGuardPriority order
 }
-enum Policy { static func evaluate(_ input: PolicyInput) -> PolicyOutput }
+enum Policy {
+    static func evaluate(_ input: PolicyInput) -> PolicyOutput
+    static let lidGuardPriority: [GuardReason]     // batteryFloor, thermal, lowPowerMode, acRequired, lidBatteryCap, lidACCap
+    static func desiredLid(lidAllowed:hasLid:helper:latched:) -> Bool                          // engine step 6
+    static func latch(previous:lidGuardTripped:isLidClosed:lidOpened:userAction:) -> Bool      // engine step 6
+    static func lidStatus(controller:wantLid:hasLid:helper:lidGuards:latched:) -> LidStatus    // engine step 7
+}
+struct LidCloseCounters { advance(to:mode:), lidOpened(at:), capDeadline(…), bagSeconds, closedACSeconds }  // CLOSED_LID.md §5
 ```
 - **Guard trip and clear rules:** exactly as in `docs/CLOSED_LID.md` §6. Hysteresis uses `previousGuards`: +3% on the battery floors; thermal clears after its trip condition is false for 60 s.
 - **`status` priority:** `suspended(.awakeBatteryFloor)` > manual (`timed` / `indefinite`) > `watching` (babysit) > `client` > `automatic` > `asleep`. `endManualForBatteryFloor` only for `awakeBatteryFloor`.
 - **Display assertion:** `assertDisplay` = any live hold has `options.screen`. The engine forces it to false while the lid is closed and engaged.
+- **Latch:** set while any lid guard is tripped with the lid closed (tripped while closed, or closed while tripped); a user action clears it only if no lid guard is still tripped inside the closed lid.
+- **Desktops:** `!hasLid` → `lid == .off` whatever the holds ask for.
 
 ### `Core/AwakeEngine.swift`: the brain
 ```swift
@@ -324,8 +341,9 @@ enum Policy { static func evaluate(_ input: PolicyInput) -> PolicyOutput }
     func deactivate(_ r: DeactivationReason)       // ends manual + babysit holds (rules/clients unaffected)
     /// isAwake → deactivate(.user) + pause satisfied rules until each goes false→true; else activate(default).
     /// Client-only → no-op (UI disables the control).
-    func toggle(source: SessionSource)
-    func extend(minutes: Int)                      // timed: push end; indefinite: no-op; none: activate(.minutes)
+    func toggle(source: SessionSource, options: AwakeOptions? = nil)   // options: as activate (URL: fixed, lid false)
+    func extend(minutes: Int, source: SessionSource = .panel, options: AwakeOptions? = nil)
+        // timed: push end; indefinite: no-op; none: activate(.minutes, options); from .urlScheme a lid hold is left alone
     func babysit(_ t: WatchTarget)                 // replaces babysit hold; followsSettings
     func releaseBabysit()
     func beginClientHold(connection: UUID, label: String, options: AwakeOptions)
@@ -334,8 +352,21 @@ enum Policy { static func evaluate(_ input: PolicyInput) -> PolicyOutput }
     func setPanelVisible(_ v: Bool)                // 1 Hz ticks while visible
     func poke()                                    // panel eyes rapid-click counter (UX §9)
     func dismissBanner()
+    func showBanner(_ b: Banner)                   // e.g. .setupResult from the lid setup flow
+    func narrate(_ m: Moment)                      // .setupDone / .setupCancelled from the lid setup flow (quip row)
     func prepareForQuit() async                    // releaseAll + ClosedLidController.releaseForQuit(timeout: .seconds(2))
     private(set) var pausedRuleIDs: Set<Rule.ID>   // paused by the eyes; a rule unpauses once its condition is false
+    // Also read-only: latched, awakeSince (eye bags), pokeCount, isPanelVisible, lidBagSeconds, lidClosedACSeconds,
+    // clientHolds, ruleHolds, isHeldOnlyByClients, lidGuards, canEngageLid (hasLid && helper == .installed; ControlServer).
+    // Integration points (Core/EngineHooks.swift), nil until their milestone assigns them before start():
+    var lidController: (any LidControlling)?       // M2 ClosedLidController (calls onChange on status/helper/report changes)
+    var watchMonitor: (any WatchMonitoring)?       // M3 WatchMonitor
+    var eventLog: (any EventLogging)?              // M3 EventLog
+    var narrator: (any Narrating)?                 // M4 Narrator (FallbackCopy until then)
+    var notifier: (any NotificationPosting.Type)?  // M4 Notifier.self
+    var stats: (any StatsRecording)?               // M4 Stats
+    init(settings: Settings = .shared, power: any PowerReading = PowerMonitor.shared,
+         assertions: any AssertionApplying = PowerAssertions(), clock: @escaping @MainActor () -> Date = { Date() })
 }
 enum Banner: Equatable {
     case batteryFloor(percent: Int), guardTripped(GuardReason), recovered
@@ -363,7 +394,7 @@ enum Banner: Equatable {
   9. Diff against the previous state. Fire the `Moment`s through `Narrator`, set `quip`/`banner`, call `Notifier` and `Stats`, then post `.insomniaStateDidChange`.
 - **Lid-closed counters:** engine-scoped `lidBagSeconds` (engaged, closed, no ext. display, on battery) and `lidClosedACSeconds` (same, on AC), for any hold type. Both reset **only** on a clamshell-open event (not on a power change, not on a new hold). `CLOSED_LID.md` §5.
 - **Lid switch turned on** (settings key `closedLidMode` false → true) while `!isAwake` and helper installed → `activate(defaultDuration, source: .panel)`.
-- **Timers.** No timer runs while asleep and the panel is closed.
+- **Timers** (pure plan: `Core/TickPlan.swift`, `TickPlanner.plan`). No timer runs while asleep and the panel is closed.
   - **1 Hz** while the panel is visible, or while a timed hold has ≤ 60 s left.
   - Otherwise **one-shot** timers at the next event: the end time, end − 5 min (the heads-up notification), end − 60 s, the next whole minute (only when the menu bar or Dock shows text), and the escalation thresholds (2/8/24/72 h).
   - Use wall-clock `Date`s, and re-evaluate on `didWakeNotification` and `NSSystemClockDidChange`.
@@ -387,7 +418,8 @@ enum Banner: Equatable {
     func notification(_ id: NotificationID, _ p: Personality, context: [String: String]) -> (title: String, body: String)
     func accessibilityValue(status: AwakeStatus, lid: LidStatus, remaining: TimeInterval?) -> String
 }
-enum NotificationID: String { case endingSoon = "ending-soon", ended, batteryFloor = "battery-floor", batteryStop = "battery-stop", lidHeat = "lid-heat", lidLPM = "lid-lpm", lidCap = "lid-cap", lidError = "lid-error", lidStuck = "lid-stuck", foreignFlag = "foreign-flag", recovered, targetExited = "target-exited" }
+// NotificationID (ending-soon, ended, battery-floor, battery-stop, lid-heat, lid-lpm, lid-cap, lid-error, lid-stuck,
+// foreign-flag, recovered, target-exited; + isSessionNotification) is declared in Models.swift (the engine posts from M1).
 ```
 - **Pools:** `[MomentKind: [String]]` static arrays in the Copy files, with placeholders `{name}`, `{floor}`, `{cap}` and `{duration}`.
 - **Pool sizes:** Cheeky and Unhinged each need **≥ 40 lines** in total, and **≥ 10** each for `activated`, `deactivated`, `idle` and `awake` (UX.md §11 has the seeds).
@@ -453,25 +485,38 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
 ### `Core/Control/ControlProtocol.swift` + `Core/Control/ControlServer.swift`
 ```swift
 /// JSON Lines over a Unix stream socket. One request per line; one response line per request.
+/// Wire form is a flat object keyed by "cmd": {"cmd":"on","duration":"2h","screen":true}, {"cmd":"hold","label":"make"}.
 enum ControlRequest: Codable, Equatable {
-    case on(duration: String?, until: String?, screen: Bool?, lid: Bool?)  // "45m", "2h", "90", "forever"; until "HH:mm"
+    case on(duration: String?, until: String?, screen: Bool?, lid: Bool?)  // "45m", "2h", "1h30m", "90", "forever"; until "HH:mm"
     case off
+    case toggle                                         // eyes semantics; refused when only client holds remain
     case extend(by: String)
     case status
     case why
     case hold(label: String, screen: Bool, lid: Bool)   // connection-scoped client hold; released on EOF
 }
 struct ControlResponse: Codable, Equatable { var ok: Bool; var error: String?; var status: StatusPayload? ; var why: [WhyRow]? }
-struct StatusPayload: Codable, Equatable { var state: String; var remainingSeconds: Int?; var endsAt: Date?; var screen: Bool; var lid: String; var guards: [String]; var holds: [String] }
+struct StatusPayload: Codable, Equatable { var state: String; var remainingSeconds: Int?; var endsAt: Date?; var screen: Bool; var lid: String; var guards: [String]; var holds: [String]
+                                           var headline: String?; var lidDetail: String? }   // plain UX §8 headline; H′-style lid line
 // Encoder/decoder use dateEncodingStrategy/dateDecodingStrategy = .iso8601.
 struct WhyRow: Codable, Equatable { var section: String; var who: String; var what: String }
 enum ControlPaths { static var directory: URL; static var socket: URL }   // ~/Library/Application Support/Insomnia/control.sock
+enum ControlDuration { static func parse(_:) -> AwakeDuration?; static func minutes(_:) -> Int?; static func clock(_:) -> (hour: Int, minute: Int)? }
 
-@MainActor final class ControlServer { static let shared: ControlServer; func start() throws; func stop() }
+@MainActor protocol ControlResponding: AnyObject { func respond(to:connection:peerPID:) -> ControlResponse; func connectionClosed(_:) }
+@MainActor final class EngineControlResponder: ControlResponding { static let shared; var otherAppsRows: (@MainActor () -> [WhyRow])? }   // requests → AwakeEngine; M3 sets otherAppsRows
+@MainActor final class ControlServer {
+    static let shared: ControlServer               // ControlPaths.socket + EngineControlResponder()
+    init(socketURL: URL, responder: any ControlResponding, ready: Bool = false)
+    func start() throws(StartError)                // .alreadyRunning / .pathTooLong / .unsafeDirectory / .system
+    func setReady()                                // answer requests (buffered until then); call after AwakeEngine.start()
+    func stop()
+}
 ```
 - **Socket permissions:** the directory is `0700` and the socket `0600`. Each connection is rejected unless `getpeereid` uid == `getuid()`. Every socket sets `SO_NOSIGPIPE`.
 - **`start()`:** first `connect()` to an existing socket; if it answers, another instance owns it, so refuse. Only then unlink + bind.
 - **I/O:** a `DispatchSource` read source per connection, with handling on the main actor.
+- **Readiness:** the socket listens from launch, but requests are buffered until `setReady()` (after `AwakeEngine.start()` has resolved the lid helper), so a CLI that launched the app never gets a spurious "lid mode not set up".
 - **Hold lifetime:** a `hold` request maps to `AwakeEngine.beginClientHold`. When the connection closes, the server calls `endClientHold`, the same way the watchdog works.
 - **Options from the CLI:** `on` with `screen`/`lid` set calls `activate(_:source: .cli, options:)` with fixed options for that hold only (unset fields taken from Settings at start). It **never writes Settings**. Guards still apply. Lid requested with the helper missing → `ok:false, error:"lid mode not set up: open Insomnia ▸ Settings ▸ Lid & Safety"`.
 
@@ -605,15 +650,16 @@ An in-memory ring of 200 entries, also mirrored to `os.Logger(subsystem: "com.gd
 ### `App/CLI.swift`
 ```
 insomnia on [30m|2h|90|forever] [--until HH:mm] [--screen|--no-screen] [--lid|--no-lid]
-insomnia off | toggle | extend 15m
+insomnia off | toggle | extend [15m]
 insomnia status [--json]          # exit 0 awake, 1 asleep (scriptable)
-insomnia why                      # our holds + guards + foreign assertions + SleepDisabled
+insomnia why [--json]             # our holds + guards + foreign assertions + SleepDisabled
 insomnia run [--screen] [--lid] -- <cmd…>   # client hold for exactly the command's lifetime; exits with its status
 insomnia watch --pid N [--screen] [--lid]   # client hold until PID exits (DispatchSource proc exit)
 insomnia --why                    # an existential answer, personality-aware
 ```
-- **Connecting:** connect to `ControlPaths.socket`. If no `NSRunningApplication` has the bundle id, run `/usr/bin/open -g -b com.gdeml.Insomnia` and wait up to 5 s for the socket. If the app runs but the socket doesn't answer, exit 3 (never `open` a running app: that's a reopen).
-- **`run` / `watch`:** send `hold` and keep the connection open. For `run`, spawn the child with `posix_spawn` (inheriting stdio), forward SIGINT/SIGTERM to it, and close the socket after it exits. `watch` closes the socket when the PID exits.
+- **Connecting:** connect to `ControlPaths.socket`. If no `NSRunningApplication` has the bundle id, run `/usr/bin/open -g -a <the bundle this binary lives in>` (else `-b com.gdeml.Insomnia`) and wait up to 5 s for the socket. Only `on`, `toggle`, `extend`, `run` and `watch` launch the app; `off`, `status` and `why` answer "Insomnia isn't running" instead. If the app runs but the socket doesn't answer within 3 s (it may be starting), exit 3 (never `open` a running app: that's a reopen).
+- **Output:** plain text by default; `--json` prints the `StatusPayload` (`why`: the `[WhyRow]`), and on failure `{"ok":false,"error":…}` plus the message on stderr.
+- **`run` / `watch`:** send `hold` and keep the connection open. For `run`, spawn the child with `posix_spawn` (inheriting stdio only, default signal dispositions), forward SIGINT/SIGTERM (and SIGHUP/SIGQUIT) to it (not ^C/^\ the terminal already delivered to the foreground job), close the socket after it exits, and exit with its status or die of its signal. `watch` closes the socket when the PID exits.
 - **Exit codes:**
   - 0: ok
   - 1: asleep (`status` only)
@@ -632,7 +678,7 @@ insomnia --why                    # an existential answer, personality-aware
   6. Wire the `AppRouter` handlers.
   7. Register the hotkey, and re-register it when the `hotKey*` settings change.
   8. `ControlServer.shared.start()`
-  9. `Task { await AwakeEngine.shared.start() }`
+  9. `Task { await AwakeEngine.shared.start(); ControlServer.shared.setReady() }`
   10. Register the `kAEGetURL` Apple Event, routed to `URLCommandHandler.handle`.
 - **`applicationShouldTerminate`:** if the lid marker exists or `lid != .off`, return `.terminateLater`, then `Task { await AwakeEngine.shared.prepareForQuit(); NSApp.reply(toApplicationShouldTerminate: true) }`. Logout, restart and shutdown arrive here too (quit Apple Event); there is no separate `willPowerOff` path.
 - **`applicationWillTerminate`:** `ControlServer.shared.stop()`.

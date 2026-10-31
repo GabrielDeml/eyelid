@@ -101,6 +101,11 @@ final class Settings {
             return v
         }
 
+        // Assign every property while `self` is still being initialised, so the observable init accessors run instead
+        // of the setters: init must never write UserDefaults or post `.insomniaSettingsDidChange` (an observer would
+        // re-enter `Settings.shared` while it is still being created). The optional goes first: Optionals start out
+        // initialised, so assigning it last would go through the setter and its `didSet`.
+        helperRegisteredCDHash = defaults.string(forKey: "helperRegisteredCDHash")
         keepScreenOn = bool("keepScreenOn", true)
         closedLidMode = bool("closedLidMode", false)
         defaultDurationMinutes = int("defaultDurationMinutes", 0)
@@ -128,7 +133,6 @@ final class Settings {
         hasCompletedOnboarding = bool("hasCompletedOnboarding", false)
         lidBatteryCalloutShown = bool("lidBatteryCalloutShown", false)
         hiddenItemCardShown = bool("hiddenItemCardShown", false)
-        helperRegisteredCDHash = defaults.string(forKey: "helperRegisteredCDHash")
     }
 
     private func store(_ value: Any, _ key: String) {

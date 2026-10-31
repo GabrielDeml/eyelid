@@ -71,6 +71,9 @@ public enum CodeSignature {
         /// false when the file at our path is no longer the code we are running (replaced since launch).
         /// The helper then logs and exits non-zero so launchd starts the new binary (CLOSED_LID.md §2.5).
         public let matchesDisk: Bool
+
+        /// Nothing could be read: no Team ID, no cdhash. The helper treats it as "serve nothing" (reset-only).
+        public static let unreadable = SelfInfo(teamID: nil, cdhash: nil, matchesDisk: false)
     }
 
     /// Reads our own signature. The helper calls this once at start-up before resuming its listener and keeps the

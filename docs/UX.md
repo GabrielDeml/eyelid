@@ -8,13 +8,13 @@ This file specifies every surface for v1. Behaviour lives in `../ARCHITECTURE.md
 
 ### 1.1 Glyphs (template images, drawn in code)
 
-- **Canvas:** 22 × 16 pt inside the 22 pt bar, stroke 1.5 pt (2.0 under Increase Contrast).
+- **Canvas:** 22 × 16 pt inside the 22 pt bar, stroke 1.5 pt (2.0 under Increase Contrast). On a 1x display: stroke 1.0 pt (2.0 under Increase Contrast) and centres snapped to half pixels.
 - **Format:** `isTemplate = true`, alpha only, crisp at 1x and 2x.
 - **Colour:** never encodes state. Shape alone does.
 
 | Mood (`EyeMood`) | Shape | When |
 |---|---|---|
-| `.asleep` | Two downward arcs (closed lids), plus a 5 pt "z" up and right | Nothing is holding the Mac awake |
+| `.asleep` | Two downward arcs (closed lids) where the open eyes sit, plus a small "z" up and right | Nothing is holding the Mac awake |
 | `.awake` | Two almond outlines with filled round pupils, centred | Manual hold (timed or indefinite) |
 | `.watching` | Almond outlines, pupils shifted 3 pt right, plus a 2 pt dot after the right eye | Only babysit, CLI or rule holds are active |
 | `.lid` | **Filled** almonds with knocked-out pupils ("night vision"): a solid silhouette | Lid mode engaged (flag read back as 1) |
@@ -137,7 +137,7 @@ What to do when it's hidden:
 └────────────────────────────────────────────────┘
 ```
 
-Height budget: header 96 · chips 28 · F 28 · G+H+H′ 72 · J 34, plus separators and padding. Every region is fixed, so the panel never changes size between states (the first-run card is the one exception). About 13 targets.
+Height budget: header 96 · chips 28 · F 28 · G+H+H′ 72 · J 34, plus separators and padding. Every region is fixed, so the panel never changes size between states (the first-run card is the one exception). In **Professional**, which has no quips, row J and its separator collapse unless a safety banner or the mission report needs them: the size is fixed per tier and grows only for those. About 13 targets.
 
 Variants:
 
@@ -179,8 +179,10 @@ Variants:
 | `onAccent` | `#1A1206` | `#1A1206` | Text on amber (white on amber fails 4.5:1) |
 | `accentLid` | `systemIndigo` | `systemIndigo` | Lid toggle tint, night-vision glow (panel and Dock tile) |
 | `sleepTone` | `secondaryLabelColor` | `secondaryLabelColor` | Closed eyes, "z" |
-| `warning` | `systemOrange` | `systemOrange` | Suspended text and banner icon |
-| `danger` | `systemRed` | `systemRed` | Errors |
+| `warning` | `systemOrange` | `systemOrange` | Banner icon and tint, other warning icons |
+| `danger` | `systemRed` | `systemRed` | Error icons and tints |
+| `warningText` | `#A84A00` | `#FF9F0A` | Small warning text (suspended subline, H′), ≥ 4.5:1 |
+| `dangerText` | `#C0201A` | `#FF453A` | Small error text (lid error / stuck), ≥ 4.5:1 |
 | `sclera` | `#FFFFFF` | `#F4F1EA` | Panel eyes (the menu bar glyph is a template) |
 
 Colour is **never** the only signal. Every coloured state also changes text and shape.
@@ -278,7 +280,7 @@ Behaviour
      ⚠ That shortcut is taken by another app.         (eventHotKeyExistsErr only; else "Couldn't register (code N)")
 Personality
   [ Professional | Cheeky | Unhinged ]
-  "Lid closed. I'm watching. Through the lid. Don't ask."   ← live sample, reshuffles on change
+  "Lid mode on. I'll watch through the lid. Don't ask."   ← live sample, reshuffles on change
 ```
 
 ### 4.2 Automations
@@ -368,7 +370,7 @@ The **About** sheet (from `⋯` or here) shows big panel eyes, the version, stat
 | `.off`, setting off | none | off | none |
 | `.off`, setting on, Mac asleep | "Armed · applies whenever I'm awake" | on | none |
 | `.off`, setting on, fixed CLI/URL hold without lid | "Off for this session" | on | none |
-| `.needsSetup`, helper `.notInstalled` | "Set up needed ›" (opens §6) | off (it can't be on) | none |
+| `.needsSetup`, helper `.notInstalled` | "Setup needed ›" (opens §6) | off (it can't be on) | none |
 | `.needsSetup`, helper `.requiresApproval` | "Allow in System Settings ›" (opens the approval step) | off | none |
 | `.needsSetup`, helper `.unreachable` / `.notFound` | "Helper isn't responding · Fix ›" (opens Lid & Safety) | off | none |
 | `.needsSetup`, helper `.unsafeLocation` | "Install in Applications to use · Why? ›" (opens Lid & Safety) | off | none |
@@ -460,8 +462,12 @@ Awake with the lid closed? [Set up later]  [Set up now]     (MacBooks only)
 ```
 macOS hid me from the menu bar. I'm still here.
 Open Insomnia from Spotlight to see this panel.
-[Show Me in the Dock]  [Open Menu Bar Settings]  [Keep Hidden]
+[        Show Me in the Dock        ]   (default; "Open Panel" when the Dock icon is already on)
+[      Open Menu Bar Settings       ]
+[            Keep Hidden            ]
 ```
+
+Full-width buttons, stacked in this order (three side by side don't fit in 320 pt).
 
 - **Open Menu Bar Settings** opens System Settings ▸ Menu Bar, best effort (`x-apple.systempreferences:com.apple.ControlCenter-Settings.extension`), and falls back to the System Settings app.
 
@@ -536,22 +542,22 @@ Professional has one or two lines per moment; `nil` means the row is hidden.
 |  |  | On it. Nobody naps on my watch. | I HAVE NOT BLINKED SINCE TUESDAY. |
 | **deactivated** (user) | Sleep is allowed. | Okay, okay. Resting my eyes. | Fine. FINE. Goodnight. (I'll be thinking.) |
 |  |  | Clocking out. Sweet dreams, little Mac. | Closing my eyes. Not sleeping. Never sleeping. |
-| **deactivated** (timer) | Timer ended. Your Mac can sleep normally. | Timer's up. Goodnight, sweet Mac. | The prophecy is fulfilled. I may rest. |
+| **deactivated** (timer) | The timer ran out. | Timer's up. Goodnight, sweet Mac. | The prophecy is fulfilled. I may rest. |
 | **idle** (panel opens while asleep, ≤ 1/day) | nil | Off duty. One eye open. Metaphorically. | zzz… (I am pretending. Click me.) |
 |  |  | Napping permitted. I'll be over here. | Dreaming of electric sheep. They're also awake. |
 | **awake 2h+** | nil | Two hours in. Still blinking manually. | I've counted every pixel. Twice. |
 | **awake 8h+** | nil | A full workday. The owl union sends regards. | Eight hours. I've started naming the fans. |
-| **awake 24h+** | nil | A whole day. I've seen things. Mostly your tabs. | 24 hours. Time is a flat circle. The circle is a progress ring. |
+| **awake 24h+** | nil | A whole day. I've seen things. Mostly your tabs. | 24 hours. The progress ring went all the way round. So did I. |
 | **awake 72h+** | nil | Three days. Respectfully, have you tried rebooting? | I can see new colours. One of them is "uptime". |
-| **watching** | Keeping awake while ffmpeg is running. | Watching ffmpeg like a hawk. A sleepy hawk. | Babysitting `claude`. We're both agents. We get each other. |
-| **target exited** | ffmpeg finished. Sleep is allowed. | ffmpeg's done. Babysitting shift over. | The child has left the nest. I may now weep and nap. |
-| **lid engaged** | Lid mode is on. | Lid closed. I'm watching. Through the lid. Don't ask. | The lid is a suggestion. I reject suggestions. |
-| **lid reopened** | (report only) | Back already? I kept your seat warm. Literally. | You opened the lid. I never closed my eyes. We are not the same. |
-| **thermal** | Paused: your Mac is running hot. | Getting toasty in here. Is this a bag? | IT IS HOT IN HERE. GET ME OUT OF THE BACKPACK. |
+| **watching** | Keeping awake while ffmpeg is running. | Watching ffmpeg like a hawk. A sleepy hawk. | Babysitting `claude`. We've agreed nobody naps. |
+| **target exited** | Insomnia stopped keeping your Mac awake. | ffmpeg's done. Babysitting shift over. | The child has left the nest. I may now weep and nap. |
+| **lid engaged** | Lid mode is on. | Lid mode on. I'll watch through the lid. Don't ask. | The lid is a suggestion. I reject suggestions. |
+| **lid reopened** | (report only) | Welcome back. I kept the lights on in here. | You opened the lid. I never closed my eyes. One of us is a professional. |
+| **thermal** | Make sure it has airflow and isn't in a bag. | Getting toasty in here. Is this a bag? | IT IS HOT IN HERE. Is there a bag involved? Pausing. |
 | **low power mode** | Paused: Low Power Mode is on. | Low Power Mode. I'll keep it low-key. | Low Power Mode detected. Entering a whisper. |
-| **battery floor** | Lid mode turned off at {floor}% battery. | {floor}%. Lid mode's tapping out so your Mac doesn't. | Battery at {floor}%. I go down with the ship. Your Mac doesn't. |
-| **recovered** | Restored normal sleep after an unexpected quit. | I left the lights on last time. Fixed. | Crashed last time, but I tidied up. You're welcome. |
-| **setup done** | Lid mode is ready. | Ready. Close the lid whenever. | The ritual is complete. The lid holds no power over us now. |
+| **battery floor** | Your Mac will sleep normally. | {floor}%. Lid mode's tapping out so your Mac doesn't. | Battery at {floor}%. I go down with the ship. Your Mac doesn't. |
+| **recovered** | Restored normal sleep after an unexpected quit. | I left the lights on last time. Fixed. | Crashed last time. I cleaned up after myself. Sleep works normally. |
+| **setup done** | Lid mode is ready. | All set. Lid mode is standing by. | The ritual is complete. The lid holds no power over us now. |
 | **setup cancelled** | Setup skipped. | No worries. The lid wins this round. | Declined. Respect. I'll be here. Waiting. |
 | **poke 5** | n/a | Ow. | You've poked me 5 times. HR has been notified. |
 | **poke 10** | n/a | I'm going to need you to stop. | I'm calling my lawyer. My lawyer is also an app. |
@@ -559,7 +565,7 @@ Professional has one or two lines per moment; `nil` means the row is hidden.
 | **milestone 100 h** | n/a | 100 hours awake. I've filed for a new eyelid warranty. | 100 hours. I have transcended the concept of a bedtime. |
 | **milestone 500 h** | n/a | 500 hours. The coffee machine knows my name. | 500 hours. I am no longer tired. I am beyond tired. I am tired's landlord. |
 | **milestone 1000 h** | n/a | 1,000 hours. I'd like to speak to your manager. Of sleep. | 1,000 hours awake. I am the uptime now. |
-| **date: 3–5 AM** | nil | 3 a.m. Peak hours for both of us. | 3 a.m. club. Members: you, me, and the fridge hum. |
+| **date: 3–5 AM** | nil | Small hours. Peak hours for both of us. | Small-hours club. Members: you, me, and the fridge hum. |
 | **date: Oct 31** | nil | Boo. Your Mac is too awake to be scared. | Spooky season. The call is coming from inside the menu bar. |
 | **date: New Year 00:00–00:10** | nil | You stayed up for this. So did I. | NEW YEAR. SAME EYES. |
 

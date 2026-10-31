@@ -1,0 +1,210 @@
+import AppKit
+import os
+
+/// App lifecycle (ARCHITECTURE.md "App/AppDelegate.swift"). Modules from later milestones are marked where they plug in.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+    private var statusItem: StatusItemController?
+    /// Strongly retained: UNUserNotificationCenter only keeps a weak reference to its delegate.
+    private let notificationDelegate = NotificationDelegate()
+    /// SIGTERM (`kill`, `pkill`, launchd) quits like ⌘Q: lid mode is released and read back, the socket unlinked.
+    private var termSource: DispatchSourceSignal?
+    private let log = Logger(subsystem: "com.gdeml.Insomnia", category: "app")
+
+    // MARK: Launch
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Single instance (Decision 29): hand over to the running copy before touching lid, socket or status item.
+        if let id = Bundle.main.bundleIdentifier {
+            let others = NSRunningApplication.runningApplications(withBundleIdentifier: id)
+                .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            if let other = others.first {
+                log.notice("another instance is running (pid \(other.processIdentifier)); handing over")
+                if let url = URL(string: "insomnia://panel") { NSWorkspace.shared.open(url) }
+                exit(0)
+            }
+        }
+        Notifier.attach(notificationDelegate)
+        NSApp.mainMenu = makeMainMenu()
+        NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleGetURL(_:withReply:)),
+                                                     forEventClass: AEEventClass(kInternetEventClass),
+                                                     andEventID: AEEventID(kAEGetURL))
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Initialise the singletons before anything observes their notifications (Settings posts from its init).
+        _ = Settings.shared
+        let engine = AwakeEngine.shared
+
+        // 1. Notifications, and the engine's personality, notification and stats hooks (M4).
+        Notifier.setUp()
+        engine.narrator = Narrator.shared
+        engine.notifier = Notifier.self
+        engine.stats = Stats.shared
+        Notifier.retryLidHandler = { ClosedLidController.shared.retry() }
+        Notifier.resetLidHandler = { Task { await ClosedLidController.shared.resetWithPassword() } }
+
+        // 2. Power readings.
+        PowerMonitor.shared.start()
+
+        // 3. Lid mode (M2) and automations (M3). Every hook is assigned before AwakeEngine.start().
+        engine.lidController = ClosedLidController.shared
+        engine.eventLog = EventLog.shared
+        WatchMonitor.shared.eventLog = EventLog.shared
+        WatchMonitor.shared.start()
+        engine.watchMonitor = WatchMonitor.shared
+        WhyAwakeInput.foreignSleepDisabledProvider = { ClosedLidController.shared.foreignSleepDisabled }
+
+        // 4. Menu bar item.
+        let item = StatusItemController()
+        item.install()
+        statusItem = item
+
+        // 5. Dock: presence, live tile and menu (DockController owns showInDock), then the epic moments.
+        DockController.shared.untilHandler = { [weak item] in
+            item?.showPanel()
+            item?.panel.model.showUntil = true
+        }
+        DockController.shared.start()
+        EpicMoments.shared.start()
+
+        // 6. Router.
+        AppRouter.shared.showAboutHandler = { AboutWindowController.shared.show() }
+        AppRouter.shared.openSettingsHandler = { SettingsWindowController.shared.show(tab: $0) }
+        AppRouter.shared.startLidSetupHandler = { LidSetupWindow.show(requestedLid: true) }
+
+        // 7. Global hotkey; HotKeyManager re-registers itself when the hotKey* settings change.
+        HotKeyManager.shared.bind(to: .shared) { [weak self] in
+            let engine = AwakeEngine.shared
+            guard !engine.isHeldOnlyByClients else { return }
+            let wasAwake = engine.isAwake
+            engine.toggle(source: .hotkey)
+            if engine.isAwake != wasAwake { self?.statusItem?.blink() }
+        }
+
+        // 8. CLI control socket. It listens now; requests wait for setReady() (lid helper resolved).
+        do {
+            try ControlServer.shared.start()
+        } catch {
+            log.error("control socket: \(String(describing: error), privacy: .public)")
+            EventLog.shared.log("cli", "control socket unavailable: \(error)")
+        }
+        EngineControlResponder.shared.otherAppsRows = {
+            WhyAwakeReport.build(.live()).section(.otherApps)?.rows
+                .map { WhyRow(section: WhyRow.Section.otherApps, who: $0.who, what: $0.what) } ?? []
+        }
+
+        // A plain SIGTERM would skip applicationShouldTerminate; route it through the normal quit instead.
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { MainActor.assumeIsolated { AppRouter.shared.quit() } }
+        term.resume()
+        termSource = term
+
+        // 9. Start the engine (lid recovery, helper status, activate on launch), then answer the CLI.
+        Task {
+            await AwakeEngine.shared.start()
+            ControlServer.shared.setReady()
+        }
+        // Never keep the CLI waiting past its 15 s timeout (a helper that doesn't answer during start-up): a request
+        // it gave up on would still run later.
+        Task {
+            try? await Task.sleep(for: .seconds(10))
+            ControlServer.shared.setReady()
+        }
+
+        // First run: open the panel once so the welcome card can greet (UX §7.1).
+        if !Settings.shared.hasCompletedOnboarding {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1))
+                AppRouter.shared.showPanel()
+            }
+        }
+    }
+
+    // MARK: Quit
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Always through the engine: it credits the last stretch of awake time to Stats, records the session end,
+        // clears a pending "ending soon" notification and releases the assertions. With lid mode off it returns at
+        // once; otherwise lid mode is released (and read back) first: CLOSED_LID.md §4.1 layer 1.
+        Task { @MainActor in
+            await AwakeEngine.shared.prepareForQuit()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        ControlServer.shared.stop()
+        Stats.shared.flush()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    // MARK: Dock
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Only a reopen sent by the Dock toggles; Spotlight, Finder, `open` and the CLI open the panel (Decision 13).
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        let senderPID = event?.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value
+        let dockPID = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
+        if let senderPID, let dockPID, senderPID == dockPID, Settings.shared.showInDock {
+            if DockController.shared.handleDockClick() { statusItem?.blink() }
+        } else {
+            AppRouter.shared.showPanel()
+        }
+        return false
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        DockController.shared.makeDockMenu()
+    }
+
+    // MARK: URL scheme
+
+    @objc private func handleGetURL(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
+        guard let string = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: string), url.scheme == "insomnia" else { return }
+        URLCommandHandler.handle(url)
+    }
+
+    // MARK: Main menu (so text fields get standard editing keys; UX §2.5)
+
+    private func makeMainMenu() -> NSMenu {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu(title: "Insomnia")
+        appMenu.addItem(withTitle: "About Insomnia", action: #selector(showAbout(_:)), keyEquivalent: "").target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",").target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit Insomnia", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        main.addItem(editItem)
+        return main
+    }
+
+    @objc private func showAbout(_ sender: Any?) { AppRouter.shared.showAbout() }
+
+    @objc private func showSettings(_ sender: Any?) { AppRouter.shared.openSettings(.general) }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(showSettings(_:)) { return AppRouter.shared.openSettingsHandler != nil }
+        return true
+    }
+}

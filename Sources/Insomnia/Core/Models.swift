@@ -287,6 +287,27 @@ enum LidStatus: Equatable, Sendable {
     case stuck
 }
 
+/// Mission report: set by ClosedLidController on lid open after ≥ 5 min engaged-closed; the engine turns it into
+/// `Banner.reopen` and `Moment.lidReopened`. (Declared here, not in ClosedLidController.swift, because the engine and UI
+/// need it from M1.)
+struct ReopenReport: Equatable, Sendable {
+    var closedFor: TimeInterval
+    var batteryStart: Int?
+    var batteryEnd: Int?
+    var worstThermal: ProcessInfo.ThermalState
+}
+
+/// Notification identifiers (UX.md §10). Doubles as the UNNotificationRequest identifier, so posting the same id
+/// replaces the previous one. (Declared here, not in Narrator.swift, because the engine posts them from M1.)
+enum NotificationID: String, CaseIterable, Sendable {
+    case endingSoon = "ending-soon", ended, batteryFloor = "battery-floor", batteryStop = "battery-stop"
+    case lidHeat = "lid-heat", lidLPM = "lid-lpm", lidCap = "lid-cap", lidError = "lid-error", lidStuck = "lid-stuck"
+    case foreignFlag = "foreign-flag", recovered, targetExited = "target-exited"
+
+    /// Gated by Settings.sessionNotifications; every other id always posts (safety).
+    var isSessionNotification: Bool { self == .endingSoon || self == .ended || self == .targetExited }
+}
+
 // MARK: Derived status (the one value every surface switches on)
 
 enum AwakeStatus: Equatable, Sendable {
@@ -447,13 +468,22 @@ final class AppRouter {
     func showPanel() { showPanelHandler?() }
     func closePanel() { closePanelHandler?() }
     func openSettings(_ tab: SettingsTab = .general) {
+        guard let openSettingsHandler else { return }   // no Settings window yet: keep the panel open
         closePanel()
-        openSettingsHandler?(tab)
+        openSettingsHandler(tab)
     }
     func showWhyAwake() { showWhyAwakeHandler?() }
     func showAbout() { showAboutHandler?() }
     func startLidSetup() { startLidSetupHandler?() }
-    func quit() { NSApp.terminate(nil) }
+    /// Terminates from the run loop, never from inside a main-queue block (a dispatch source, a Task): quitting answers
+    /// `.terminateLater` and replies from a main-actor Task, which can't run while one of the main queue's own blocks
+    /// is still on the stack.
+    func quit() {
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+            MainActor.assumeIsolated { NSApp.terminate(nil) }
+        }
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
 }
 
 // MARK: - Formatting helpers shared by UI

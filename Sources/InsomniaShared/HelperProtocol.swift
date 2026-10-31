@@ -10,7 +10,8 @@ import Foundation
 public protocol HelperProtocol {
     /// Read-only. `version` = HelperInfo.version, `cdhash` = the cdhash the kernel is running (cached at start-up,
     /// CodeSignature.readSelf; never re-read from disk, so a stale helper after a rebuild is detected),
-    /// `sleepDisabled` = IOPMrootDomain "SleepDisabled", `ownsFlag` = the helper set it and some session holds it.
+    /// `sleepDisabled` = IOPMrootDomain "SleepDisabled", `ownsFlag` = the helper set it and it is the caller's: no
+    /// session holds it (its reset is pending a retry) or a session of the caller's uid does.
     func status(withReply reply: @escaping @Sendable (_ version: String, _ cdhash: String,
                                                       _ sleepDisabled: Bool, _ ownsFlag: Bool) -> Void)
 

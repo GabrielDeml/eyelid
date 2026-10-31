@@ -74,7 +74,7 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 | Level | Tone | Where jokes may appear | Example (lid engaged) |
 |---|---|---|---|
 | **Professional** | Calm, factual, short sentences. No jokes, emoji or exclamation marks. | Nowhere. The quip row is hidden; its plain lines appear only in notification bodies. | "Lid mode is on." |
-| **Cheeky** (default) | Dry, warm, a wink. | Quip row, tooltips, notification bodies (not titles). | "Lid closed. I'm watching. Through the lid. Don't ask." |
+| **Cheeky** (default) | Dry, warm, a wink. | Quip row, tooltips, notification bodies (not titles). | "Lid mode on. I'll watch through the lid. Don't ask." |
 | **Unhinged** | Over-caffeinated theatre, still kind. | Same places as Cheeky, plus the Easter-egg duration names. | "The lid is a suggestion. I reject suggestions." |
 
 ### Rules (enforced in code review)
@@ -88,12 +88,12 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 7. **Professional is really plain.** `Narrator.line()` returns `nil` for decorative moments (`idle`, `poke`, `milestone`, `awake`), and the UI hides the row.
 8. **Labels are plain in every tier.** Control labels, VoiceOver labels and menu items never change with personality. Nicknames live only in tooltips and copy.
 9. **Silence is a valid line.** Most state changes update only the headline. The quip row changes at most once per state change.
-10. **Earned moments** (exempt from the budget): milestones (each once, ever), first lid engagement, the mission report, crash recovery, the poke egg, date lines. Four are **epic** (panel only; Reduce Motion crossfades, `UX.md` §2.4):
+10. **Earned moments** (exempt from the budget): milestones (each once, ever), the first lid engagement of the day, the mission report, crash recovery, the poke egg, date lines. Four are **epic** (panel only; Reduce Motion crossfades, `UX.md` §2.4):
     - **First wake:** on first launch the eyes slowly open (600 ms), blink twice, find the cursor, then the welcome card appears.
     - **Night vision:** the first lid engagement each day sweeps an indigo glow across the eyes (400 ms); the Dock tile pulses once.
     - **Mission report:** reopening after ≥ 5 min closed turns the banner into a card with counting-up numbers and one line.
     - **Eye bags:** after 24 h continuously awake the panel eyes grow bags; after 72 h they're bloodshot. No words.
-11. **Quip budget.** At most one rotating `activated`/`deactivated` quip per 4 h. Outside the budget the quip row stays empty. `idle` fires when the panel opens while asleep, at most once a day.
+11. **Quip budget.** At most one rotating `activated`/`deactivated` quip per 4 h (later lid engagements on the same day count as rotating too). When an earned moment and a rotating one land together, the earned line shows and the budget isn't spent. Outside the budget the quip row stays empty. `idle` fires when the panel opens while asleep, at most once a day.
 12. **Unhinged volume.** At most 2 ALL-CAPS lines per Unhinged pool.
 
 ## 5. Naming glossary
@@ -130,7 +130,7 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 | Chip | Name |
 |---|---|
 | 30m | A pomodoro with ambition |
-| 1h | One meeting that could've been an email |
+| 1h | A meeting and its follow-up |
 | 2h | A Nolan film |
 | 4h | Render o'clock |
 | 8h | Night shift |
