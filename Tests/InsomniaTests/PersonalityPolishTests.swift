@@ -67,7 +67,9 @@ struct PersonalityPolishTests {
     @Test func nightVisionOncePerDay() {
         let d = ScratchDefaults.make("Epic")
         let epic = EpicMoments(settings: Settings(defaults: d), defaults: d)
-        let morning = Date(timeIntervalSince1970: 1_790_000_000)
+        // 09:00 local, so "+1 h is the same day" holds in every time zone (a fixed instant is 23:13 in Tokyo).
+        let morning = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0,
+                                            of: Date(timeIntervalSince1970: 1_790_000_000)) ?? Date()
         epic.stateChanged(lid: .off, now: morning)
         epic.stateChanged(lid: .engaged(lidClosed: false), now: morning)
         #expect(epic.nightVisionCount == 1)

@@ -5,12 +5,14 @@ import Foundation
 // Rules this file enforces (PRODUCT.md §4):
 //   5  Rotation: a shuffle bag per (kind, personality). A line never shows twice in a row, and a bag empties before any
 //      line repeats.
-//   7  Professional is really plain: `line()` returns nil for decorative moments (idle, awake, poke, milestone, dates).
+//   7  Professional is really plain: `line()` returns nil for every moment (its quip row is hidden), so a Professional
+//      moment never spends the quip budget. Its plain lines live only in notification bodies.
 //   3  Safety is never a joke: headlines and notification titles come from the one plain source (`FallbackCopy` /
 //      `PlainCopy`) in every tier. Only notification *bodies* get personality, and only for the ids UX §10 allows.
 //   8  Labels never change with personality (they don't live here at all).
-//  10  Date lines (3–5 a.m., Oct 31, New Year 00:00–00:10) replace an `activated` or `idle` line with 1-in-3 probability.
-//      Never in Professional.
+//  10  Date lines (3–5 a.m., Oct 31, New Year 00:00–00:10) replace an `activated` or `idle` line with 1-in-3 probability,
+//      at most once per window. They are earned: `dateLine` is separate from `line` so the engine shows them outside
+//      the quip budget without spending it. Never in Professional.
 // The quip *budget* (one rotating line per 4 h, idle once a day) is the engine's job; the Narrator only picks words.
 
 /// Every pool of copy. Several `Moment`s map onto one kind (e.g. `.deactivated(.user)` and `.deactivated(.sleepNow)`),
@@ -30,16 +32,11 @@ enum CopyKind: String, CaseIterable, Hashable, Sendable {
     case milestone100, milestone500, milestone1000
     case date3am, dateHalloween, dateNewYear
 
-    /// PRODUCT.md §4 rule 7: Professional has no line for these, and the UI hides the row.
-    var isDecorative: Bool {
-        switch self {
-        case .idle, .awake2, .awake8, .awake24, .awake72, .poke5, .poke10, .poke20, .poke50,
-             .milestone100, .milestone500, .milestone1000, .date3am, .dateHalloween, .dateNewYear, .lidReopened:
-            return true
-        default:
-            return false
-        }
-    }
+    /// PRODUCT.md §4 rule 7: the only kinds with Professional copy. Its quip row is hidden, so these are the bodies of
+    /// the notifications that take a pool (UX.md §10), plus `lidEngaged` for the Settings personality sample.
+    static let professionalKinds: Set<CopyKind> = [
+        .endingSoon, .deactivatedTimer, .batteryFloor, .thermal, .recovered, .targetExited, .lidEngaged,
+    ]
 
     /// The four "main moments" that need ≥ 10 lines in Cheeky and Unhinged (PRODUCT.md §4 rule 6). `awake` counts its
     /// four escalation buckets together.
@@ -115,8 +112,11 @@ final class Narrator: Narrating {
         let personality: Personality
     }
 
-    /// `seed`: fixed in tests; random in the app.
-    init(settings: Settings = .shared, calendar: Calendar = .current, seed: UInt64? = nil) {
+    /// The date window a date line last showed in (kind + start of that day): at most one per window.
+    private var lastDateWindow: (kind: CopyKind, day: Date)?
+
+    /// `seed`: fixed in tests; random in the app. `calendar` follows time-zone changes unless a test pins one.
+    init(settings: Settings = .shared, calendar: Calendar = .autoupdatingCurrent, seed: UInt64? = nil) {
         self.settings = settings
         self.calendar = calendar
         var system = SystemRandomNumberGenerator()
@@ -125,16 +125,22 @@ final class Narrator: Narrating {
 
     // MARK: - Lines
 
-    /// A line for `m`, or nil (Professional decorative moments, moments without copy, poke counts between steps).
+    /// A line for `m`, or nil (every Professional moment, moments without copy, poke counts between steps).
+    /// Never a date line: those come from `dateLine`.
     func line(_ m: Moment, _ p: Personality, now: Date = Date()) -> String? {
-        guard var kind = Self.kind(for: m) else { return nil }
-        if p == .professional && kind.isDecorative { return nil }
-        // Date lines replace an activated or idle line, 1 in 3, never in Professional.
-        if p != .professional, kind == .activated || kind == .idle, let date = dateKind(at: now),
-           Int.random(in: 0..<3, using: &rng) == 0 {
-            kind = date
-        }
+        guard p != .professional, let kind = Self.kind(for: m) else { return nil }
         return draw(kind, p).map { fill($0, moment: m) }
+    }
+
+    /// A date line to show instead of an `activated` or `idle` line: 1 in 3 while `now` is in a date window, at most
+    /// once per window, never in Professional. Earned (PRODUCT.md §4 rule 10): the engine doesn't spend the budget.
+    func dateLine(_ p: Personality, now: Date) -> String? {
+        guard p != .professional, let kind = dateKind(at: now) else { return nil }
+        let day = calendar.startOfDay(for: now)
+        if let last = lastDateWindow, last.kind == kind, last.day == day { return nil }
+        guard Int.random(in: 0..<3, using: &rng) == 0, let line = draw(kind, p) else { return nil }
+        lastDateWindow = (kind, day)
+        return line
     }
 
     /// Maps a moment onto its pool. nil = no copy for this moment (e.g. a replaced hold, a client disconnecting).
@@ -221,7 +227,6 @@ final class Narrator: Narrating {
             "cap": PlainCopy.capText(settings.lidMaxOnBatteryMinutes),
         ]
         switch m {
-        case .activated(let d): values["duration"] = Self.durationPhrase(d)
         case .watching(let t), .deactivated(.targetExited(let t)): values["name"] = FallbackCopy.shortName(t)
         case .guardTripped(.lidACCap): values["cap"] = PlainCopy.capText(settings.lidMaxOnACMinutes)
         case .deactivated(.batteryFloor(let percent)): values["floor"] = "\(percent)"
@@ -238,15 +243,6 @@ final class Narrator: Narrating {
         let fallbacks = ["{name}": "it", "{floor}": "low", "{cap}": "the", "{duration}": "for now"]
         for (key, value) in fallbacks { out = out.replacingOccurrences(of: key, with: value) }
         return out
-    }
-
-    /// "for 1 hour" / "until 17:30" / "until you stop it" (Professional `activated`).
-    static func durationPhrase(_ d: AwakeDuration) -> String {
-        switch d {
-        case .indefinite: return "until you stop it"
-        case .minutes(let m): return "for " + PlainCopy.spokenRemaining(TimeInterval(m * 60))
-        case .until(let date): return "until " + TimeFormat.endTime(date)
-        }
     }
 
     // MARK: - Plain copy (every tier; UX.md §5, §8). One source: FallbackCopy / PlainCopy.
@@ -308,7 +304,6 @@ final class Narrator: Narrating {
         if let kind, let line = draw(kind, p) {
             var values = context
             if values["floor"] == nil { values["floor"] = "\(settings.batteryFloorPercent)" }
-            if let name = context["name"] { values["name"] = name }
             return (plain.title, Self.fill(line, values))
         }
         return (plain.title, plain.body.isEmpty ? Self.plainBody(id, context: context) : plain.body)

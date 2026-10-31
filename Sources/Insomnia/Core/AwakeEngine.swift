@@ -102,6 +102,11 @@ final class AwakeEngine {
     @ObservationIgnored private let power: any PowerReading
     @ObservationIgnored private let assertions: any AssertionApplying
     @ObservationIgnored private let clock: @MainActor () -> Date
+    /// Monotonic seconds (stop during sleep, ignore wall-clock changes): bounds every wall-clock delta the engine
+    /// credits, so a clock jump never counts as awake or lid-closed time.
+    @ObservationIgnored private let uptime: @MainActor () -> TimeInterval
+    /// Identifies the current boot (the foreign-flag notification posts once per boot); nil when unknown.
+    @ObservationIgnored private let bootID: @MainActor () -> String?
     @ObservationIgnored private let logger = Logger(subsystem: "com.gdeml.Insomnia", category: "engine")
 
     // MARK: Hold storage (published as `holds`)
@@ -119,6 +124,8 @@ final class AwakeEngine {
     @ObservationIgnored private var thermalClearSince: Date?
     @ObservationIgnored private var policyRecheckAt: Date?
     @ObservationIgnored private var counters = LidCloseCounters()
+    /// `uptime()` when the counters were last advanced (caps their next credit).
+    @ObservationIgnored private var countersUptime: TimeInterval?
     @ObservationIgnored private var lastLidClosed = false
     @ObservationIgnored private var lastClosedLidMode: Bool
     @ObservationIgnored private var lastDesiredLid: Bool?
@@ -145,6 +152,13 @@ final class AwakeEngine {
 
     /// nil while the system sleeps (that time is never counted as awake).
     @ObservationIgnored private var accountedUntil: Date?
+    /// `uptime()` at `accountedUntil`: a credit never exceeds the monotonic time that really passed.
+    @ObservationIgnored private var accountedUptime: TimeInterval?
+    /// Between willSleep and didWake. Passes that run then (power observers, DarkWake) skip the escalation quip,
+    /// whose `awakeSince` is from before the sleep.
+    @ObservationIgnored private var systemAsleep = false
+    /// Wall clock and `uptime()` at the last pass, to measure a wall-clock jump (`systemClockChanged`).
+    @ObservationIgnored private var lastPassAnchor: (wall: Date, uptime: TimeInterval)?
     @ObservationIgnored private var wasAwakeForAccounting = false
     @ObservationIgnored private var wasEngagedClosedForAccounting = false
 
@@ -169,11 +183,15 @@ final class AwakeEngine {
     init(settings: Settings = .shared,
          power: any PowerReading = PowerMonitor.shared,
          assertions: any AssertionApplying = PowerAssertions(),
-         clock: @escaping @MainActor () -> Date = { Date() }) {
+         clock: @escaping @MainActor () -> Date = { Date() },
+         uptime: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         bootID: @escaping @MainActor () -> String? = { AwakeEngine.bootTime().map { String(Int($0.timeIntervalSince1970)) } }) {
         self.settings = settings
         self.power = power
         self.assertions = assertions
         self.clock = clock
+        self.uptime = uptime
+        self.bootID = bootID
         self.now = clock()
         self.lastClosedLidMode = settings.closedLidMode
     }
@@ -186,6 +204,7 @@ final class AwakeEngine {
         started = true
         lastLidClosed = power.isLidClosed
         accountedUntil = clock()
+        accountedUptime = uptime()
         startObserving()
         reevaluate()
 
@@ -317,7 +336,7 @@ final class AwakeEngine {
     private func babysitTargetExited(holdID: UUID) {
         guard let hold = babysit, hold.id == holdID, case .babysit(let target) = hold.owner else { return }
         endBabysit(.targetExited(target))
-        notify(.targetExited, context: ["name": target.displayName])
+        notify(.targetExited, context: ["name": FallbackCopy.shortName(target)])   // "ffmpeg finished", never the pid
         reevaluate()
     }
 
@@ -353,7 +372,9 @@ final class AwakeEngine {
         isPanelVisible = v
         if v, !isAwake, banner == nil {
             let today = clock()
-            if lastIdleQuip.map({ !Calendar.current.isDate($0, inSameDayAs: today) }) ?? true,
+            if let date = narrator?.dateLine(settings.personality, now: today) {
+                quip = date   // earned (PRODUCT.md §4 rule 10): doesn't use up the day's idle line
+            } else if lastIdleQuip.map({ !Calendar.current.isDate($0, inSameDayAs: today) }) ?? true,
                let line = narrator?.line(.idle, settings.personality, now: today) {
                 lastIdleQuip = today
                 quip = line
@@ -423,13 +444,16 @@ final class AwakeEngine {
         let wasAwake = status.isAwake
 
         // 0. Time accounting, then the clamshell-open event (resets the counters and the latch).
+        let mono = uptime()
+        lastPassAnchor = (t, mono)
         accountTime(until: t)
-        counters.advance(to: t, mode: counters.mode)
+        advanceCounters(to: t, mode: counters.mode, uptime: mono)
         let lidClosed = power.isLidClosed
         let lidOpened = lastLidClosed && !lidClosed
         lastLidClosed = lidClosed
         if lidOpened {
             counters.lidOpened(at: t)
+            countersUptime = mono
             if engagedWhileClosed { stats?.recordLidCloseSurvival() }
             engagedWhileClosed = false
         }
@@ -502,14 +526,20 @@ final class AwakeEngine {
         }
 
         // 6. Latch, then publish the desired flag.
+        let userAction = pendingUserLidAction
         latched = Policy.latch(previous: latched, lidGuardTripped: !output.lidGuards.isEmpty,
-                               isLidClosed: lidClosed, lidOpened: lidOpened, userAction: pendingUserLidAction)
+                               isLidClosed: lidClosed, lidOpened: lidOpened, userAction: userAction)
         pendingUserLidAction = false
         let desired = !isQuitting && Policy.desiredLid(lidAllowed: output.lidAllowed, hasLid: power.hasLid,
                                                        helper: helper, latched: latched)
         if desired != lastDesiredLid, let lidController {
             lastDesiredLid = desired
             lidController.setDesired(desired)
+        }
+        // CLOSED_LID.md §7: from `.error`, a user action retries (never foreignFlag / otherUser: those aren't ours).
+        if userAction, desired, let lidController, case .error(let e) = controllerStatus, e.alarms {
+            log("lid", "user action: retrying after \(e)")
+            lidController.retry()
         }
 
         // 7. Lid status, 8. mood.
@@ -524,7 +554,7 @@ final class AwakeEngine {
         // Counters accumulate from now on in the mode that is in effect after this pass.
         let mode = LidCloseCounters.mode(engaged: engaged, isLidClosed: lidClosed,
                                          externalDisplays: power.externalDisplayCount, isOnAC: power.isOnAC)
-        counters.advance(to: t, mode: mode)
+        advanceCounters(to: t, mode: mode, uptime: mono)
         if engaged && lidClosed { engagedWhileClosed = true }
         wasEngagedClosedForAccounting = engaged && lidClosed
         wasAwakeForAccounting = status.isAwake
@@ -534,8 +564,10 @@ final class AwakeEngine {
         handleLidTransition(from: previousLid, to: newLid, output: output, lidUsable: power.hasLid && helper == .installed)
         handleTimedHeadsUp(now: t)
         handleEscalation(now: t)
-        let stateChanged = previousStatus != status || previousLid != lid
-        if stateChanged && !bannerIsFresh { banner = nil }
+        // The lid opening or closing while engaged is the same state (the mission report arrives with it), and the
+        // crash-recovery banner is a launch fact that stays until dismissed (UX.md §2.1).
+        let stateChanged = previousStatus != status || Self.lidStateChanged(from: previousLid, to: lid)
+        if stateChanged && !bannerIsFresh && banner != .recovered { banner = nil }
         bannerIsFresh = false
         flushMoments(stateChanged: stateChanged, now: t)
         if pendingAnnouncement {
@@ -623,6 +655,9 @@ final class AwakeEngine {
             awakeSince = t
             escalationsFired = []
             stats?.recordSessionStarted()
+            // "Your Mac can sleep again" / "ffmpeg finished" are stale once something keeps it awake again.
+            notifier?.clear(.ended)
+            notifier?.clear(.targetExited)
         } else if !isAwakeNow && wasAwake {
             if let since = awakeSince { stats?.recordSessionEnded(duration: t.timeIntervalSince(since)) }
             awakeSince = nil
@@ -704,7 +739,7 @@ final class AwakeEngine {
     }
 
     private func handleEscalation(now t: Date) {
-        guard let since = awakeSince else { return }
+        guard !systemAsleep, let since = awakeSince else { return }
         let crossed = TickPlanner.crossedEscalations(since: since, now: t, fired: escalationsFired)
         guard let highest = crossed.last else { return }
         escalationsFired.formUnion(crossed)
@@ -723,6 +758,11 @@ final class AwakeEngine {
             guard let line = narrator?.line(moment, settings.personality, now: t) else { continue }
             if case .lidEngaged = moment { lastLidEngagedQuip = t }
             newLine = line
+        }
+        // A date line replaces an `activated` line; it is earned, so it neither waits for nor spends the budget.
+        if newLine == nil, moments.contains(where: { if case .activated = $0 { true } else { false } }),
+           let date = narrator?.dateLine(settings.personality, now: t) {
+            newLine = date
         }
         if newLine == nil, lastRotatingQuip.map({ t.timeIntervalSince($0) >= Self.quipBudget }) ?? true {
             for moment in moments.reversed() where isRotating(moment, now: t) {
@@ -767,14 +807,14 @@ final class AwakeEngine {
         notifier.post(id, title: copy.title, body: copy.body)
     }
 
+    /// An unknown boot posts once per run and is never stored (storing it would silence every later boot).
     private func notifyForeignFlagOncePerBoot() {
         guard !foreignFlagNotifiedThisRun else { return }
         foreignFlagNotifiedThisRun = true
-        let key = "engine.foreignFlagNotifiedBoot"
-        let boot = Self.bootTime().map { String(Int($0.timeIntervalSince1970)) } ?? "unknown"
-        let defaults = UserDefaults.standard
-        guard defaults.string(forKey: key) != boot else { return }
-        defaults.set(boot, forKey: key)
+        if let boot = bootID() {
+            guard settings.foreignFlagNotifiedBoot != boot else { return }
+            settings.foreignFlagNotifiedBoot = boot
+        }
         notify(.foreignFlag)
     }
 
@@ -871,10 +911,7 @@ final class AwakeEngine {
         observe(center, .insomniaSettingsDidChange, object: settings) { engine, key in engine.settingsChanged(key: key) }
         observe(center, .insomniaPowerDidChange, object: power) { engine, _ in engine.reevaluate() }
         observe(center, .insomniaRulesDidChange, object: nil) { engine, _ in engine.reevaluate() }
-        observe(center, .NSSystemClockDidChange, object: nil) { engine, _ in
-            engine.rearmDeadline()
-            engine.reevaluate()
-        }
+        observe(center, .NSSystemClockDidChange, object: nil) { engine, _ in engine.systemClockChanged() }
 
         let workspace = NSWorkspace.shared.notificationCenter
         observe(workspace, NSWorkspace.willSleepNotification, object: nil) { engine, _ in engine.systemWillSleep() }
@@ -895,6 +932,7 @@ final class AwakeEngine {
     }
 
     private func settingsChanged(key: String?) {
+        if key == "personality" { quip = nil }   // never leave the old voice's line (or a stale one) in the row
         if key == "closedLidMode" {
             let on = settings.closedLidMode
             defer { lastClosedLidMode = on }
@@ -911,15 +949,20 @@ final class AwakeEngine {
         reevaluate()
     }
 
-    private func systemWillSleep() {
+    /// Internal so tests can drive it (the live path is NSWorkspace.willSleepNotification).
+    func systemWillSleep() {
         accountTime(until: clock())
         accountedUntil = nil   // sleeping time is never awake time
+        accountedUptime = nil
+        systemAsleep = true
         log("engine", "system will sleep")
     }
 
     /// Internal so tests can drive it (the live path is NSWorkspace.didWakeNotification).
     func systemDidWake() {
         accountedUntil = clock()
+        accountedUptime = uptime()
+        systemAsleep = false
         log("engine", "system did wake")
         // A real sleep ended the continuous-awake stretch (eye bags, "awake 8 hours"); it starts again now.
         if status.isAwake {
@@ -939,14 +982,46 @@ final class AwakeEngine {
         scheduledDeadline = nil
     }
 
+    /// NSSystemClockDidChange (internal so tests can drive it). The jump is the wall-clock time since the last pass
+    /// minus the monotonic time that really passed. Duration anchors move with the clock, so the jump is never
+    /// counted as awake time, escalation, quip budget or a thermal window; hold end times stay wall-clock (an "until
+    /// 17:30" hold still ends at 17:30). Day-based anchors (idle line, first lid engagement) stay calendar days.
+    func systemClockChanged() {
+        if !systemAsleep, let anchor = lastPassAnchor {
+            let skew = clock().timeIntervalSince(anchor.wall) - (uptime() - anchor.uptime)
+            if abs(skew) >= 1 {
+                log("engine", "wall clock jumped \(Int(skew)) s")
+                shiftDurationAnchors(by: skew)
+            }
+        }
+        rearmDeadline()
+        reevaluate()
+    }
+
+    private func shiftDurationAnchors(by skew: TimeInterval) {
+        func shift(_ d: inout Date?) { d = d?.addingTimeInterval(skew) }
+        shift(&accountedUntil)
+        shift(&awakeSince)
+        shift(&lastRotatingQuip)
+        shift(&lastPokeAt)
+        shift(&thermalBagFairSince)
+        shift(&thermalClearSince)
+        counters.shift(by: skew)
+        lastPassAnchor = lastPassAnchor.map { ($0.wall.addingTimeInterval(skew), $0.uptime) }
+    }
+
     // MARK: - Stats accounting
 
     /// Credits wall time since the last call to Stats (awake / lid-closed). Never per second: only on re-evaluation.
+    /// Never more than the monotonic time that passed, so a wall-clock jump (forward or back) credits nothing extra.
     private func accountTime(until t: Date) {
         guard let from = accountedUntil else { return }
+        let mono = uptime()
+        let monoElapsed = accountedUptime.map { mono - $0 } ?? .infinity
         accountedUntil = t
+        accountedUptime = mono
         guard let stats else { return }
-        let elapsed = t.timeIntervalSince(from)
+        let elapsed = min(t.timeIntervalSince(from), monoElapsed)
         guard elapsed > 0 else { return }
         if wasAwakeForAccounting, let milestone = stats.addAwakeTime(elapsed) {
             pendingMoments.append(.milestone(hours: milestone))
@@ -954,7 +1029,20 @@ final class AwakeEngine {
         if wasEngagedClosedForAccounting { stats.addLidClosedTime(elapsed) }
     }
 
+    /// `LidCloseCounters.advance`, capped at the monotonic time since the last advance.
+    private func advanceCounters(to t: Date, mode: LidCloseCounters.Mode, uptime mono: TimeInterval) {
+        counters.advance(to: t, mode: mode, maxElapsed: countersUptime.map { mono - $0 })
+        countersUptime = mono
+    }
+
     // MARK: - Helpers
+
+    /// Lid changes that count as a state change for the banner and quip row: not the lid opening or closing while
+    /// engaged (`.engaged(lidClosed:)` flips), which arrives in its own pass right after the mission report.
+    private static func lidStateChanged(from old: LidStatus, to new: LidStatus) -> Bool {
+        if case .engaged = old, case .engaged = new { return false }
+        return old != new
+    }
 
     private func setIfChanged<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<AwakeEngine, T>, _ value: T) {
         if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
@@ -982,7 +1070,7 @@ final class AwakeEngine {
 
     static func capLabel(_ minutes: Int) -> String { AwakeDuration.minutes(minutes).shortLabel }
 
-    private static func bootTime() -> Date? {
+    nonisolated static func bootTime() -> Date? {
         var tv = timeval()
         var size = MemoryLayout<timeval>.size
         guard sysctlbyname("kern.boottime", &tv, &size, nil, 0) == 0 else { return nil }

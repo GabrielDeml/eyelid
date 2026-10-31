@@ -234,10 +234,11 @@ struct LidCloseCounters: Equatable, Sendable {
     private(set) var since: Date?
 
     /// Credits the time since the last call to the mode that was in effect, then switches to `newMode`.
-    /// A clock that went backwards credits nothing.
-    mutating func advance(to now: Date, mode newMode: Mode) {
+    /// A clock that went backwards credits nothing; `maxElapsed` (the monotonic time that really passed) caps a
+    /// wall-clock jump forward.
+    mutating func advance(to now: Date, mode newMode: Mode, maxElapsed: TimeInterval? = nil) {
         if let since {
-            let elapsed = max(0, now.timeIntervalSince(since))
+            let elapsed = max(0, min(now.timeIntervalSince(since), maxElapsed ?? .infinity))
             switch mode {
             case .idle: break
             case .bag: bagSeconds += elapsed
@@ -246,6 +247,11 @@ struct LidCloseCounters: Equatable, Sendable {
         }
         mode = newMode
         since = now
+    }
+
+    /// A wall-clock change: move the anchor with the clock so the jump isn't credited.
+    mutating func shift(by skew: TimeInterval) {
+        since = since?.addingTimeInterval(skew)
     }
 
     /// Clamshell-open event: both counters back to zero.

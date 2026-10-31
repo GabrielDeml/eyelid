@@ -10,7 +10,10 @@ import UserNotifications
 ///   given.
 /// - Authorization is requested only at the welcome card's "Got it", lid setup success, and when session notifications
 ///   are switched on. Posts made before macOS has an answer are queued (latest per id), so the first safety
-///   notification is never lost; a denial drops the queue.
+///   notification is never lost; a denial drops the queue. At drain time the session gate is checked again and session
+///   notifications older than `NotificationQueue.sessionLifetime` are dropped as stale.
+/// - A cached denial never drops a post: the user may have allowed notifications in System Settings since, and macOS
+///   enforces the permission itself (a refused post is logged by `deliver`).
 /// - Inert when the process isn't a real `.app` bundle (`swift test`, the raw binary): UNUserNotificationCenter raises
 ///   an exception without a bundle proxy.
 @MainActor
@@ -47,11 +50,27 @@ enum Notifier: NotificationPosting {
         }
     }
 
-    private enum Authorization { case unknown, notDetermined, allowed, denied }
+    enum Authorization { case unknown, notDetermined, allowed, denied }
+
+    /// What `post` does with a notification under the cached authorization.
+    enum Disposition: Equatable { case deliver, enqueue }
+
+    /// Only an unanswered authorization queues. `.denied` delivers anyway: the cache can be stale (the user turned
+    /// notifications on in System Settings) and macOS drops the post itself if they are still off.
+    static func disposition(for authorization: Authorization) -> Disposition {
+        switch authorization {
+        case .allowed, .denied: return .deliver
+        case .unknown, .notDetermined: return .enqueue
+        }
+    }
+
+    /// The session gate, re-checked when the queue drains (the setting may have been switched off meanwhile).
+    static var shouldDeliver: @MainActor (NotificationID) -> Bool = {
+        !$0.isSessionNotification || Settings.shared.sessionNotifications
+    }
 
     private static var authorization = Authorization.unknown
-    private static var queue: [NotificationID: (title: String, body: String)] = [:]
-    private static var queueOrder: [NotificationID] = []
+    private static var queue = NotificationQueue()
     private static var isSetUp = false
     private static let log = Logger(subsystem: "com.gdeml.Insomnia", category: "notify")
 
@@ -114,19 +133,18 @@ enum Notifier: NotificationPosting {
 
     static func post(_ id: NotificationID, title: String, body: String) {
         guard isAvailable else { return }
-        switch authorization {
-        case .allowed:
+        switch disposition(for: authorization) {
+        case .deliver:
             deliver(id, title: title, body: body)
-        case .denied:
-            log.info("notification \(id.rawValue, privacy: .public) dropped: not allowed")
-        case .unknown, .notDetermined:
-            enqueue(id, title: title, body: body)
+            if authorization == .denied { refreshAuthorization() }   // follow a change made in System Settings
+        case .enqueue:
+            queue.enqueue(id, title: title, body: body, at: Date())
             if !isSetUp { setUp() }
         }
     }
 
     static func clear(_ id: NotificationID) {
-        if queue.removeValue(forKey: id) != nil { queueOrder.removeAll { $0 == id } }
+        queue.remove(id)
         guard let center else { return }
         center.removeDeliveredNotifications(withIdentifiers: [id.rawValue])
         center.removePendingNotificationRequests(withIdentifiers: [id.rawValue])
@@ -134,22 +152,14 @@ enum Notifier: NotificationPosting {
 
     // MARK: Queue
 
-    private static func enqueue(_ id: NotificationID, title: String, body: String) {
-        queue[id] = (title, body)
-        queueOrder.removeAll { $0 == id }
-        queueOrder.append(id)
-    }
-
     private static func drainQueue() {
         switch authorization {
         case .allowed:
-            let pending = queueOrder.compactMap { id in queue[id].map { (id, $0) } }
-            queue = [:]
-            queueOrder = []
-            for (id, copy) in pending { deliver(id, title: copy.title, body: copy.body) }
+            for entry in queue.drain(now: Date(), shouldDeliver: shouldDeliver) {
+                deliver(entry.id, title: entry.title, body: entry.body)
+            }
         case .denied:
-            queue = [:]
-            queueOrder = []
+            queue.removeAll()
         case .unknown, .notDetermined:
             break
         }
@@ -193,13 +203,13 @@ enum Notifier: NotificationPosting {
     // MARK: Responses (from NotificationDelegate, on the main actor)
 
     /// `actionIdentifier` is a `Notifier.Action` raw value, or the system default/dismiss identifiers.
-    static func handleResponse(actionIdentifier: String, requestIdentifier: String) {
-        let engine = AwakeEngine.shared
+    static func handleResponse(actionIdentifier: String, requestIdentifier: String, engine: AwakeEngine = .shared) {
         switch Action(rawValue: actionIdentifier) {
         case .extend15:
             engine.extend(minutes: 15, source: .notification)
         case .stop:
-            engine.deactivate(.user(.notification))
+            // "Allow Sleep" = the eyes: ends manual/babysit holds and pauses satisfied rules. Never activates.
+            if engine.isAwake { engine.toggle(source: .notification) }
         case .retry:
             if let retryLidHandler { retryLidHandler() } else { AppRouter.shared.openSettings(.lidSafety) }
         case .reset:
@@ -226,9 +236,12 @@ enum Notifier: NotificationPosting {
 /// variants, calls the handler synchronously, then hops to the main actor with only Sendable strings
 /// (UNNotification / UNNotificationResponse aren't Sendable).
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable {
+    /// Frontmost: a banner that also stays in Notification Center, never sound (UX §10).
+    static let foregroundPresentation: UNNotificationPresentationOptions = [.banner, .list]
+
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner])   // frontmost: banner only, never sound (UX §10)
+        completionHandler(Self.foregroundPresentation)
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
@@ -238,6 +251,46 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
         completionHandler()
         Task { @MainActor in
             Notifier.handleResponse(actionIdentifier: action, requestIdentifier: request)
+        }
+    }
+}
+
+/// Posts waiting for macOS's authorization answer: the latest per id, in post order, with the time they were posted.
+struct NotificationQueue {
+    struct Entry: Equatable {
+        let id: NotificationID
+        var title: String
+        var body: String
+        var postedAt: Date
+    }
+
+    /// Session notifications (ending-soon, ended, target-exited) describe a moment; once this old they are stale.
+    /// Safety notifications (lid-stuck, lid-error, foreign-flag, recovered, …) stay queued until the answer.
+    static let sessionLifetime: TimeInterval = 5 * 60
+
+    private(set) var entries: [Entry] = []
+
+    mutating func enqueue(_ id: NotificationID, title: String, body: String, at date: Date) {
+        entries.removeAll { $0.id == id }
+        entries.append(Entry(id: id, title: title, body: body, postedAt: date))
+    }
+
+    mutating func remove(_ id: NotificationID) {
+        entries.removeAll { $0.id == id }
+    }
+
+    mutating func removeAll() {
+        entries = []
+    }
+
+    /// Empties the queue and returns what is still worth delivering: the session gate is checked again, and stale
+    /// session notifications are dropped.
+    mutating func drain(now: Date, shouldDeliver: (NotificationID) -> Bool) -> [Entry] {
+        let pending = entries
+        entries = []
+        return pending.filter { entry in
+            guard shouldDeliver(entry.id) else { return false }
+            return !entry.id.isSessionNotification || now.timeIntervalSince(entry.postedAt) <= Self.sessionLifetime
         }
     }
 }

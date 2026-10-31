@@ -48,8 +48,8 @@ struct NarratorTests {
     @Test func professionalIsPlain() {
         for kind in CopyKind.allCases {
             let pool = Copy.pool(kind, .professional)
-            if kind.isDecorative {
-                #expect(pool.isEmpty, "\(kind) is decorative: Professional must have no line")
+            if !CopyKind.professionalKinds.contains(kind) {
+                #expect(pool.isEmpty, "\(kind) is never shown in Professional: no line")
             } else {
                 #expect((1...2).contains(pool.count), "\(kind): Professional has one or two lines")
             }
@@ -60,16 +60,18 @@ struct NarratorTests {
         }
     }
 
-    @Test func professionalReturnsNilForDecorativeMoments() {
+    /// Professional has no quip row, so `line()` is nil for every moment (and never spends the quip budget).
+    @Test func professionalReturnsNilForEveryMoment() {
         let n = Self.narrator()
-        let decorative: [Moment] = [.idle, .awake(hours: 2), .awake(hours: 72), .poke(5), .poke(50),
-                                    .milestone(hours: 100), .lidReopened]
-        for m in decorative {
+        let moments: [Moment] = [.idle, .awake(hours: 2), .awake(hours: 72), .poke(5), .poke(50),
+                                 .milestone(hours: 100), .lidReopened, .activated(.minutes(60)), .activated(.indefinite),
+                                 .lidEngaged, .deactivated(.user(.panel)), .deactivated(.batteryFloor(percent: 20)),
+                                 .watching(.process(name: "ffmpeg")), .guardTripped(.thermal), .recoveredAfterCrash,
+                                 .setupDone, .setupCancelled]
+        for m in moments {
             #expect(n.line(m, .professional, now: Self.ordinary) == nil, "\(m)")
         }
-        #expect(n.line(.activated(.minutes(60)), .professional, now: Self.ordinary) == "Keeping your Mac awake for 1 hour.")
-        #expect(n.line(.activated(.indefinite), .professional, now: Self.ordinary) == "Keeping your Mac awake until you stop it.")
-        #expect(n.line(.lidEngaged, .professional, now: Self.ordinary) == "Lid mode is on.")
+        #expect(n.sample(.professional) == "Lid mode is on.")
     }
 
     // MARK: Lint (rules 1, 2, 12)
@@ -136,8 +138,8 @@ struct NarratorTests {
             let exited = n.line(.deactivated(.targetExited(.pid(4411, name: "make"))), .unhinged, now: Self.ordinary) ?? ""
             #expect(!exited.contains("{"))
         }
-        let floor = n.line(.deactivated(.batteryFloor(percent: 20)), .professional, now: Self.ordinary)
-        #expect(floor == "Stopped keeping awake at 20% battery.")
+        let floor = n.line(.deactivated(.batteryFloor(percent: 15)), .cheeky, now: Self.ordinary) ?? ""
+        #expect(!floor.contains("{"), "\(floor)")
     }
 
     @Test func pokeLinesOnlyAtTheSteps() {
@@ -176,19 +178,29 @@ struct NarratorTests {
         #expect(n.dateKind(at: Self.ordinary) == nil)
     }
 
-    @Test func halloweenLinesReplaceAboutAThird() {
-        let n = Self.narrator(seed: 11)
+    @Test func halloweenLinesShowAboutAThirdOfTheTimeOncePerWindow() {
         let halloween = Set(Copy.pool(.dateHalloween, .cheeky))
         let day = Self.date(2026, 10, 31, 15)
+        // 1 in 3 per eligible moment: over many fresh narrators, about a third show the line on the first try.
         var hits = 0
         let trials = 600
-        for _ in 0..<trials where halloween.contains(n.line(.activated(.minutes(60)), .cheeky, now: day) ?? "") { hits += 1 }
+        for seed in 0..<UInt64(trials) {
+            if let line = Self.narrator(seed: seed).dateLine(.cheeky, now: day) {
+                #expect(halloween.contains(line))
+                hits += 1
+            }
+        }
         #expect(hits > trials / 5 && hits < trials / 2, "\(hits) of \(trials)")
+        // At most once per window; `line()` never returns a date line.
+        let n = Self.narrator(seed: 11)
+        let shown = (0..<60).compactMap { _ in n.dateLine(.cheeky, now: day) }
+        #expect(shown.count == 1)
+        for _ in 0..<60 { #expect(!halloween.contains(n.line(.activated(.minutes(60)), .cheeky, now: day) ?? "")) }
         // Never on an ordinary day, never in Professional.
-        for _ in 0..<60 { #expect(!halloween.contains(n.line(.activated(.minutes(60)), .cheeky, now: Self.ordinary) ?? "")) }
+        for _ in 0..<60 { #expect(n.dateLine(.cheeky, now: Self.ordinary) == nil) }
         let pro = Set(CopyKind.dateKinds.flatMap { Copy.pool($0, .professional) })
         #expect(pro.isEmpty)
-        for _ in 0..<30 { #expect(n.line(.idle, .professional, now: day) == nil) }
+        for _ in 0..<30 { #expect(Self.narrator(seed: 3).dateLine(.professional, now: day) == nil) }
     }
 
     // MARK: Notifications (rule 3, UX §10)

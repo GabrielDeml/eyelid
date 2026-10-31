@@ -77,6 +77,10 @@ final class Settings {
     /// cdhash of the bundled helper at the last successful register(); nil when not registered. Lets an unanswering
     /// helper after a rebuild be treated as `.versionMismatch` (silent re-register), not `.unreachable`.
     var helperRegisteredCDHash: String? { didSet { storeOptional(helperRegisteredCDHash, "helperRegisteredCDHash") } }
+    /// Boot (kern.boottime seconds) for which the `foreign-flag` notification last posted: once per boot (UX.md §10).
+    var foreignFlagNotifiedBoot: String? {
+        didSet { storeOptional(foreignFlagNotifiedBoot, "engine.foreignFlagNotifiedBoot") }
+    }
 
     var defaultDuration: AwakeDuration { AwakeDuration(storedMinutes: defaultDurationMinutes) }
     /// Options for settings-following manual and babysit holds. Rule holds use
@@ -103,9 +107,10 @@ final class Settings {
 
         // Assign every property while `self` is still being initialised, so the observable init accessors run instead
         // of the setters: init must never write UserDefaults or post `.insomniaSettingsDidChange` (an observer would
-        // re-enter `Settings.shared` while it is still being created). The optional goes first: Optionals start out
-        // initialised, so assigning it last would go through the setter and its `didSet`.
+        // re-enter `Settings.shared` while it is still being created). The optionals go first: Optionals start out
+        // initialised, so assigning them last would go through the setter and its `didSet`.
         helperRegisteredCDHash = defaults.string(forKey: "helperRegisteredCDHash")
+        foreignFlagNotifiedBoot = defaults.string(forKey: "engine.foreignFlagNotifiedBoot")
         keepScreenOn = bool("keepScreenOn", true)
         closedLidMode = bool("closedLidMode", false)
         defaultDurationMinutes = int("defaultDurationMinutes", 0)
@@ -127,8 +132,11 @@ final class Settings {
         personality = Personality(rawValue: defaults.string(forKey: "personality") ?? "") ?? .cheeky
 
         hotKeyEnabled = bool("hotKeyEnabled", true)
-        hotKeyCode = UInt32(int("hotKeyCode", kVK_ANSI_I))
-        hotKeyModifiers = UInt32(int("hotKeyModifiers", cmdKey | optionKey | controlKey))
+        // An out-of-range stored value (an outside `defaults write`) falls back to the default instead of trapping.
+        // Not `clamping:`: -1 would become 0, the 'A' key.
+        hotKeyCode = UInt32(exactly: int("hotKeyCode", kVK_ANSI_I)) ?? UInt32(kVK_ANSI_I)
+        hotKeyModifiers = UInt32(exactly: int("hotKeyModifiers", cmdKey | optionKey | controlKey))
+            ?? UInt32(cmdKey | optionKey | controlKey)
 
         hasCompletedOnboarding = bool("hasCompletedOnboarding", false)
         lidBatteryCalloutShown = bool("lidBatteryCalloutShown", false)

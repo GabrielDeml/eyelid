@@ -34,6 +34,9 @@ protocol LidControlling: AnyObject {
     func refreshHelper() async
     /// Idempotent; the engine calls it only when the desired value changes.
     func setDesired(_ engaged: Bool)
+    /// From `.error`: try again if lid mode is still wanted. The engine calls it on a user action while lid mode is
+    /// wanted and the controller is in an alarming error (CLOSED_LID.md §7 "Retry or user action → .engaging").
+    func retry()
     func releaseForQuit(timeout: Duration) async
     /// Release the flag (await), then `/usr/bin/pmset sleepnow`.
     func sleepNow() async
@@ -59,8 +62,14 @@ protocol EventLogging: AnyObject {
 @MainActor
 protocol Narrating: AnyObject {
     func line(_ m: Moment, _ p: Personality, now: Date) -> String?
+    /// An earned date line to show instead of an `activated` / `idle` line, or nil (PRODUCT.md §4 rule 10).
+    func dateLine(_ p: Personality, now: Date) -> String?
     func headline(status: AwakeStatus, lid: LidStatus) -> String
     func notification(_ id: NotificationID, _ p: Personality, context: [String: String]) -> (title: String, body: String)
+}
+
+extension Narrating {
+    func dateLine(_ p: Personality, now: Date) -> String? { nil }
 }
 
 /// M4 — `Notifier` (a caseless enum with static methods) conforms; assign `Notifier.self`.
