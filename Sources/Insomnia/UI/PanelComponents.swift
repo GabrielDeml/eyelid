@@ -332,10 +332,14 @@ struct UntilPicker: View {
         .frame(width: 210)
     }
 
-    private func target(for t: Date) -> AwakeDuration {
-        let c = Calendar.current.dateComponents([.hour, .minute], from: t)
-        let minute = ((c.minute ?? 0) + 2) / 5 * 5
-        return AwakeDuration.nextOccurrence(hour: (c.hour ?? 0) + minute / 60, minute: minute % 60)
+    private func target(for t: Date) -> AwakeDuration { Self.target(for: t) }
+
+    /// The picked time rounded to 5 minutes, next occurrence after `now`. 23:58 rounds to 00:00, not to an hour 24 that
+    /// `Calendar.nextDate` can't match (which fell back to "24 h from now", R37).
+    static func target(for t: Date, now: Date = Date(), calendar: Calendar = .current) -> AwakeDuration {
+        let c = calendar.dateComponents([.hour, .minute], from: t)
+        let total = ((c.hour ?? 0) * 60 + ((c.minute ?? 0) + 2) / 5 * 5) % 1440
+        return AwakeDuration.nextOccurrence(hour: total / 60, minute: total % 60, after: now, calendar: calendar)
     }
 
     private func label(for d: AwakeDuration) -> String {

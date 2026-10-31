@@ -3,7 +3,8 @@ import os
 
 /// The live Dock tile, Dock menu and Dock click (docs/UX.md §3; ARCHITECTURE.md "UI/DockController.swift").
 ///
-/// - Presence follows `Settings.showInDock`: `.regular` with a tile, `.accessory` without. Switching never closes windows.
+/// - Presence follows `Settings.showInDock`: `.regular` with a tile, `.accessory` without. Switching deactivates the app
+///   for a moment; `applyPresence` keeps the panel open through it and brings the key window back (R33).
 /// - The tile draws `EyesRenderer.appIcon(size: 128, mood:, pill:)` with the time **inside** the tile. `badgeLabel` is
 ///   used only for a lid error or stuck flag ("!" = needs attention).
 /// - Redraws only when (mood, pill, badge) changes: at most once a minute under 1 h, once a second in the final minute.
@@ -14,9 +15,18 @@ import os
 final class DockController {
     static let shared = DockController()
 
-    /// "Until…" in the Dock menu. AppDelegate wires it to open the panel with the Until… popover; without it the panel
-    /// opens plainly.
+    /// "Until…" in the Dock menu. AppDelegate wires it to open the floating panel with the Until… popover; without it
+    /// the panel opens plainly.
     var untilHandler: (() -> Void)?
+    /// "Open Panel" in the Dock menu: the floating panel (UX §2.6). AppDelegate wires it; without it the panel opens
+    /// wherever `AppRouter.showPanel` puts it.
+    var openPanelHandler: (() -> Void)?
+
+    /// How long an activation-policy switch is given to settle before the app re-activates.
+    static let presenceSettleDelay: TimeInterval = 0.1
+
+    /// True while an activation-policy switch settles. The panel ignores the focus loss it causes (R33).
+    var isSwitchingPresence: Bool { presenceSwitch.isActive }
 
     private struct Render: Equatable {
         var mood: EyeMood
@@ -32,6 +42,9 @@ final class DockController {
     private var frameCount = 0
     private var frameHandler: (@MainActor (Int) -> Void)?
     private var started = false
+    private var presenceSwitch = PresenceSwitch()
+    /// Whether the app was active, and its key window, when the first of a burst of switches began.
+    private var restoreAfterSwitch: (active: Bool, key: NSWindow?)?
     private let log = Logger(subsystem: "com.gdeml.Insomnia", category: "dock")
 
     // MARK: Lifecycle
@@ -61,9 +74,17 @@ final class DockController {
     private func applyPresence() {
         let policy: NSApplication.ActivationPolicy = isShown ? .regular : .accessory
         if NSApp.activationPolicy() != policy {
-            // Keep whatever is frontmost frontmost: `.accessory` can deactivate the app, which would close the panel.
+            // Switching to `.accessory` deactivates the app at once (R33): the panel would close on the focus loss, and
+            // Settings would drop behind the next app with no Dock icon or ⌘Tab entry to get it back. Hold the panel's
+            // focus-loss close while the switch settles, then re-activate and bring the key window back. Re-activating
+            // synchronously loses the race with the deactivation.
+            if !presenceSwitch.isActive { restoreAfterSwitch = (NSApp.isActive, NSApp.keyWindow) }
+            let token = presenceSwitch.begin()
             NSApp.setActivationPolicy(policy)
             log.info("dock presence: \(self.isShown ? "shown" : "hidden", privacy: .public)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.presenceSettleDelay) { [weak self] in
+                MainActor.assumeIsolated { self?.finishPresenceSwitch(token) }
+            }
         }
         if isShown {
             if NSApp.dockTile.contentView !== tileView {
@@ -75,6 +96,15 @@ final class DockController {
             stopAnimation()
             NSApp.dockTile.badgeLabel = nil
         }
+    }
+
+    private func finishPresenceSwitch(_ token: Int) {
+        guard presenceSwitch.end(token) else { return }   // a later switch is still settling
+        let restore = restoreAfterSwitch
+        restoreAfterSwitch = nil
+        guard let restore, restore.active else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        if let key = restore.key, key.isVisible { key.makeKeyAndOrderFront(nil) }
     }
 
     // MARK: Tile
@@ -208,12 +238,15 @@ final class DockController {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let headline = Narrator.shared.headline(status: engine.status, lid: engine.lid)
-        let sub = Narrator.shared.subline(status: engine.status, lid: engine.lid, remaining: engine.remaining, now: engine.now)
-        let header = NSMenuItem(title: Self.dockHeader(headline: headline, subline: sub, status: engine.status),
-                                action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: Self.dockHeader(LivePanelState.make()), action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
+        if Self.offersReset(engine.lid) {
+            // The header can't carry the panel's "Reset with password…" link (UX §3).
+            menu.addItem(ActionMenuItem("Reset Sleep with Password…", accessibility: "Reset sleep with your password") {
+                LivePanelState.perform(.lidReset)
+            })
+        }
 
         let keepAwake = NSMenuItem(title: "Keep Awake For", action: nil, keyEquivalent: "")
         let durations = NSMenu()
@@ -224,7 +257,7 @@ final class DockController {
             })
         }
         durations.addItem(ActionMenuItem("Until…") { [weak self] in
-            if let handler = self?.untilHandler { handler() } else { AppRouter.shared.showPanel() }
+            if let handler = self?.untilHandler { handler() } else { self?.openPanel() }
         })
         keepAwake.submenu = durations
         menu.addItem(keepAwake)
@@ -261,7 +294,7 @@ final class DockController {
         }
 
         menu.addItem(.separator())
-        menu.addItem(ActionMenuItem("Open Panel") { AppRouter.shared.showPanel() })
+        menu.addItem(ActionMenuItem("Open Panel") { [weak self] in self?.openPanel() })
         menu.addItem(ActionMenuItem("Why Awake?") { AppRouter.shared.showWhyAwake() })
         let settingsItem = ActionMenuItem("Settings…") { AppRouter.shared.openSettings(.general) }
         settingsItem.isEnabled = AppRouter.shared.openSettingsHandler != nil
@@ -269,14 +302,21 @@ final class DockController {
         return menu
     }
 
-    /// "Wide awake · 42 min left". The subline's inline links ("Stop", "edit in Settings") are panel-only.
-    static func dockHeader(headline: String, subline: String, status: AwakeStatus) -> String {
-        let cleaned = subline
-            .replacingOccurrences(of: " · Stop", with: "")
-            .replacingOccurrences(of: " · edit in Settings", with: "")
-        if case .asleep = status { return headline }
-        return cleaned.isEmpty ? headline : "\(headline) · \(cleaned)"
+    private func openPanel() {
+        if let openPanelHandler { openPanelHandler() } else { AppRouter.shared.showPanel() }
     }
+
+    /// "Wide awake · 42 min left". Only the subline's plain text: its links ("Stop", "edit in Settings", "Reset with
+    /// password…", "2 more ›") are panel-only.
+    static func dockHeader(_ s: PanelState) -> String {
+        let headline = PlainCopy.headline(s)
+        if case .asleep = s.status, s.lid != .stuck { return headline }
+        let text = PlainCopy.subline(s).text
+        return text.isEmpty ? headline : "\(headline) · \(text)"
+    }
+
+    /// A stuck flag gets its own enabled "Reset Sleep with Password…" item: the header's link would be dead.
+    static func offersReset(_ lid: LidStatus) -> Bool { lid == .stuck }
 }
 
 /// The Dock tile's content view: the app icon with the time drawn in, plus an optional pulse glow.
@@ -345,5 +385,24 @@ final class ActionMenuItem: NSMenuItem {
 
     @objc private func run(_ sender: Any?) {
         handler()
+    }
+}
+
+/// The settling window of an activation-policy switch (R33). Each switch gets a token; only the latest switch's
+/// completion ends the window, so a quick second switch keeps the panel protected until it too has settled.
+struct PresenceSwitch: Equatable {
+    private var generation = Generation()
+    private(set) var isActive = false
+
+    mutating func begin() -> Int {
+        isActive = true
+        return generation.advance()
+    }
+
+    /// Ends the window if `token` is the latest switch. Returns false for a superseded switch.
+    mutating func end(_ token: Int) -> Bool {
+        guard generation.isCurrent(token) else { return false }
+        isActive = false
+        return true
     }
 }

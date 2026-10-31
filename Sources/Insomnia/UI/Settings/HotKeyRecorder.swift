@@ -78,18 +78,37 @@ final class RecorderSession {
 
     @ObservationIgnored private var monitor: Any?
     @ObservationIgnored private var completion: ((Result) -> Void)?
+    /// The window the recorder lives in. Keys for other windows pass through, and the session ends when this window
+    /// closes or loses key: SwiftUI doesn't call `onDisappear` when the Settings window only hides (R8).
+    @ObservationIgnored private var windowID: ObjectIdentifier?
+    @ObservationIgnored private var windowObservers: [NSObjectProtocol] = []
 
     func start(_ completion: @escaping (Result) -> Void) {
+        start(in: NSApp.keyWindow, completion)
+    }
+
+    func start(in window: NSWindow?, _ completion: @escaping (Result) -> Void) {
         stop()
         self.completion = completion
         isRecording = true
         rejected = false
         liveModifiers = 0
         HotKeyManager.shared.setSuspended(true)
+        if let window {
+            windowID = ObjectIdentifier(window)
+            for name in [NSWindow.willCloseNotification, NSWindow.didResignKeyNotification] {
+                windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.stop() }
+                })
+            }
+        }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             // Local monitors run on the main thread. Only Sendable values cross into the isolated closure.
             let type = event.type, code = UInt32(event.keyCode), flags = event.modifierFlags
-            let swallow = MainActor.assumeIsolated { self?.handle(type: type, keyCode: code, flags: flags) ?? false }
+            let eventWindow = event.window.map(ObjectIdentifier.init)
+            let swallow = MainActor.assumeIsolated {
+                self?.handle(type: type, keyCode: code, flags: flags, window: eventWindow) ?? false
+            }
             return swallow ? nil : event
         }
     }
@@ -101,6 +120,9 @@ final class RecorderSession {
     private func finish(_ result: Result) {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        windowObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        windowObservers = []
+        windowID = nil
         let done = completion
         completion = nil
         if isRecording { HotKeyManager.shared.setSuspended(false) }
@@ -110,8 +132,11 @@ final class RecorderSession {
         done?(result)
     }
 
-    /// Returns true to swallow the event.
-    private func handle(type: NSEvent.EventType, keyCode code: UInt32, flags: NSEvent.ModifierFlags) -> Bool {
+    /// Returns true to swallow the event. Events for another window (the panel's Esc, ⌘Q) are none of its business.
+    func handle(type: NSEvent.EventType, keyCode code: UInt32, flags: NSEvent.ModifierFlags,
+                window: ObjectIdentifier?) -> Bool {
+        guard isRecording else { return false }
+        if let windowID, window != windowID { return false }
         let mods = HotKeyManager.carbonModifiers(from: flags.intersection(.deviceIndependentFlagsMask))
         if type == .flagsChanged {
             liveModifiers = mods

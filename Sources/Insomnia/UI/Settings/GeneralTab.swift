@@ -167,29 +167,41 @@ final class LaunchAtLogin {
 
     private(set) var isOn = false
     private(set) var note: Note?
+    /// What the user last asked for. An error note stays until the status matches it (R45); `.enabled` alone isn't
+    /// enough, because a failed unregister also stays `.enabled`.
+    @ObservationIgnored private var requested: Bool?
 
     func refresh() {
-        let status = SMAppService.mainApp.status
+        apply(SMAppService.mainApp.status)
+    }
+
+    func apply(_ status: SMAppService.Status) {
         isOn = status == .enabled || status == .requiresApproval
         switch status {
         case .requiresApproval:
             note = Note(text: "Allow Insomnia in System Settings ▸ General ▸ Login Items.", isError: false,
                         offersSettings: true)
         case .enabled, .notRegistered, .notFound:
-            if note?.isError != true { note = nil }
+            if note?.isError != true || requested == isOn { note = nil }
         @unknown default:
             note = nil
         }
     }
 
+    /// A register/unregister call failed.
+    func recordFailure(_ on: Bool, code: Int) {
+        requested = on
+        note = Note(text: "Couldn't \(on ? "turn on" : "turn off") launch at login (code \(code)).", isError: true,
+                    offersSettings: true)
+    }
+
     func set(_ on: Bool) {
+        requested = on
         do {
             if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
             note = nil
         } catch {
-            let code = (error as NSError).code
-            note = Note(text: "Couldn't \(on ? "turn on" : "turn off") launch at login (code \(code)).", isError: true,
-                        offersSettings: true)
+            recordFailure(on, code: (error as NSError).code)
         }
         let previousError = note
         refresh()

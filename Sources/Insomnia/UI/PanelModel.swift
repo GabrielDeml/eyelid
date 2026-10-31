@@ -49,6 +49,8 @@ struct PanelState: Equatable {
     var reopenReport: ReopenReport?
     /// Continuous awake time (eye bags at 24 h / 72 h).
     var awakeFor: TimeInterval = 0
+    /// The engine's poke counter (UX §9: each click within 8 s of the last). The eyes cross at 20.
+    var pokeCount = 0
     var batteryFloor = 20
     var lidBatteryCapMinutes = 60
     var lidACCapMinutes = 240
@@ -108,7 +110,8 @@ final class PanelModel {
     /// Which kind of control has keyboard focus (mirrored from the view's FocusState for the key handler).
     @ObservationIgnored var focus: PanelFocus?
 
-    @ObservationIgnored private var pokes: [Date] = []
+    /// Poke count at which the eyes cross (UX §9).
+    static let crossEyesPokes = 20
 
     init(provider: @escaping () -> PanelState, clockFreeProvider: (() -> PanelState)? = nil,
          handler: @escaping (PanelAction) -> Void) {
@@ -125,7 +128,14 @@ final class PanelModel {
     func send(_ action: PanelAction) {
         switch action {
         case .eyes:
-            countPoke()
+            handler(action)
+            // One poke counter, the engine's (R9): it bumped on this click, and its lines and badge use the same count.
+            let s = state
+            if s.pokeCount == Self.crossEyesPokes, s.personality != .professional { cues.crossEyes += 1 }
+            return
+        case .sleepNow:
+            // Never leave the panel open across sleep (R96).
+            AppRouter.shared.closePanel()
         case .extend:
             cues.extend += 1
         case .setLid(true):
@@ -152,6 +162,9 @@ final class PanelModel {
     /// UX §2.5 single-key shortcuts. Returns true if handled. The host skips this while a text field is first responder.
     func handleKey(_ event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection([.command, .control, .option])
+        if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "w" {   // ⌘W, like any window
+            send(.closePanel); return true
+        }
         guard mods.isEmpty else { return false }
         switch event.keyCode {
         case 36, 76:                                           // Return / Enter
@@ -177,13 +190,6 @@ final class PanelModel {
             send(.setLid(!s.lidToggleOn)); return true
         default: return false
         }
-    }
-
-    /// Poke egg (UX §9): 5+ clicks within 8 s. The engine owns the lines; the eyes cross at 20.
-    private func countPoke() {
-        let now = Date()
-        pokes = pokes.filter { now.timeIntervalSince($0) < 8 } + [now]
-        if pokes.count == 20, state.personality != .professional { cues.crossEyes += 1 }
     }
 
     private static func stubWhileMenu() -> NSMenu {
@@ -421,7 +427,8 @@ enum PlainCopy {
     static func banner(_ b: Banner, _ s: PanelState) -> PanelBanner {
         switch b {
         case .batteryFloor(let p):
-            return PanelBanner(symbol: "battery.25percent", text: "Lid mode off at \(p)% battery", tone: .warning)
+            // The opt-in awake floor ended the hold (UX §10 `battery-stop`); the lid floor is `.guardTripped`.
+            return PanelBanner(symbol: "battery.25percent", text: "Stopped keeping awake at \(p)% battery", tone: .warning)
         case .guardTripped(let g):
             let symbol = switch g {
             case .thermal: "thermometer.high"
@@ -533,10 +540,9 @@ enum LivePanelState {
         s.canOpenSettings = AppRouter.shared.openSettingsHandler != nil
 
         let holds = engine.holds
-        if let manual = engine.manualHold {
-            s.selectedPreset = preset(matching: manual)
-            s.fixedHoldWithoutLid = !manual.followsSettings && !manual.options.lid
-        }
+        if let manual = engine.manualHold { s.selectedPreset = preset(matching: manual) }
+        s.fixedHoldWithoutLid = fixedHoldWithoutLid(holds)
+        s.pokeCount = engine.pokeCount
         s.clientOnly = engine.isHeldOnlyByClients
         s.extraHolds = max(0, holds.count - 1)
         if clock, s.isAwake, let since = engine.awakeSince { s.awakeFor = s.now.timeIntervalSince(since) }
@@ -579,6 +585,12 @@ enum LivePanelState {
         case .lidReset: Task { await ClosedLidController.shared.resetWithPassword() }
         case .closePanel: AppRouter.shared.closePanel()
         }
+    }
+
+    /// H′ "Off for this session" (UX §5): a fixed-options hold without lid (CLI flags, URL, `insomnia run`/`watch`
+    /// clients) is running and no hold asks for lid mode (R43).
+    static func fixedHoldWithoutLid(_ holds: [Hold]) -> Bool {
+        holds.contains { !$0.followsSettings && !$0.options.lid } && !holds.contains { $0.options.lid }
     }
 
     private static func preset(matching hold: Hold) -> AwakeDuration? {

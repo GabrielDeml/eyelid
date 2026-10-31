@@ -20,39 +20,29 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let (window, tabs) = makeIfNeeded()
         tabs.select(tab)
         NSApp.activate(ignoringOtherApps: true)
-        if !window.isVisible { window.center() }
-        window.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)   // where the user left it (R36); centred only the first time ever
     }
 
     func close() { window?.performClose(nil) }
 
+    /// ⌘W is the main menu's File ▸ Close (AppDelegate), like every other window.
     private func makeIfNeeded() -> (NSWindow, SettingsTabViewController) {
         if let window, let tabController { return (window, tabController) }
         let power = PowerMonitor.shared
         let tabs = SettingsTabViewController(hasLid: power.hasLid, hasBattery: power.hasBattery)
-        let w = SettingsWindow(contentViewController: tabs)
+        let w = NSWindow(contentViewController: tabs)
         w.styleMask = [.titled, .closable, .miniaturizable]
         w.toolbarStyle = .preference
         w.isReleasedWhenClosed = false
         w.delegate = self
+        let restored = w.setFrameUsingName("InsomniaSettings")
         w.setFrameAutosaveName("InsomniaSettings")
         w.collectionBehavior.insert(.fullScreenNone)
         window = w
         tabController = tabs
         tabs.fitWindow(animated: false)
+        if !restored { w.center() }
         return (w, tabs)
-    }
-}
-
-/// ⌘W closes (the app's main menu has no Window menu, so the window handles it itself).
-private final class SettingsWindow: NSWindow {
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if mods == .command, event.charactersIgnoringModifiers == "w" {
-            performClose(nil)
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
     }
 }
 

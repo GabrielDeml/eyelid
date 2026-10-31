@@ -61,6 +61,7 @@ Implementation:
 - **macOS 27+:** set `statusItem.expandedInterfaceDelegate` (inside `if #available(macOS 27, *)`; the property is weak, so the controller owns itself). In `statusItem(_:didBegin:)`, read `NSApp.currentEvent`:
   - right-click, ctrl-click or ⌥-click: call `session.cancel()` and perform that action instead;
   - otherwise: show the panel below the item. When the panel closes, call `statusItem.expandedInterfaceSession?.cancel()`.
+  - If the panel is already open without a session (Dock menu, Spotlight, `insomnia://panel`), cancel the session and close the panel: a click toggles, as on 14–26.
   - In `statusItemDidEndExpandedInterfaceSession(_:animated:)`, **close the panel** (keyboard menu navigation, a click on another extra).
 
   **Spike this first.** If right-click doesn't reach the delegate, fall back to the 14–26 path on 27 as well.
@@ -110,7 +111,7 @@ Tahoe+ has "Allow in the Menu Bar", and macOS 27 has overflow and ejection, so o
 
 What to do when it's hidden:
 
-- The first time, show the **Hidden card** (§7.2).
+- The first time, show the **Hidden card** (§7.2). If the panel is open (the first-run welcome), the card waits until the panel closes.
 - Afterwards, the hotkey keeps working, and opening Insomnia from Spotlight/Finder (or "Open Panel" in the Dock menu) opens the panel as a floating window (§2.6).
 
 ---
@@ -220,13 +221,13 @@ panel stays under 2% of a core). No timers run when it's closed.
 | S | Toggle Keep screen on |
 | L | Toggle lid mode |
 | ⌘, / ⌘Q | Settings / Quit (via the app's main menu) |
-| Esc | Close the panel |
+| Esc / ⌘W | Close the panel |
 
-Every control is reachable with Tab and shows a focus ring. Single-key shortcuts are off while a text field is first responder. The app installs a minimal main menu (App: About, Settings… ⌘,, Quit ⌘Q; Edit: Undo/Redo/Cut/Copy/Paste/Select All) so text fields get standard editing keys.
+Every control is reachable with Tab and shows a focus ring. Single-key shortcuts are off while a text field is first responder. The app installs a minimal main menu (App: About, Settings… ⌘,, Quit ⌘Q; File: Close ⌘W; Edit: Undo/Redo/Cut/Copy/Paste/Select All) so text fields get standard editing keys and ⌘W closes Settings, About and Lid Mode setup.
 
 ### 2.6 Floating panel fallback
 
-This is used when the status item is hidden or when "Open Panel" is chosen from the Dock menu:
+This is used when the status item is hidden or when "Open Panel" or "Until…" is chosen from the Dock menu:
 
 - The same `PanelView` in `PanelWindow` (§2.2 Window), shown after `NSApp.activate()`.
 - Positioned top-centre of the screen under the mouse (`NSEvent.mouseLocation`), 80 pt below that screen's menu bar (`visibleFrame` top), so it's never under a full-screen auto-hidden bar.
@@ -238,7 +239,7 @@ This is used when the status item is hidden or when "Open Panel" is chosen from 
 
 | Aspect | Spec |
 |---|---|
-| Activation policy | Dock on: `.regular`. Dock off: `.accessory`. Switching never closes open windows. |
+| Activation policy | Dock on: `.regular`. Dock off: `.accessory`. Switching never closes open windows: the switch deactivates the app for a moment, so the panel ignores that focus loss and, ~0.1 s later, Insomnia re-activates and brings the panel or Settings back to the front. |
 | Tile | `NSApp.dockTile.contentView` is a custom view drawing `EyesRenderer.appIcon(size: 128, mood:)`: an indigo→violet squircle, large eyes with amber irises (awake) or closed arcs with "z z" (asleep), and night-vision eyes plus indigo glow when lid mode is engaged. |
 | Time | A white rounded **pill drawn inside the tile** at the bottom centre (SF Pro Rounded 22 bold, monospaced digits): "42m", "1h 5m", "∞", the first 4 letters of a watched/CLI label ("ffmp…"), or nothing (asleep, rules). It's **not** `badgeLabel`, because a red badge means "needs attention". The Dock tile has no accessibility API; VoiceOver reads the app name, and the status item carries the state. |
 | Badge | `dockTile.badgeLabel = "!"` **only** for lid `.error`/`.stuck`. Otherwise nil. |
@@ -247,7 +248,8 @@ This is used when the status item is hidden or when "Open Panel" is chosen from 
 | Dock menu (`applicationDockMenu`) | Shown below. |
 
 ```
-Wide awake · 42 min left            (disabled)
+Wide awake · 42 min left            (disabled; the subline's text only, no links)
+Reset Sleep with Password…          (lid stuck only)
 Keep Awake For ▸   30m 1h 2h 4h 8h ∞ Until…
 Extend +15m                         (timed only)
 Allow Sleep                         (awake only)
@@ -300,7 +302,8 @@ Rules: keep awake automatically
 
 Command line
   insomnia   ● Installed at ~/.local/bin/insomnia  [Reinstall] [Remove]
-             ⚠ ~/.local/bin is not on your PATH. Add: export PATH="$HOME/.local/bin:$PATH"  [Copy]
+             ⚠ ~/.local/bin is not on your PATH. Add: export PATH="$HOME/.local/bin:$PATH"  [Copy] [Check Again]
+  A PATH warning is re-checked on activation (at most every 20 s) and with Check Again.
 
 URL scheme (works from Shortcuts → "Open URLs" or Terminal → open "…"; links can't turn lid mode on, so use the CLI for that)
   insomnia://on?for=45m            [⧉]
@@ -497,7 +500,7 @@ Full-width buttons, stacked in this order (three side by side don't fit in 320 p
 
 ## 9. Poke Easter egg
 
-When the panel eyes get **5 or more clicks within 8 s**, each further click still toggles (we never block a toggle), and the quip row shows `Narrator.line(.poke(count))`:
+When the panel eyes get **5 or more clicks, each within 8 s of the last** (one counter, the engine's), each further click still toggles (we never block a toggle), and the quip row shows `Narrator.line(.poke(count))`:
 
 | Clicks | Effect |
 |---|---|
