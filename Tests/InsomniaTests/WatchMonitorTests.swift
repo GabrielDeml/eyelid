@@ -187,6 +187,9 @@ struct WatchMonitorRuleTests {
 
         system.processes["ffmpeg"] = []
         await monitor.performScan()
+        #expect(monitor.satisfiedRules.map(\.id) == [rule.id])   // grace period
+        system.advance(WatchMonitor.grace)
+        await monitor.performScan()
         #expect(monitor.satisfiedRules.isEmpty)
         #expect(posts.count == 2)
     }
@@ -347,7 +350,7 @@ struct WhilePromptLookupTests {
         #expect(await WhilePrompt.lookup(.pid, "abc") == .unavailable("Enter a process number"))
         #expect(await WhilePrompt.lookup(.pid, "\(getpid())") == .unavailable("That's Insomnia itself"))
         if case .found(let target, _) = await WhilePrompt.lookup(.pid, "1") {
-            #expect(target == .pid(1, name: AssertionInspector.processName(pid: 1) ?? "pid 1"))
+            #expect(target == .pid(1, name: "launchd"))   // root's process: named by its executable path
         } else {
             Issue.record("pid 1 should resolve")
         }

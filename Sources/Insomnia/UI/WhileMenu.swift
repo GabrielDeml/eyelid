@@ -185,20 +185,24 @@ final class WhilePrompt: NSObject, NSPopoverDelegate {
         switch kind {
         case .processName:
             let key = trimmed.lowercased()
-            let hits = await Task.detached(priority: .userInitiated) { ProcessTable.scan([key])[key] ?? [] }.value
-            return processLookup(name: trimmed, pids: hits.map(\.pid))
+            let raw = await Task.detached(priority: .userInitiated) { ProcessTable.scan([key]) }.value
+            // The same app filter as rules and watches: Claude.app is not the `claude` CLI.
+            let appPIDs = WatchMonitor.appPIDs(LiveWatchSystem().runningApps())
+            let pids = (ProcessMatcher.excludingApps(raw, appPIDs: appPIDs)[key] ?? []).map(\.pid)
+            return processLookup(name: trimmed, pids: pids, appMatched: pids.isEmpty && !(raw[key] ?? []).isEmpty)
         case .pid:
             guard let pid = Int32(trimmed), pid > 0 else { return .unavailable("Enter a process number") }
             if pid == getpid() { return .unavailable("That's Insomnia itself") }
             let alive = ProcessTable.isAlive(pid)
-            let name = alive ? AssertionInspector.processName(pid: pid) : nil
+            let name = alive ? ProcessTable.displayName(pid: pid) : nil
             return pidLookup(pid: pid, alive: alive, name: name)
         }
     }
 
-    /// Pure: the result for a process name and the PIDs that match it.
-    static func processLookup(name: String, pids: [Int32]) -> Lookup {
+    /// Pure: the result for a process name and the PIDs that match it. `appMatched`: only running apps matched.
+    static func processLookup(name: String, pids: [Int32], appMatched: Bool = false) -> Lookup {
         let sorted = pids.sorted()
+        if sorted.isEmpty, appMatched { return .unavailable("That's an app: use Running apps") }
         guard let first = sorted.first else { return .unavailable("No running process named \u{201C}\(name)\u{201D}") }
         let summary: String
         if sorted.count == 1 {
@@ -210,7 +214,8 @@ final class WhilePrompt: NSObject, NSPopoverDelegate {
         return .found(.process(name: name), summary: summary)
     }
 
-    /// Pure: the result for a PID.
+    /// Pure: the result for a PID. `name` comes from `ProcessTable.displayName(pid:)`; unresolved → "pid N" (which
+    /// `WatchTarget.displayName` shows once, not as "pid N (N)").
     static func pidLookup(pid: Int32, alive: Bool, name: String?) -> Lookup {
         guard alive else { return .unavailable("No process with PID \(pid)") }
         let resolved = (name?.isEmpty == false ? name : nil) ?? "pid \(pid)"

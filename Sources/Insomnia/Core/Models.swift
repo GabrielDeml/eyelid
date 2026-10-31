@@ -73,7 +73,9 @@ enum WatchTarget: Hashable, Codable, Sendable {
     case app(bundleID: String, name: String)
     /// Matches (case-insensitive) if ANY of: proc_name, basename(proc_pidpath), basename(argv[0]) via
     /// KERN_PROCARGS2, or, for interpreters (node, bun, deno, ruby, Python*, python3*), basename of the
-    /// first non-flag argument. Needed because e.g. `claude` renames itself and `npm`/`codex` show as `node`.
+    /// first non-flag argument. Needed because e.g. `claude` renames itself and `npm`/`codex` show as `node`. Also:
+    /// python3/python3.x for Python (framework) binaries, the first word of a retitled interpreter's argv[0] (npm's
+    /// "npm run build"), and other users' processes by name and path only. Running apps' PIDs never match.
     case process(name: String)
     case pid(Int32, name: String)
 
@@ -81,7 +83,7 @@ enum WatchTarget: Hashable, Codable, Sendable {
         switch self {
         case .app(_, let name): return name
         case .process(let name): return name
-        case .pid(let pid, let name): return "\(name) (\(pid))"
+        case .pid(let pid, let name): return name.isEmpty || name == "pid \(pid)" ? "pid \(pid)" : "\(name) (\(pid))"
         }
     }
 }
