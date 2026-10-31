@@ -1,0 +1,562 @@
+# Insomnia: UX Specification
+
+This file specifies every surface for v1. Behaviour lives in `../ARCHITECTURE.md`, and closed-lid internals live in `CLOSED_LID.md`. All sizes are in points.
+
+---
+
+## 1. Menu bar item
+
+### 1.1 Glyphs (template images, drawn in code)
+
+- **Canvas:** 22 × 16 pt inside the 22 pt bar, stroke 1.5 pt (2.0 under Increase Contrast).
+- **Format:** `isTemplate = true`, alpha only, crisp at 1x and 2x.
+- **Colour:** never encodes state. Shape alone does.
+
+| Mood (`EyeMood`) | Shape | When |
+|---|---|---|
+| `.asleep` | Two downward arcs (closed lids), plus a 5 pt "z" up and right | Nothing is holding the Mac awake |
+| `.awake` | Two almond outlines with filled round pupils, centred | Manual hold (timed or indefinite) |
+| `.watching` | Almond outlines, pupils shifted 3 pt right, plus a 2 pt dot after the right eye | Only babysit, CLI or rule holds are active |
+| `.lid` | **Filled** almonds with knocked-out pupils ("night vision"): a solid silhouette | Lid mode engaged (flag read back as 1) |
+| `.squint` | Two flat almond slits (height 3 pt), no pupils | An alarm guard: `thermal`, `lowPowerMode`, `batteryFloor`, `awakeBatteryFloor`. (`acRequired` and `lidBatteryCap` keep the normal mood; H′ explains.) |
+| `.alarmed` | Left eye open, right eye an "×" | Lid error or stuck |
+
+When several apply, the first one wins: `alarmed > squint > lid > awake > watching > asleep` (`EyeMood(status:lid:)` in `Models.swift`). **Before M1 ends**, check all six side by side at 1x and 2x, light and dark.
+
+### 1.2 Motion (the only motion the menu bar ever shows)
+
+| Event | Animation |
+|---|---|
+| Toggle via the menu bar, hotkey or Dock | One blink, about 180 ms in total (3 frames: half, closed, half). |
+| Final 60 s of a timed hold | One slow blink every 10 s. |
+| Anything else | Static. **No idle blink or glance loops.** |
+
+Under Reduce Motion, nothing animates: the glyph swaps instantly.
+
+### 1.3 Timer text (optional)
+
+`Settings.menuBarTimer` takes one of three values:
+
+- `off`
+- `lastTenMinutes` (the default)
+- `always`
+
+Rules for the text:
+
+- **Format:** `TimeFormat.compact` (for example "42m", "1h 5m", "<1m"), set in SF Pro 11 with monospaced digits, 3 pt after the glyph.
+- **When it shows:** only for timed holds. It never shows for ∞ or rule holds, which keeps the item narrow so macOS 27 doesn't eject it.
+- **Refresh rate:** once a minute, or once a second during the final minute. The engine changes the string; the status item redraws only when the string changes.
+
+### 1.4 Click model
+
+| Input | Default action | Swappable? |
+|---|---|---|
+| Left-click | Open/close the **panel** | Yes: `Settings.leftClickAction` swaps it with right-click |
+| Right-click / ctrl-click | **Toggle** (default duration), with one blink | Yes (it's the other action) |
+| ⌥-click | **Why awake?** native menu (§1.5) | No |
+
+Implementation:
+
+- **Never assign `statusItem.menu`.** On 27.0.1 it drops clicks on multi-display setups.
+- **macOS 27+:** set `statusItem.expandedInterfaceDelegate` (inside `if #available(macOS 27, *)`; the property is weak, so the controller owns itself). In `statusItem(_:didBegin:)`, read `NSApp.currentEvent`:
+  - right-click, ctrl-click or ⌥-click: call `session.cancel()` and perform that action instead;
+  - otherwise: show the panel below the item. When the panel closes, call `statusItem.expandedInterfaceSession?.cancel()`.
+  - In `statusItemDidEndExpandedInterfaceSession(_:animated:)`, **close the panel** (keyboard menu navigation, a click on another extra).
+
+  **Spike this first.** If right-click doesn't reach the delegate, fall back to the 14–26 path on 27 as well.
+- **macOS 14–26:** `button.sendAction(on: [.leftMouseUp, .rightMouseUp])` with target/action, and an `NSPopover(.transient)` for the panel.
+- **Focus:** call `NSApp.activate()` before showing any panel host, or an accessory app gets no keyboard focus.
+- **Native menus** (the Why awake menu) open with `NSMenu.popUp(positioning:at:in:)` relative to the button.
+
+### 1.5 Why awake? menu (⌥-click)
+
+```
+Why is my Mac awake?                         (disabled header)
+──────────────────────────────
+Insomnia
+  You · 1h timer · screen on · lid
+  Rule · Xcode is running
+  Watching · ffmpeg (4411)
+Guards
+  Paused lid mode · running hot
+Other apps
+  zoom.us · Preventing display sleep
+  caffeinate (61150) · Preventing idle sleep
+System
+  SleepDisabled: Yes (set by Insomnia)
+  Lid: open · Thermal: nominal · AC · 95%
+──────────────────────────────
+Open Diagnostics…
+Copy Report
+```
+
+- Sections with no rows are omitted. With nothing at all, it shows "Nothing. Your Mac is free to sleep."
+- On macOS 27, items carry no images (`preferredImageVisibility` stays at default). Meaning lives in the text.
+
+### 1.6 Tooltip and accessibility
+
+| Property | Value |
+|---|---|
+| Tooltip | `Headline · subline` (e.g. "Wide awake · 42 min left") plus "\nClick: panel · Right-click: toggle · ⌥-click: why awake" |
+| `accessibilityLabel` | "Insomnia" |
+| `accessibilityValue` | A plain sentence in every tier, e.g. "Awake, 42 minutes left, lid mode on". Updated only on state change, never every second. |
+
+### 1.7 Hidden by macOS
+
+Tahoe+ has "Allow in the Menu Bar", and macOS 27 has overflow and ejection, so our item can be hidden. To detect it:
+
+- 2 s after install, on `NSWindow.didChangeOcclusionStateNotification` of the button's window, and on `didChangeScreenParametersNotification`, check: `occlusionState` lacks `.visible`, **or** `window.screen == nil`, **or** the button's frame intersects `screen.auxiliaryTopLeftArea`/`auxiliaryTopRightArea` (behind the notch).
+- If the item stays hidden for more than 3 s, treat it as hidden. This is a heuristic.
+
+What to do when it's hidden:
+
+- The first time, show the **Hidden card** (§7.2).
+- Afterwards, the hotkey keeps working, and opening Insomnia from Spotlight/Finder (or "Open Panel" in the Dock menu) opens the panel as a floating window (§2.6).
+
+---
+
+## 2. Panel
+
+### 2.1 Wireframe (320 wide, ≤ 340 tall, fixed regions, no scroll)
+
+```
+┌────────────────────────────────────────────────┐
+│ ╭──────────╮                                   │
+│ │  ◉    ◉  │  Wide awake                    ⋯  │  A B C
+│ │  ‿‿‿‿‿‿  │  42 min left · until 15:12        │  D
+│ ╰──────────╯                                   │
+├────────────────────────────────────────────────┤
+│  30m   1h   2h  [4h]  8h   ∞                   │  E
+│  Until…   While…                               │  F
+├────────────────────────────────────────────────┤
+│  Keep screen on                         [●━━]  │  G
+│  Stay awake with lid closed             [━━○]  │  H  (MacBooks only)
+│     Ready · close the lid anytime              │  H' (fixed 14 pt slot)
+├────────────────────────────────────────────────┤
+│  "I've seen things. Mostly your tabs."         │  J  (quip or banner)
+└────────────────────────────────────────────────┘
+```
+
+Height budget: header 96 · chips 28 · F 28 · G+H+H′ 72 · J 34, plus separators and padding. Every region is fixed, so the panel never changes size between states (the first-run card is the one exception). About 13 targets.
+
+Variants:
+
+- **Asleep:** the eyes are closed with a floating "z", the headline is "Sleep allowed", and the subline is "Click the eyes to stay awake".
+- **Safety banner** (battery floor, heat, crash recovery, mission report): **replaces row J** with an icon, plain text and a ✕. Stays until dismissed or the next state change.
+- **First-run card** (§7.1): shown above row E on first launch only.
+
+### 2.2 Element specs
+
+| Id | Element | Size / type | Behaviour |
+|---|---|---|---|
+| A | **Eyes button** (mascot = toggle) | 72 × 72 circle. Eyes 44 wide. Progress ring 3 pt, inset 2. | State = `status.isAwake`. **Off → on:** a manual hold with the default duration. **On → off:** ends manual and babysit holds and **pauses every satisfied rule until its condition goes false and true again** (subline "Xcode rule paused until Xcode quits"). If only client holds remain, the button is disabled with tooltip "Held by a command" and subline "Held by `make` (CLI)". The ring traces elapsed/total for timed holds. Hover: 1.03 scale, tooltip "Keep awake" / "Allow sleep". Rapid clicks feed the **poke egg** (§9). |
+| B | Headline | SF Pro 17 semibold, primary | The plain headline from §8. |
+| C | `⋯` menu button | 22 × 22, borderless, `ellipsis.circle` | Menu: **Sleep Now**, Why awake?…, Settings… ⌘,, About Insomnia, Quit ⌘Q. |
+| D | Subline | SF Pro 12, secondary, monospaced digits | timed: "42 min left · until 15:12" (last hour: `TimeFormat.countdown`, "41:07 left"). ∞: "Until you say so". Non-manual primary hold: "While ffmpeg (4411) runs · **Stop**" (Stop releases the babysit hold; CLI holds show "Held by `make` (CLI)" and rules show "Rule", neither with Stop). More holds: "· 2 more ›" (opens Why awake). Suspended: the reason in orange. This replaces the old holds list. |
+| E | Duration chips | Capsules 28 tall, SF Pro 12 medium, 8 pt gap | Clicking starts a manual hold right away (replacing any manual hold, which also serves as "extend"). The running preset's chip is filled amber with dark text and is `.isSelected` for VoiceOver. Tooltip: duration name (Cheeky and Unhinged). |
+| F | `Until…` / `While…` | Same capsule style | **Until…** opens an inline popover with an hour:minute `DatePicker` (step 5 min) and **Start**; a past time means tomorrow ("tomorrow 07:00"). **While…** opens a menu: *Running apps ▸*, *Suggested ▸* (only names from `claude, codex, xcodebuild, ffmpeg, rsync, make, cargo, npm, python3` that the matcher in `Models.swift` `WatchTarget.process` actually finds, shown with pid), *Process name…*, *PID…*. Extend is not a chip: use `+`, the Dock menu, the notification action or the VoiceOver action. |
+| G | Keep screen on | Row 28 tall, SF Pro 13, trailing `Toggle(.switch)`, mini | Binds `Settings.keepScreenOn`; applies live to manual and babysit holds (rules have their own box). |
+| H | Lid toggle | Same style. Hidden when `!hasLid`. | Binds `Settings.closedLidMode`; applies to **every** hold except fixed CLI/URL ones (`CLOSED_LID.md` §5). Helper missing: turning it on opens **Lid setup** (§6) instead (VoiceOver value "Off", hint "Requires one-time setup. Opens setup."). Turning it on while nothing holds the Mac **also starts a manual hold** (default duration) with one blink. Turning it off never ends a hold. |
+| H' | Lid sublabel | SF Pro 11, fixed 14 pt slot (empty when silent) | Wording per `LidStatus` in §5. |
+| J | Quip / banner | SF Pro 12, secondary, 2 lines max, fixed 34 pt | `Narrator.line(...)` within the quip budget (`PRODUCT.md` §4 rule 11), crossfading 200 ms. Empty in Professional and when the line is nil. |
+
+**Spacing:**
+
+- Outer padding: 14.
+- Section separators: 1 px `separatorColor`.
+- Vertical rhythm: 10 between rows, 12 around separators.
+
+**Window:**
+
+- **macOS 27 (and the floating fallback on any version):** `PanelWindow`, a borderless `NSPanel` subclass with `canBecomeKey == true`. Material: `NSGlassEffectView` (`cornerRadius = 12`, hosting view as `contentView`) on macOS 26+, else `NSVisualEffectView(.popover)`. `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]`, `level = .popUpMenu`. Anchored to `button.window.screen` at click time.
+- **macOS 14–26 from the menu bar:** `NSPopover` supplies the material.
+
+### 2.3 Colour tokens (defined once in `UI/Theme.swift`)
+
+| Token | Light | Dark | Use |
+|---|---|---|---|
+| `accentAwake` | `#E8940C` (amber) | `#FFB547` | Ring, selected chip fill, irises |
+| `onAccent` | `#1A1206` | `#1A1206` | Text on amber (white on amber fails 4.5:1) |
+| `accentLid` | `systemIndigo` | `systemIndigo` | Lid toggle tint, night-vision glow (panel and Dock tile) |
+| `sleepTone` | `secondaryLabelColor` | `secondaryLabelColor` | Closed eyes, "z" |
+| `warning` | `systemOrange` | `systemOrange` | Suspended text and banner icon |
+| `danger` | `systemRed` | `systemRed` | Errors |
+| `sclera` | `#FFFFFF` | `#F4F1EA` | Panel eyes (the menu bar glyph is a template) |
+
+Colour is **never** the only signal. Every coloured state also changes text and shape.
+
+### 2.4 Panel eyes motion (only while the panel is visible)
+
+| Event | Animation | Reduce Motion |
+|---|---|---|
+| Idle, awake | Blink every 4–9 s (random). Pupils follow the cursor, up to ±2 pt, eased. | None |
+| Idle, asleep | Closed lids. A "z" drifts up and fades every 6 s. | Static "z" |
+| Toggle on | Lids snap open (120 ms spring), pupils dilate once (+20%, 200 ms), ring fades in | Crossfade 150 ms |
+| Toggle off | Lids lower (350 ms ease-in), then the "z" fades in | Crossfade 150 ms |
+| Extend | Double-take: two quick blinks | None |
+| Lid engaged | Faint indigo glow under the lower lids (opacity 0.35) | Static glow |
+| **First wake** (first launch) | Eyes open slowly (600 ms), blink twice, find the cursor; then the welcome card | Crossfade |
+| **Night vision** (first lid engagement each day) | Indigo glow sweeps across the eyes (400 ms); the Dock tile pulses once | Static glow |
+| **Mission report** (reopen after ≥ 5 min) | Banner grows into a card; numbers count up (600 ms) | Final numbers |
+| **Eye bags** (≥ 24 h continuously awake) | Subtle bags under the eyes; ≥ 72 h adds thin amber veins | Same (static art) |
+| Suspended (heat) | Squint, plus one sweat drop that slides once | Static squint |
+| Error | Right eye shows "×" | Same |
+| Final 60 s | Heavy lids (40% closed) | Same (it's a static pose) |
+
+Use `TimelineView(.animation)` **only while the panel window is key/visible**. No timers run when it's closed.
+
+### 2.5 Keyboard (the panel is first responder when it opens)
+
+| Key | Action |
+|---|---|
+| Space | Press the focused control |
+| Return | Toggle (when the eyes or nothing is focused) |
+| 1–6 | Presets 30m, 1h, 2h, 4h, 8h, ∞ |
+| U / W | Until… / While… |
+| `=` / `+` | Extend +15m |
+| S | Toggle Keep screen on |
+| L | Toggle lid mode |
+| ⌘, / ⌘Q | Settings / Quit (via the app's main menu) |
+| Esc | Close the panel |
+
+Every control is reachable with Tab and shows a focus ring. Single-key shortcuts are off while a text field is first responder. The app installs a minimal main menu (App: About, Settings… ⌘,, Quit ⌘Q; Edit: Undo/Redo/Cut/Copy/Paste/Select All) so text fields get standard editing keys.
+
+### 2.6 Floating panel fallback
+
+This is used when the status item is hidden or when "Open Panel" is chosen from the Dock menu:
+
+- The same `PanelView` in `PanelWindow` (§2.2 Window), shown after `NSApp.activate()`.
+- Positioned top-centre of the screen under the mouse (`NSEvent.mouseLocation`), 80 pt below that screen's menu bar (`visibleFrame` top), so it's never under a full-screen auto-hidden bar.
+- It closes on Esc or when it loses key status.
+
+---
+
+## 3. Dock (`Settings.showInDock`, default on; chosen on the welcome card)
+
+| Aspect | Spec |
+|---|---|
+| Activation policy | Dock on: `.regular`. Dock off: `.accessory`. Switching never closes open windows. |
+| Tile | `NSApp.dockTile.contentView` is a custom view drawing `EyesRenderer.appIcon(size: 128, mood:)`: an indigo→violet squircle, large eyes with amber irises (awake) or closed arcs with "z z" (asleep), and night-vision eyes plus indigo glow when lid mode is engaged. |
+| Time | A white rounded **pill drawn inside the tile** at the bottom centre (SF Pro Rounded 22 bold, monospaced digits): "42m", "1h 5m", "∞", the first 4 letters of a watched/CLI label ("ffmp…"), or nothing (asleep, rules). It's **not** `badgeLabel`, because a red badge means "needs attention". The Dock tile has no accessibility API; VoiceOver reads the app name, and the status item carries the state. |
+| Badge | `dockTile.badgeLabel = "!"` **only** for lid `.error`/`.stuck`. Otherwise nil. |
+| Redraw | `dockTile.display()` only when (mood, pill string) changes. Under 1 h that's at most once a minute, plus once a second in the last minute. |
+| Click (`applicationShouldHandleReopen`) | Only a reopen **sent by the Dock** (sender PID == Dock's PID) with `showInDock` on **toggles** (eyes-button semantics, §2.2 A) with one tile blink. Any other reopen (Spotlight, Finder, `open`, the CLI) **opens the panel**. Never bounces. |
+| Dock menu (`applicationDockMenu`) | Shown below. |
+
+```
+Wide awake · 42 min left            (disabled)
+Keep Awake For ▸   30m 1h 2h 4h 8h ∞ Until…
+Extend +15m                         (timed only)
+Allow Sleep                         (awake only)
+──────────
+✓ Keep Screen On
+✓ Stay Awake With Lid Closed        (Set Up… if helper missing; hidden without a lid)
+──────────
+Open Panel
+Why Awake?
+Settings…
+```
+
+---
+
+## 4. Settings (four toolbar tabs, `Form(.grouped)`, 540 wide)
+
+### 4.1 General
+
+```
+Startup
+  Launch at login                                    [✓]
+  Start keeping awake at launch                      [ ]
+Behaviour
+  Default duration                        [Until I stop ▾]   (30m…8h, Until I stop)
+  Clicking the eyes in the menu bar      (•) Opens panel   ( ) Toggles
+  Show timer in menu bar            [ Off | Last 10 min | Always ]
+  Show in Dock                                       [✓]
+  Notify before a timer ends and when it ends        [✓]
+  Global hotkey (toggle)            [ ⌃⌥⌘I ]  [Clear]
+     Include ⌘ or ⌃.                                   (recorder rejects ⌥/⌥⇧-only combos)
+     ⚠ That shortcut is taken by another app.         (eventHotKeyExistsErr only; else "Couldn't register (code N)")
+Personality
+  [ Professional | Cheeky | Unhinged ]
+  "Lid closed. I'm watching. Through the lid. Don't ask."   ← live sample, reshuffles on change
+```
+
+### 4.2 Automations
+
+```
+Rules: keep awake automatically
+  ┌───────────────────────────────────────────────────────────────┐
+  │ [●] While [Xcode ▾] is running        ☐ screen  ☐ lid   ●  [−] │  ● = active now
+  │ [●] While process [ffmpeg     ] runs  ☑ screen  ☐ lid   ○  [−] │
+  │ [ ] While on power adapter            ☐ screen  ☐ lid   ○  [−] │
+  │ [+ Add rule ▾]  App… · Running app ▸ · Process name… ·          │
+  │                 On power adapter · External display connected   │
+  └───────────────────────────────────────────────────────────────┘
+  Rules never override a guard. The panel's lid switch applies to rules too;
+  "lid" here means "even when the switch is off". It still needs lid mode set up.
+
+Command line
+  insomnia   ● Installed at ~/.local/bin/insomnia  [Reinstall] [Remove]
+             ⚠ ~/.local/bin is not on your PATH. Add: export PATH="$HOME/.local/bin:$PATH"  [Copy]
+
+URL scheme (works from Shortcuts → "Open URLs" or Terminal → open "…"; links can't turn lid mode on, so use the CLI for that)
+  insomnia://on?for=45m            [⧉]
+  insomnia://on?until=17:30&screen=1  [⧉]
+  insomnia://off                   [⧉]
+  insomnia://extend?by=15m         [⧉]
+  insomnia://toggle  · insomnia://panel  · insomnia://sleep        [⧉]
+```
+
+Each rule is one sentence-shaped row; there's never a modal form. The `screen` and `lid` checkboxes are per rule and default to off.
+
+### 4.3 Lid & Safety ("Safety" without a lid; hidden with neither lid nor battery)
+
+```
+Stay awake with lid closed                                   (MacBooks only)
+  Status     ● Ready (sudoers rule ✓ · safety daemon ✓)     [Test…] [Remove…]
+             ○ Not set up                                    [Set Up…]
+             ◐ Partly installed: safety daemon missing       [Repair…]
+             ◐ Safety daemon is off in Login Items           [Open Login Items]
+  Turn the screen off when the lid closes                    always on ⓘ
+  Only on power adapter                                      [ ]
+  Time limit closed on battery                  [ 1 hour ▾ ]  (30m, 1h, 2h, 4h, 8h)
+
+Guards
+  Turn off lid mode at battery                  ──●────────  20%   (10–50, always on)
+  Also stop keeping awake at that level                      [ ]   (battery only)
+  Pause lid mode when your Mac runs hot          ⓘ  (always on)
+  Pause lid mode in Low Power Mode               ⓘ  (always on)
+
+  ⓘ Lid mode disables macOS's own low-battery sleep, so its guards can't be switched off.
+```
+
+### 4.4 Diagnostics
+
+```
+Live
+  SleepDisabled  No          Lid  Open          Thermal  Nominal
+  Power  AC · 95% · not charging          Low Power Mode  Off
+  Helper  sudoers ✓ · safety daemon ✓ · watchdog idle
+Why awake?                                                   [Refresh]
+  (same sections as the ⌥-click menu, as a table: Who · What · Since)
+Event log (last 200)                                         [Copy] [Clear]
+  15:01:12  hold+ manual 1h screen
+  15:01:12  lid  engaged (readback ✓)
+  15:22:40  guard thermal → lid suspended
+About                                                        [About Insomnia…]
+```
+
+The **About** sheet (from `⋯` or here) shows big panel eyes, the version, stats (total awake, sessions, longest, lid-closed time, ≈ cups of coffee at 1 per 45 min), milestones earned, [Reset Stats], and a GitHub link.
+
+---
+
+## 5. Lid states (sublabel H')
+
+| `LidStatus` | Sublabel (all tiers) | Toggle | Glyph impact |
+|---|---|---|---|
+| `.off`, setting off | none | off | none |
+| `.off`, setting on, Mac asleep | "Armed · applies whenever I'm awake" | on | none |
+| `.off`, setting on, fixed CLI/URL hold without lid | "Off for this session" | on | none |
+| `.needsSetup` | "Set up needed ›" (opens §6) | off (it can't be on) | none |
+| helper `.daemonDisabled` | "Safety daemon is off · Fix ›" | off | none |
+| `.engaging` | "Applying…" plus a spinner | on | none |
+| `.engaged(lidClosed: false)` | "Ready · close the lid anytime" | on | `.lid` |
+| `.engaged(lidClosed: true)` | "Engaged · lid closed" | on | `.lid` |
+| `.suspended(thermal / lowPowerMode / batteryFloor)` | "Paused · running hot / Low Power Mode / battery at {floor}%" (orange) | on | `.squint` |
+| `.suspended(acRequired / lidBatteryCap)` | "Waiting for power adapter" / "Paused · {cap} limit on battery" (secondary) | on | normal |
+| `.latched` | "Paused · open the lid to resume" (secondary) | on | normal |
+| `.error(e)` | "Couldn't apply · Mac sleeps normally · Retry" / overridden: "Turned off by something else · Retry" (red) | on | `.alarmed` |
+| `.stuck` | "Stuck on · Mac won't sleep · Reset with password…" (red) | on | `.alarmed` |
+
+---
+
+## 6. Lid mode onboarding flow
+
+```
+[Lid toggle ON, helper missing]
+        │
+        ▼
+┌─ Sheet inside panel (or Settings) ───────────────────────────────────┐
+│  Stay awake with the lid closed                                      │
+│  • Your Mac won't sleep when you close the lid. The screen turns off. │
+│  • You'll type your password once. Insomnia adds a rule that allows   │
+│    exactly two commands (sleep off / sleep on), usable by any app     │
+│    running as you, and a tiny safety daemon that restores sleep after │
+│    a restart and at 10% battery.                                      │
+│  • macOS will say "Background Items Added". That's the safety net.    │
+│  • Keep it out of bags. Lid mode pauses when hot, in Low Power Mode,  │
+│    after {cap} closed on battery, and turns off at {floor}% battery.  │
+│  • Apple menu ▸ Sleep is blocked while engaged. Use ⋯ ▸ Sleep Now.    │
+│                                    [Not Now]  [Set Up…]               │
+└──────────────────────────────────────────────────────────────────────┘
+        │ Set Up…
+        ▼
+ macOS admin prompt: "Insomnia needs your password once to keep your Mac awake with the lid closed."
+        │
+   ┌────┴─────────────┬────────────────────┬──────────────────────────┐
+ cancelled          script error         success
+   │                  │                    │
+ toggle reverts,   inline red text +    verify: HelperStatus == .installed
+ quip "Setup       [Copy details]       (rule probe ✓, daemon enabled ✓)
+ skipped" (no      (never a modal)        │
+ error tone)                            "Ready. Close the lid whenever."
+                                        + optional [Try it: close the lid for 10 s]
+                                          → on reopen: "Survived. Welcome to the
+                                            night shift." / Professional: "Verified."
+```
+
+**Runtime moments:**
+
+- **First engagement on battery** (once ever, `lidBatteryCalloutShown`): the banner says "Don't put me in a bag. Seriously." In Professional it says "Keep the Mac ventilated while the lid is closed."
+- **Lid closes while engaged** (or the last external display is unplugged with the lid shut): if there's no external display, run `pmset displaysleepnow`. Show nothing (the user isn't looking).
+- **Lid reopens** after at least 5 min closed and engaged: the **mission report** card (row J, §2.4): "While you were away: 1h 12m closed · battery 82→61% · stayed cool" (stayed cool / got warm / got hot). Plain in every tier, plus one line in Cheeky and Unhinged.
+- **Launch recovery fired:** the banner states the plain fact, "Restored normal sleep after an unexpected quit."; the `recovered` notification carries the line.
+
+---
+
+## 7. First run
+
+### 7.1 Welcome card (in the panel, opened automatically once)
+
+```
+Hi. I'm Insomnia. I keep your Mac awake.
+• Click my eyes (or right-click me in the menu bar) to toggle. ⌥-click: why awake.
+Where should I live?       ( ) Menu bar   (•) Menu bar + Dock
+Awake with the lid closed? [Set up later]  [Set up now]     (MacBooks only)
+                                                      [Got it]
+```
+
+"Got it" requests notification permission (§10).
+
+### 7.2 Hidden card (floating panel, when §1.7 detects the item is hidden)
+
+```
+macOS hid me from the menu bar. I'm still here.
+Open Insomnia from Spotlight to see this panel.
+[Show Me in the Dock]  [Open Menu Bar Settings]  [Keep Hidden]
+```
+
+- **Open Menu Bar Settings** opens System Settings ▸ Menu Bar, best effort (`x-apple.systempreferences:com.apple.ControlCenter-Settings.extension`), and falls back to the System Settings app.
+
+---
+
+## 8. State × UI matrix
+
+| State (`AwakeStatus` + `LidStatus`) | Menu bar glyph | Menu bar text | Panel headline / subline | Dock pill | VoiceOver value |
+|---|---|---|---|---|---|
+| asleep | asleep | none | Sleep allowed / Click the eyes to stay awake | none | "Sleep allowed" |
+| timed | awake | per §1.3 | Wide awake / 42 min left · until 15:12 | 42m | "Awake, 42 minutes left" |
+| indefinite | awake | none | Wide awake / Until you say so | ∞ | "Awake until you stop it" |
+| watching | watching | none | Awake for ffmpeg / While ffmpeg (4411) runs · Stop | ffmp… | "Awake while ffmpeg runs" |
+| client | watching | none | Awake for make / Held by `make` (CLI) | make | "Awake while make runs" |
+| automatic | watching | none | Awake: Xcode is running / Rule · edit in Settings | none | "Awake, rule: Xcode is running" |
+| rules paused by the eyes | asleep | none | Sleep allowed / Xcode rule paused until Xcode quits | none | "Sleep allowed, rules paused" |
+| any awake + lid engaged | lid | as above | (headline as above) + H′ "Engaged…" | as above, night-vision eyes | "…, lid mode on" |
+| any awake + lid paused (alarm guard) | squint | as above | headline as above, H′ orange | as above | "…, lid mode paused: running hot" |
+| any awake + lid paused (AC-only, cap, latched) | as without lid | as above | headline as above, H′ secondary | as above | "…, lid mode paused: {reason}" |
+| suspended (opt-in awake floor) | squint | none | Paused: battery at {floor}% / Plug in to resume | none | "Paused, battery at {floor} percent" |
+| lid error | alarmed | as above | Lid mode needs attention / Mac sleeps normally | as above + `!` badge | "Lid mode failed, sleep works normally" |
+| lid stuck | alarmed | as above | Lid mode is stuck on / Your Mac won't sleep · Reset with password… | as above + `!` badge | "Lid mode stuck on, Mac won't sleep" |
+| desktop Mac (no lid) | as above | as above | no H/H′, no lid menu items, no lid rule box; no battery UI without a battery | as above | as above |
+
+---
+
+## 9. Poke Easter egg
+
+When the panel eyes get **5 or more clicks within 8 s**, each further click still toggles (we never block a toggle), and the quip row shows `Narrator.line(.poke(count))`:
+
+| Clicks | Effect |
+|---|---|
+| 5 | First poke line |
+| 10 | Second poke line |
+| 20 | Eyes cross for 2 s (no Reduce Motion), plus a line |
+| 50 | "Complaint filed." The **Poked 50×** badge appears in About |
+
+The egg is off in Professional (the toggles still work).
+
+---
+
+## 10. Notifications (`UNUserNotificationCenter`, **never with sound**, banner style)
+
+| Id | When | Gate | Title (all tiers, plain) | Body (personality) | Actions |
+|---|---|---|---|---|---|
+| `ending-soon` | 5 min before a timed manual hold ends | `sessionNotifications` | "Insomnia: 5 minutes left" | e.g. "Want a refill?" | **+15 min** (`EXTEND_15`), **Allow Sleep** |
+| `ended` | Timed hold expired | `sessionNotifications` | "Your Mac can sleep again" | `deactivated(timer)` pool | none |
+| `battery-floor` | Lid battery floor tripped | always | "Lid mode off at {floor}% battery" | `battery floor` pool | none |
+| `battery-stop` | Opt-in awake floor tripped | always | "Stopped keeping awake at {floor}% battery" | plain | none |
+| `lid-heat` | Lid suspended for thermal, once per engagement | always | "Lid mode paused: Mac is hot" | e.g. "Is it in a bag?" | **Allow Sleep** |
+| `lid-lpm` | Lid suspended for Low Power Mode, once per engagement | always | "Lid mode paused: Low Power Mode" | plain | none |
+| `lid-cap` | Lid suspended for the bag time cap | always | "Lid mode paused after {cap} closed on battery" | plain | none |
+| `lid-error` | Apply/readback failed, watchdog lost, or overridden | always | "Lid mode couldn't be applied" / "Lid mode was turned off" | "Your Mac will sleep normally." | **Retry** |
+| `lid-stuck` | Flag is 1 and every reset failed | always | "Lid mode is stuck on" | "Your Mac won't sleep until it's reset." | **Reset…** |
+| `foreign-flag` | `SleepDisabled = 1` without our marker (once per boot) | always | "Something else turned off sleep" | "Another app or admin set it. Insomnia won't change it." | **Why Awake?** |
+| `recovered` | Launch recovery reset the flag | always | "Normal sleep restored" | `recovered` pool | none |
+| `target-exited` | Babysit target exited and the hold ended | `sessionNotifications` | "ffmpeg finished" | e.g. "Babysitting shift over." | none |
+
+- **Authorization:** requested at welcome-card "Got it", at lid setup success, and when `sessionNotifications` is switched on. Posts made before the answer are queued, so the first safety notification is never lost.
+- **While the app is frontmost:** `willPresent` returns `[.banner]` only.
+
+---
+
+## 11. Copy deck (seed lines; full pools live in `Sources/Insomnia/Core/Copy/Copy+<Tier>.swift`)
+
+Professional has one or two lines per moment; `nil` means the row is hidden.
+
+| Moment | Professional | Cheeky | Unhinged |
+|---|---|---|---|
+| **activated** | Keeping your Mac awake for {duration}. | Eyes open. Blinking is for quitters. | I have had eleven espressos and I can see sounds. |
+|  |  | Wide awake. Coffee optional. | Sleep is a construct. Constructs are optional. |
+|  |  | On it. Nobody naps on my watch. | I HAVE NOT BLINKED SINCE TUESDAY. |
+| **deactivated** (user) | Sleep is allowed. | Okay, okay. Resting my eyes. | Fine. FINE. Goodnight. (I'll be thinking.) |
+|  |  | Clocking out. Sweet dreams, little Mac. | Closing my eyes. Not sleeping. Never sleeping. |
+| **deactivated** (timer) | Timer ended. Your Mac can sleep normally. | Timer's up. Goodnight, sweet Mac. | The prophecy is fulfilled. I may rest. |
+| **idle** (panel opens while asleep, ≤ 1/day) | nil | Off duty. One eye open. Metaphorically. | zzz… (I am pretending. Click me.) |
+|  |  | Napping permitted. I'll be over here. | Dreaming of electric sheep. They're also awake. |
+| **awake 2h+** | nil | Two hours in. Still blinking manually. | I've counted every pixel. Twice. |
+| **awake 8h+** | nil | A full workday. The owl union sends regards. | Eight hours. I've started naming the fans. |
+| **awake 24h+** | nil | A whole day. I've seen things. Mostly your tabs. | 24 hours. Time is a flat circle. The circle is a progress ring. |
+| **awake 72h+** | nil | Three days. Respectfully, have you tried rebooting? | I can see new colours. One of them is "uptime". |
+| **watching** | Keeping awake while ffmpeg is running. | Watching ffmpeg like a hawk. A sleepy hawk. | Babysitting `claude`. We're both agents. We get each other. |
+| **target exited** | ffmpeg finished. Sleep is allowed. | ffmpeg's done. Babysitting shift over. | The child has left the nest. I may now weep and nap. |
+| **lid engaged** | Lid mode is on. | Lid closed. I'm watching. Through the lid. Don't ask. | The lid is a suggestion. I reject suggestions. |
+| **lid reopened** | (report only) | Back already? I kept your seat warm. Literally. | You opened the lid. I never closed my eyes. We are not the same. |
+| **thermal** | Paused: your Mac is running hot. | Getting toasty in here. Is this a bag? | IT IS HOT IN HERE. GET ME OUT OF THE BACKPACK. |
+| **low power mode** | Paused: Low Power Mode is on. | Low Power Mode. I'll keep it low-key. | Low Power Mode detected. Entering a whisper. |
+| **battery floor** | Lid mode turned off at {floor}% battery. | {floor}%. Lid mode's tapping out so your Mac doesn't. | Battery at {floor}%. I go down with the ship. Your Mac doesn't. |
+| **recovered** | Restored normal sleep after an unexpected quit. | I left the lights on last time. Fixed. | Crashed last time, but I tidied up. You're welcome. |
+| **setup done** | Lid mode is ready. | Ready. Close the lid whenever. | The ritual is complete. The lid holds no power over us now. |
+| **setup cancelled** | Setup skipped. | No worries. The lid wins this round. | Password declined. Respect. I'll be here. Waiting. |
+| **poke 5** | n/a | Ow. | You've poked me 5 times. HR has been notified. |
+| **poke 10** | n/a | I'm going to need you to stop. | I'm calling my lawyer. My lawyer is also an app. |
+| **poke 20** | n/a | Now I'm cross-eyed. Happy? | I CAN SEE MY OWN NOSE AND I DON'T HAVE ONE. |
+| **milestone 100 h** | n/a | 100 hours awake. I've filed for a new eyelid warranty. | 100 hours. I have transcended the concept of a bedtime. |
+| **milestone 500 h** | n/a | 500 hours. The coffee machine knows my name. | 500 hours. I am no longer tired. I am beyond tired. I am tired's landlord. |
+| **milestone 1000 h** | n/a | 1,000 hours. I'd like to speak to your manager. Of sleep. | 1,000 hours awake. I am the uptime now. |
+| **date: 3–5 AM** | nil | 3 a.m. Peak hours for both of us. | 3 a.m. club. Members: you, me, and the fridge hum. |
+| **date: Oct 31** | nil | Boo. Your Mac is too awake to be scared. | Spooky season. The call is coming from inside the menu bar. |
+| **date: New Year 00:00–00:10** | nil | You stayed up for this. So did I. | NEW YEAR. SAME EYES. |
+
+**Escalation buckets:** `.awake(hours:)` fires on entering 2, 8, 24 and 72 h of continuous awake. Each bucket fires once per hold. **Quip budget** and Professional placement: `PRODUCT.md` §4 rules 7 and 11 (Professional lines appear only in notification bodies). `{floor}`, `{cap}` and `{duration}` are filled from Settings and the hold; never hard-code them.
+
+**Date lines:** they replace an `activated` or `idle` line with 1-in-3 probability when their window matches. Never in Professional.
+
+---
+
+## 12. Accessibility checklist
+
+| Area | Requirement |
+|---|---|
+| Status item | Label "Insomnia". Value as in the §8 VoiceOver column, updated on state change only. Help text describes the clicks. |
+| Eyes button | Role `.toggle`, label "Keep awake", value from `status.isAwake` ("On, 42 minutes left" / "On, rule: Xcode is running" / "Off"). Disabled with hint "Held by a command" when only client holds remain. Custom actions: "Extend 15 minutes", "Allow sleep". The ring is `accessibilityHidden`. |
+| Panel eyes art | Decorative; the headline carries the meaning. |
+| Chips | Label "1 hour", "Until a time", "While an app runs"; the running preset has `.isSelected`. Funny names go in `accessibilityHint` (Cheeky and Unhinged). |
+| Subline Stop link | Label "Stop watching ffmpeg". |
+| Lid switch | Helper missing: value "Off", hint "Requires one-time setup. Opens setup." |
+| Contrast | Text on amber uses `onAccent` (≥ 4.5:1). |
+| Announcements | `NSAccessibility.post(.announcementRequested)` with the **headline** (never the quip) for: timer end, guard stop, lid error, recovery. |
+| Reduce Motion | No blinks, cursor tracking, sweat drop or cross-eyes. Crossfades are ≤ 150 ms. |
+| Increase Contrast | Glyph stroke 2.0, ring 4 pt, chip borders on. |
+| Reduce Transparency | The panel uses a solid `windowBackgroundColor`. |
+| Colour | Never the sole signal (shapes and text always change too). |
+| Menus on macOS 27 | No meaning in menu item images. |
+| Keyboard | Full panel operation (§2.5). Settings are reachable with ⌘,. |

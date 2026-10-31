@@ -1,0 +1,433 @@
+import AppKit
+import Foundation
+
+// MARK: - Shared contracts. Every module codes against these. See ARCHITECTURE.md + docs/*.md.
+// Change a signature only together with the docs (and a Decisions-log entry if it changes behaviour).
+
+// MARK: Durations
+
+/// How long a manual hold should last.
+enum AwakeDuration: Hashable, Codable, Sendable {
+    case indefinite
+    case minutes(Int)
+    case until(Date)
+
+    /// Panel chips, in order (keys 1–6): 30m, 1h, 2h, 4h, 8h, ∞.
+    static let presets: [AwakeDuration] = [
+        .minutes(30), .minutes(60), .minutes(120), .minutes(240), .minutes(480), .indefinite,
+    ]
+
+    /// nil == runs forever.
+    func endDate(from start: Date) -> Date? {
+        switch self {
+        case .indefinite: return nil
+        case .minutes(let m): return start.addingTimeInterval(TimeInterval(max(1, m)) * 60)
+        case .until(let date): return date
+        }
+    }
+
+    /// Compact label for chips / menus: "30m", "1h", "8h", "∞", "→ 17:30".
+    var shortLabel: String {
+        switch self {
+        case .indefinite: return "∞"
+        case .minutes(let m):
+            if m % 60 == 0 { return "\(m / 60)h" }
+            if m > 60 { return "\(m / 60)h \(m % 60)m" }
+            return "\(m)m"
+        case .until(let date):
+            return "→ " + date.formatted(date: .omitted, time: .shortened)   // FormatStyle: cached, Sendable
+        }
+    }
+
+    /// Settings stores the default duration as minutes; 0 means indefinite.
+    init(storedMinutes: Int) {
+        self = storedMinutes <= 0 ? .indefinite : .minutes(storedMinutes)
+    }
+
+    var storedMinutes: Int {
+        if case .minutes(let m) = self { return m }
+        return 0
+    }
+
+    /// "Until 07:00": the next occurrence of hour:minute strictly after `now` (today, else tomorrow).
+    static func nextOccurrence(hour: Int, minute: Int, after now: Date = Date(),
+                               calendar: Calendar = .current) -> AwakeDuration {
+        var comps = DateComponents()
+        comps.hour = hour
+        comps.minute = minute
+        comps.second = 0
+        let date = calendar.nextDate(after: now, matching: comps, matchingPolicy: .nextTime) ?? now.addingTimeInterval(86_400)
+        return .until(date)
+    }
+}
+
+// MARK: Holds: every reason to stay awake is a Hold
+
+/// Which surface started a manual hold.
+enum SessionSource: String, Hashable, Codable, Sendable {
+    case panel, menuBar, hotkey, urlScheme, dock, notification, launch, cli
+}
+
+/// Something we can watch until it exits ("While…" / babysit, CLI `watch`, rules).
+enum WatchTarget: Hashable, Codable, Sendable {
+    case app(bundleID: String, name: String)
+    /// Matches (case-insensitive) if ANY of: proc_name, basename(proc_pidpath), basename(argv[0]) via
+    /// KERN_PROCARGS2, or, for interpreters (node, bun, deno, ruby, Python*, python3*), basename of the
+    /// first non-flag argument. Needed because e.g. `claude` renames itself and `npm`/`codex` show as `node`.
+    case process(name: String)
+    case pid(Int32, name: String)
+
+    var displayName: String {
+        switch self {
+        case .app(_, let name): return name
+        case .process(let name): return name
+        case .pid(let pid, let name): return "\(name) (\(pid))"
+        }
+    }
+}
+
+/// What a hold asks for. System-idle-sleep prevention is implied by every hold.
+struct AwakeOptions: Hashable, Codable, Sendable {
+    /// Also hold PreventUserIdleDisplaySleep ("Keep screen on").
+    var screen: Bool
+    /// Also request closed-lid mode (pmset disablesleep 1). Subject to guards + helper.
+    var lid: Bool
+
+    static let systemOnly = AwakeOptions(screen: false, lid: false)
+}
+
+/// Who owns a hold. Determines lifetime and how it is shown.
+enum HoldOwner: Hashable, Sendable {
+    /// At most one. Starting a new manual hold replaces it.
+    case manual(SessionSource)
+    /// At most one from the panel ("While…"). Ends when the target exits (5 s grace).
+    case babysit(WatchTarget)
+    /// Derived from an enabled Rule whose condition is currently true. Never stored.
+    case rule(Rule.ID)
+    /// CLI `run` / `watch`; lives exactly as long as its control-socket connection.
+    case client(connection: UUID, label: String)
+}
+
+struct Hold: Identifiable, Equatable, Sendable {
+    let id: UUID
+    var owner: HoldOwner
+    var options: AwakeOptions
+    let start: Date
+    /// nil == no end time (indefinite, babysit, rule, client).
+    var end: Date?
+    /// true: `options` are re-derived from Settings on every reevaluate (panel/hotkey/Dock manual holds, babysit,
+    /// rules). false: options were given explicitly (CLI flags, URL scheme, client holds) and are never rewritten.
+    let followsSettings: Bool
+
+    init(id: UUID = UUID(), owner: HoldOwner, options: AwakeOptions, start: Date = Date(), end: Date? = nil,
+         followsSettings: Bool = true) {
+        self.id = id
+        self.owner = owner
+        self.options = options
+        self.start = start
+        self.end = end
+        self.followsSettings = followsSettings
+    }
+
+    var isManual: Bool { if case .manual = owner { return true } else { return false } }
+}
+
+// MARK: Rules (persistent automations; Settings ▸ Automations)
+
+enum RuleCondition: Hashable, Codable, Sendable {
+    case app(bundleID: String, name: String)
+    case process(name: String)
+    case onAC
+    case externalDisplay
+
+    /// Plain sentence fragment: "Xcode is running", "on power adapter".
+    var phrase: String {
+        switch self {
+        case .app(_, let name): return "\(name) is running"
+        case .process(let name): return "\(name) is running"
+        case .onAC: return "on power adapter"
+        case .externalDisplay: return "an external display is connected"
+        }
+    }
+}
+
+struct Rule: Codable, Hashable, Identifiable, Sendable {
+    var id: UUID = UUID()
+    var condition: RuleCondition
+    var keepScreenOn: Bool = false
+    /// Lid for this rule even when the panel's lid switch is off. Effective lid = allowLid || Settings.closedLidMode.
+    var allowLid: Bool = false
+    var enabled: Bool = true
+
+    var options: AwakeOptions { AwakeOptions(screen: keepScreenOn, lid: allowLid) }
+}
+
+// MARK: Guards (safety; always win over holds). See docs/CLOSED_LID.md §6.
+
+enum GuardReason: String, Hashable, Codable, CaseIterable, Sendable {
+    /// On battery at/below Settings.batteryFloorPercent. Lid only. Mandatory (disablesleep kills macOS low-battery sleep).
+    case batteryFloor
+    /// Opt-in (Settings.awakeBatteryFloorEnabled): same floor, but ends manual holds and suspends all holds.
+    case awakeBatteryFloor
+    /// Thermal ≥ .serious, or ≥ .fair for 5 min in the bag condition (lid closed, no ext. display, on battery). Lid only.
+    case thermal
+    /// Low Power Mode on. Lid only.
+    case lowPowerMode
+    /// "Only on power adapter" set and on battery. Lid only.
+    case acRequired
+    /// Engine counter of bag-condition seconds ≥ Settings.lidMaxOnBatteryMinutes. Resets only when the lid opens. Lid only.
+    case lidBatteryCap
+
+    var affectsAllHolds: Bool { self == .awakeBatteryFloor }
+    /// Alarm-type guards show `.squint`; user-chosen limits (acRequired, lidBatteryCap) keep the normal mood.
+    var squints: Bool { self != .acRequired && self != .lidBatteryCap }
+}
+
+// MARK: Closed-lid status
+
+enum HelperStatus: Equatable, Sendable {
+    case notInstalled
+    /// Exactly one of sudoers rule / safety daemon present → offer Repair.
+    case partial(sudoers: Bool, safetyDaemon: Bool)
+    /// Both present but the daemon is disabled in Login Items → refuse to engage; "Enable Insomnia in Login Items".
+    case daemonDisabled
+    case installed
+}
+
+enum LidError: Equatable, Sendable {
+    case helperMissing
+    /// sudo/pmset exited non-zero (or spawn/watchdog failure → -1).
+    case commandFailed(Int32)
+    /// IORegistry SleepDisabled did not match what we set.
+    case readbackMismatch
+    /// The watchdog exited while engaged (it resets the flag on any exit except "disarm").
+    case watchdogLost
+    /// Something else set SleepDisabled = 0 while engaged. Respected; never re-applied without a user action.
+    case overridden
+}
+
+/// Errors from the one-time install/uninstall (docs/CLOSED_LID.md §2.3).
+enum LidSetupError: Error, Equatable, Sendable {
+    case cancelled
+    case invalidUser
+    case includedirMissing
+    case scriptFailed(code: Int32, detail: String)
+}
+
+enum LidStatus: Equatable, Sendable {
+    /// Not requested (setting off, or nothing awake wants lid).
+    case off
+    /// Requested but helper not installed.
+    case needsSetup
+    /// Privileged call in flight.
+    case engaging
+    /// SleepDisabled == 1, verified by readback.
+    case engaged(lidClosed: Bool)
+    /// Requested, but a guard has released the flag. Re-engages when it clears (unless latched).
+    case suspended(GuardReason)
+    /// A guard released the flag while the lid was closed. Stays released until the lid physically
+    /// opens or the user acts, so a DarkWake never re-engages inside a bag.
+    case latched
+    /// Apply/readback failed; flag verified 0. Mac sleeps normally. Offers Retry.
+    case error(LidError)
+    /// Flag is 1 and every reset failed (e.g. sudoers rule removed). Red, persistent; "Reset with password…".
+    case stuck
+}
+
+// MARK: Derived status (the one value every surface switches on)
+
+enum AwakeStatus: Equatable, Sendable {
+    case asleep
+    case timed(end: Date)
+    case indefinite
+    case watching(WatchTarget)
+    case client(label: String)
+    case automatic([RuleCondition])
+    /// Opt-in awakeBatteryFloor tripped: nothing is held.
+    case suspended(GuardReason)
+
+    var isAwake: Bool {
+        switch self {
+        case .asleep, .suspended: return false
+        default: return true
+        }
+    }
+}
+
+/// Mascot mood. Priority: alarmed > squint > lid > awake > watching > asleep.
+enum EyeMood: Equatable, Sendable {
+    case asleep, awake, watching, lid, squint, alarmed
+
+    init(status: AwakeStatus, lid: LidStatus) {
+        switch lid {
+        case .error, .stuck: self = .alarmed; return
+        case .suspended(let g) where g.squints: self = .squint; return
+        default: break
+        }
+        if case .suspended(let g) = status, g.squints { self = .squint; return }
+        if case .engaged = lid { self = .lid; return }
+        switch status {
+        case .timed, .indefinite: self = .awake
+        case .watching, .client, .automatic: self = .watching
+        case .asleep, .suspended: self = .asleep
+        }
+    }
+}
+
+/// Why the engine ended a hold.
+enum DeactivationReason: Hashable, Sendable {
+    case user(SessionSource)
+    case timerExpired
+    case batteryFloor(percent: Int)
+    case targetExited(WatchTarget)
+    case clientDisconnected
+    case sleepNow
+    case appQuit
+    /// A new manual hold replaced the old one (no copy shown).
+    case replaced
+}
+
+// MARK: Narrator moments (Core/Narrator.swift maps these to copy; docs/UX.md §11)
+
+enum Moment: Hashable, Sendable {
+    case activated(AwakeDuration)
+    case deactivated(DeactivationReason)
+    /// The panel opens while asleep; at most once per day.
+    case idle
+    /// Escalation buckets: 2, 8, 24, 72 hours of continuous awake.
+    case awake(hours: Int)
+    case watching(WatchTarget)
+    case lidEngaged
+    case lidReopened
+    case guardTripped(GuardReason)
+    case recoveredAfterCrash
+    case setupDone
+    case setupCancelled
+    case poke(Int)
+    case milestone(hours: Int)
+}
+
+// MARK: Preferences enums
+
+/// The app's sense of humour.
+enum Personality: String, CaseIterable, Codable, Identifiable, Sendable {
+    case professional, cheeky, unhinged
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .professional: return "Professional"
+        case .cheeky: return "Cheeky"
+        case .unhinged: return "Unhinged"
+        }
+    }
+}
+
+/// What a left-click on the menu bar item does. Right-click does the other one. ⌥-click is always "Why awake?".
+enum ClickAction: String, CaseIterable, Codable, Identifiable, Sendable {
+    case openPanel, toggle
+    var id: String { rawValue }
+    var title: String { self == .openPanel ? "Opens panel" : "Toggles" }
+}
+
+/// Menu bar countdown text. Kept narrow so macOS 27 doesn't eject the item.
+enum MenuBarTimerStyle: String, CaseIterable, Codable, Identifiable, Sendable {
+    case off, lastTenMinutes, always
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .lastTenMinutes: return "Last 10 min"
+        case .always: return "Always"
+        }
+    }
+}
+
+enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
+    case general, automations, lidSafety, diagnostics
+    var id: String { rawValue }
+    /// UI shows "Safety" when the Mac has no lid, and hides the tab when it also has no battery (UX.md §4.3).
+    var title: String {
+        switch self {
+        case .general: return "General"
+        case .automations: return "Automations"
+        case .lidSafety: return "Lid & Safety"
+        case .diagnostics: return "Diagnostics"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .general: return "gearshape"
+        case .automations: return "bolt.badge.automatic"
+        case .lidSafety: return "laptopcomputer"
+        case .diagnostics: return "stethoscope"
+        }
+    }
+}
+
+// MARK: - App-wide notifications (AppKit consumers observe these; SwiftUI observes @Observable objects directly)
+
+extension Notification.Name {
+    /// AwakeEngine state changed (holds, guards, lid status, display tick).
+    static let insomniaStateDidChange = Notification.Name("InsomniaStateDidChange")
+    /// Any Settings property changed. userInfo["key"] = the UserDefaults key (e.g. "rules.v1").
+    static let insomniaSettingsDidChange = Notification.Name("InsomniaSettingsDidChange")
+    /// PowerMonitor observed a change (battery, AC, thermal, low power, lid, displays).
+    static let insomniaPowerDidChange = Notification.Name("InsomniaPowerDidChange")
+    /// WatchMonitor: set of satisfied rules / live watch targets changed.
+    static let insomniaRulesDidChange = Notification.Name("InsomniaRulesDidChange")
+}
+
+// MARK: - Router: decouples UI pieces from each other. Handlers are wired by AppDelegate.
+
+@MainActor
+final class AppRouter {
+    static let shared = AppRouter()
+
+    var showPanelHandler: (() -> Void)?
+    var closePanelHandler: (() -> Void)?
+    var openSettingsHandler: ((SettingsTab) -> Void)?
+    var showWhyAwakeHandler: (() -> Void)?
+    var showAboutHandler: (() -> Void)?
+    var startLidSetupHandler: (() -> Void)?
+
+    func showPanel() { showPanelHandler?() }
+    func closePanel() { closePanelHandler?() }
+    func openSettings(_ tab: SettingsTab = .general) {
+        closePanel()
+        openSettingsHandler?(tab)
+    }
+    func showWhyAwake() { showWhyAwakeHandler?() }
+    func showAbout() { showAboutHandler?() }
+    func startLidSetup() { startLidSetupHandler?() }
+    func quit() { NSApp.terminate(nil) }
+}
+
+// MARK: - Formatting helpers shared by UI
+
+enum TimeFormat {
+    /// "1:02:03", "12:03", "0:42"
+    static func countdown(_ interval: TimeInterval) -> String {
+        let s = max(0, Int(interval.rounded(.up)))
+        let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
+    }
+
+    /// Short menu-bar style: "2h", "1h 5m", "42m", "<1m"
+    static func compact(_ interval: TimeInterval) -> String {
+        let s = max(0, Int(interval.rounded(.up)))
+        if s < 60 { return "<1m" }
+        let totalMin = (s + 59) / 60
+        let h = totalMin / 60, m = totalMin % 60
+        if h == 0 { return "\(m)m" }
+        return m == 0 ? "\(h)h" : "\(h)h \(m)m"
+    }
+
+    /// Long human form for stats: "3 days, 4 hours", "12 hours, 5 minutes", "7 minutes"
+    static func humanLong(_ interval: TimeInterval) -> String {
+        let f = DateComponentsFormatter()
+        f.allowedUnits = [.day, .hour, .minute]
+        f.unitsStyle = .full
+        f.maximumUnitCount = 2
+        return f.string(from: max(0, interval)) ?? "0 minutes"
+    }
+}
