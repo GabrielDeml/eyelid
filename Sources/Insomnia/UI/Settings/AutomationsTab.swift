@@ -257,7 +257,8 @@ private struct RunningAppItems: View {
     let choose: (_ bundleID: String, _ name: String) -> Void
 
     var body: some View {
-        let apps = WatchMonitor.shared.runningApps()
+        // Observed (kept current by WatchMonitor's KVO), so the cached Menu content re-renders on launch / quit.
+        let apps = WatchMonitor.shared.regularApps
         if apps.isEmpty {
             Text("No apps running")
         }

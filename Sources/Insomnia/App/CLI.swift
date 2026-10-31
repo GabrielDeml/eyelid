@@ -758,12 +758,9 @@ enum CLIRunner {
         return 128 + sig   // a signal whose default is not fatal: shell convention
     }
 
+    /// The shared resolver (argv[0], then the executable path, then proc_name), as While… ▸ PID… uses.
     static func processName(_ pid: Int32) -> String? {
-        var buffer = [CChar](repeating: 0, count: 256)
-        let n = Int(proc_name(pid, &buffer, UInt32(buffer.count)))
-        guard n > 0, n <= buffer.count else { return nil }
-        let name = String(decoding: buffer[0..<n].map { UInt8(bitPattern: $0) }, as: UTF8.self)
-        return name.isEmpty ? nil : name
+        ProcessTable.displayName(pid: pid)
     }
 }
 

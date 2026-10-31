@@ -53,8 +53,8 @@ enum AssertionInspector {
             guard affectsSleep(type) else { continue }
             let name = (a[Key.name] as? String) ?? ""
             let process = (a[Key.processName] as? String) ?? processName(pid) ?? "pid \(pid)"
-            if isSystemNoise(process: process, name: name) { continue }
             let behalf = int32(a[Key.onBehalfOf]).flatMap { $0 > 0 ? $0 : nil }
+            if isSystemNoise(process: process, type: type, name: name, onBehalfOf: behalf) { continue }
             let id = int32(a[Key.assertionID]).map { "\(pid):\($0)" } ?? "\(pid):\(type):\(name)"
             guard seen.insert(id).inserted else { continue }
             result.append(ForeignAssertion(
@@ -114,10 +114,28 @@ enum AssertionInspector {
         "PreventSystemSleepSecurityIndicator",
     ]
 
-    /// powerd always holds "Prevent sleep while display is on" while the display is lit: true, but it says nothing.
-    private static func isSystemNoise(process: String, name: String) -> Bool {
-        process == "powerd" && name.hasPrefix("Powerd - Prevent sleep while display is on")
+    /// Assertions that are always there after any input, including the ⌥-click that opens Why awake?: true, but they say
+    /// nothing. WindowServer's UserIsActive is the HID tickle ("com.apple.iohideventsystem.queue.tickle …"); powerd
+    /// holds "Prevent sleep while display is on" while the display is lit and its own display-off delay. UserIsActive
+    /// from any other process, and powerd assertions made on behalf of another process, are kept.
+    private static func isSystemNoise(process: String, type: String, name: String, onBehalfOf: Int32?) -> Bool {
+        switch process {
+        case "WindowServer":
+            return type == "UserIsActive"
+        case "powerd":
+            guard onBehalfOf == nil else { return false }
+            return name.hasPrefix("Powerd - Prevent sleep while display is on")
+                || name == "com.apple.powermanagement.delayDisplayOff" || name == "Proxy to delay display off"
+                || powerdDisplayTypes.contains(type)
+        default:
+            return false
+        }
     }
+
+    /// powerd's internal display assertions (the display-off delay after input).
+    private static let powerdDisplayTypes: Set<String> = [
+        "InternalPreventDisplaySleep", "PreventUserIdleDisplaySleep", "NoDisplaySleepAssertion", "UserIsActive",
+    ]
 
     private static func int32(_ value: Any?) -> Int32? {
         (value as? NSNumber).map { $0.int32Value }

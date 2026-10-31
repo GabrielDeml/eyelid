@@ -257,8 +257,8 @@ final class Watchdog {
 ```
 | Target or condition | How it's checked |
 |---|---|
-| `.app` | `NSWorkspace.runningApplications` (bundle id) and `didLaunch`/`didTerminateApplicationNotification` |
-| `.process` | `proc_listallpids`; a pid matches if any of `proc_name`, `basename(proc_pidpath)`, `basename(argv[0])` (`KERN_PROCARGS2`) or, for interpreters, the first non-flag argument equals the name, case-insensitively (rule in `Models.swift`). Matched pid and real name are shown in the subline and Why awake. **Polled every 5 s, only while some rule or watch needs it.** |
+| `.app` | `NSWorkspace.runningApplications` (bundle id) and KVO on it, bursts coalesced. Not `didLaunch`/`didTerminateApplicationNotification`: AppKit doesn't post those for LSUIElement apps (Docker, Ollama). |
+| `.process` | `proc_listallpids`; a pid matches if any of `proc_name`, `basename(proc_pidpath)`, `basename(argv[0])` (`KERN_PROCARGS2`) or, for interpreters, the first non-flag argument equals the name, case-insensitively (rule in `Models.swift`). Python binaries also answer to `python3` and `python3.x` (`python3` re-execs into `Python.framework/Versions/3.x/…/Python`), and a retitled interpreter to the first word of argv[0] (npm sets `process.title`, so argv is `["npm run build", "", …]`). Other users' and root's processes are read with `PROC_PIDT_SHORTBSDINFO` + `proc_pidpath` (name and path only: `PROC_PIDTBSDINFO` and argv are refused). PIDs of running apps with a UI never match, so `claude` means the CLI, not Claude.app; an app is watched with `.app`. Matched pid and real name are shown in the subline and Why awake. **Polled every 5 s, only while some rule or watch needs it.** A process rule stays on for the 5 s grace after its last match. |
 | `.pid` | `DispatchSource.makeProcessSource(identifier:eventMask: .exit)`, no polling. If the PID is already gone, fire `onExit` immediately. |
 | `.onAC` / `.externalDisplay` | `PowerMonitor` |
 
