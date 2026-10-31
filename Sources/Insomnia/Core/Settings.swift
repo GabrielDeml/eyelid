@@ -83,8 +83,7 @@ final class Settings {
     }
 
     var defaultDuration: AwakeDuration { AwakeDuration(storedMinutes: defaultDurationMinutes) }
-    /// Options for settings-following manual and babysit holds. Rule holds use
-    /// AwakeOptions(screen: rule.keepScreenOn, lid: rule.allowLid || closedLidMode).
+    /// Options for settings-following manual and babysit holds. Rule holds use `rule.options(closedLidMode:)`.
     var manualOptions: AwakeOptions { AwakeOptions(screen: keepScreenOn, lid: closedLidMode) }
 
     static let lidBatteryCapChoices = [15, 30, 60, 120, 240, 480]

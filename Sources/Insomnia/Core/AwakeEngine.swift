@@ -62,6 +62,8 @@ final class AwakeEngine {
     var clientHolds: [Hold] { holds.filter { if case .client = $0.owner { return true } else { return false } } }
     var ruleHolds: [Hold] { holds.filter { if case .rule = $0.owner { return true } else { return false } } }
     var isAwake: Bool { status.isAwake }
+    /// The one plain headline (UX.md §8) for the status item's VoiceOver announcements, the CLI and Why awake.
+    var headline: String { FallbackCopy.headline(status: status, lid: lid, batteryFloor: settings.batteryFloorPercent) }
     /// Manual timed hold only.
     var remaining: TimeInterval? {
         guard let end = manual?.end else { return nil }
@@ -357,14 +359,11 @@ final class AwakeEngine {
 
     // MARK: - Other actions
 
-    /// Ends manual + babysit, then sleeps (via the lid controller, which releases the flag first).
+    /// Ends manual + babysit, then sleeps via the lid controller (which releases the flag first; always attached in
+    /// the app, so tests without one never sleep the Mac).
     func sleepNow() async {
         deactivate(.sleepNow)
-        if let lidController {
-            await lidController.sleepNow()
-        } else {
-            await SystemSleep.now()
-        }
+        await lidController?.sleepNow()
     }
 
     /// 1 Hz ticks while visible. Opening while asleep may show the `idle` line (at most once a day).
@@ -468,7 +467,7 @@ final class AwakeEngine {
         for rule in satisfied where !pausedRuleIDs.contains(rule.id) {
             conditions[rule.id] = rule.condition
             // 2 (rules). Options follow the rule and the lid setting.
-            let options = AwakeOptions(screen: rule.keepScreenOn, lid: rule.allowLid || settings.closedLidMode)
+            let options = rule.options(closedLidMode: settings.closedLidMode)
             if var existing = rules[rule.id] {
                 existing.options = options
                 rebuilt[rule.id] = existing
@@ -696,9 +695,9 @@ final class AwakeEngine {
                 case .lowPowerMode:
                     notify(.lidLPM)
                 case .lidBatteryCap:
-                    notify(.lidCap, context: ["cap": Self.capLabel(settings.lidMaxOnBatteryMinutes)])
+                    notify(.lidCap, context: ["cap": PlainCopy.capText(settings.lidMaxOnBatteryMinutes)])
                 case .lidACCap:
-                    notify(.lidCap, context: ["acCap": Self.capLabel(settings.lidMaxOnACMinutes)])
+                    notify(.lidCap, context: ["acCap": PlainCopy.capText(settings.lidMaxOnACMinutes)])
                 case .acRequired, .awakeBatteryFloor:
                     break
                 }
@@ -752,7 +751,7 @@ final class AwakeEngine {
     /// One line per flush. An earned (exempt) moment wins over rotating ones, so a rotating line that would only be
     /// overwritten never spends the 4 h budget; among rotating moments the last eligible one is drawn.
     private func flushMoments(stateChanged: Bool, now t: Date) {
-        let moments = pendingMoments.filter { if case .deactivated(.replaced) = $0 { false } else { true } }   // no copy for a replaced hold
+        let moments = pendingMoments.filter { if case .deactivated(.replaced) = $0 { false } else { true } }   // no copy for the test drive ending
         pendingMoments = []
         var newLine: String?
         for moment in moments where !isRotating(moment, now: t) {
@@ -822,8 +821,6 @@ final class AwakeEngine {
     /// VoiceOver announcement of the plain headline (never the quip): timer end, guard stop, lid error, recovery.
     private func announce() {
         guard let app = NSApp else { return }
-        let headline = narrator?.headline(status: status, lid: lid)
-            ?? FallbackCopy.headline(status: status, lid: lid, batteryFloor: settings.batteryFloorPercent)
         NSAccessibility.post(element: app, notification: .announcementRequested,
                              userInfo: [.announcement: headline,
                                         .priority: NSAccessibilityPriorityLevel.high.rawValue])
@@ -1069,8 +1066,6 @@ final class AwakeEngine {
         }
     }
 
-    static func capLabel(_ minutes: Int) -> String { AwakeDuration.minutes(minutes).shortLabel }
-
     nonisolated static func bootTime() -> Date? {
         var tv = timeval()
         var size = MemoryLayout<timeval>.size
@@ -1081,26 +1076,5 @@ final class AwakeEngine {
     private func log(_ kind: String, _ message: String) {
         logger.info("[\(kind, privacy: .public)] \(message, privacy: .public)")
         eventLog?.log(kind, message)
-    }
-}
-
-/// M1 fallback for Sleep Now when no lid controller is attached (with one, the controller sleeps after releasing the
-/// flag, and every spawn runs on its LidReconciler). `pmset sleepnow` needs no privileges.
-enum SystemSleep {
-    static func now() async {
-        await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-            process.arguments = ["sleepnow"]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-                process.waitUntilExit()
-            } catch {
-                Logger(subsystem: "com.gdeml.Insomnia", category: "engine")
-                    .error("pmset sleepnow failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }.value
     }
 }

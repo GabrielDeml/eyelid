@@ -59,9 +59,7 @@ enum Theme {
     // MARK: Metrics (UX §2.1, §2.2)
 
     static let panelWidth: CGFloat = 320
-    static let panelMaxHeight: CGFloat = 340
     static let padding: CGFloat = 14
-    static let rowGap: CGFloat = 10
     static let separatorGap: CGFloat = 12
     static let chipHeight: CGFloat = 28
     static let chipGap: CGFloat = 8
@@ -69,7 +67,6 @@ enum Theme {
     static let sublabelHeight: CGFloat = 14
     static let quipHeight: CGFloat = 34
     static let eyesButton: CGFloat = 72
-    static let eyesWidth: CGFloat = 44
     static let cornerRadius: CGFloat = 12
 
     // MARK: Accessibility environment (read live; AppKit posts changes via NSWorkspace)

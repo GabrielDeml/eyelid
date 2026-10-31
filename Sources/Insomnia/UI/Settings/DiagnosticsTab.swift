@@ -93,11 +93,8 @@ struct DiagnosticsTab: View {
     }
 
     private var powerText: String {
-        guard power.hasBattery else { return "AC" }
-        var parts = [power.isOnAC ? "AC" : "Battery"]
-        if let p = power.batteryPercent { parts.append("\(p)%") }
-        if power.isOnAC { parts.append(power.isCharging ? "charging" : "not charging") }
-        return parts.joined(separator: " · ")
+        WhyAwakeReport.powerText(hasBattery: power.hasBattery, isOnAC: power.isOnAC,
+                                 batteryPercent: power.batteryPercent, isCharging: power.isCharging)
     }
 
     /// "privileged helper 1.0.0 · team ABCDE12345 · ready · idle" / "sudoers fallback · ready · engaged".

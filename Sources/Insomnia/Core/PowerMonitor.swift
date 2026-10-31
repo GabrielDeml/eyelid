@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import IOKit.ps
+import InsomniaShared
 import Observation
 
 /// Read-only view of the power situation. `PowerMonitor` is the real one; tests inject a fake.
@@ -192,43 +193,5 @@ final class PowerMonitor: PowerReading {
 
     private func postChange() {
         NotificationCenter.default.post(name: .insomniaPowerDidChange, object: self)
-    }
-}
-
-/// One IOPS read. Separate from the monitor so the parsing is easy to follow (and to test with a fixture).
-struct PowerSourceReading: Equatable, Sendable {
-    var hasBattery: Bool
-    var percent: Int?
-    var isOnAC: Bool
-    var isCharging: Bool
-
-    static let desktop = PowerSourceReading(hasBattery: false, percent: nil, isOnAC: true, isCharging: false)
-
-    static func current() -> PowerSourceReading {
-        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return .desktop }
-        let providing = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String?
-        let list = (IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef]) ?? []
-        let descriptions: [[String: Any]] = list.compactMap {
-            IOPSGetPowerSourceDescription(info, $0)?.takeUnretainedValue() as? [String: Any]
-        }
-        return parse(providingType: providing, descriptions: descriptions)
-    }
-
-    /// Keys are the IOPSKeys.h string values (kIOPSTypeKey, kIOPSInternalBatteryType, …).
-    static func parse(providingType: String?, descriptions: [[String: Any]]) -> PowerSourceReading {
-        let battery = descriptions.first {
-            ($0["Type"] as? String) == "InternalBattery" && (($0["Is Present"] as? Bool) ?? true)
-        }
-        guard let battery else { return .desktop }
-
-        var percent: Int?
-        if let current = battery["Current Capacity"] as? Int, let max = battery["Max Capacity"] as? Int, max > 0 {
-            percent = Swift.min(100, Swift.max(0, Int((Double(current) / Double(max) * 100).rounded())))
-        }
-        // "AC Power" / "Battery Power" / "UPS Power". Prefer the system-wide providing type; fall back to the battery's state.
-        let state = providingType ?? (battery["Power Source State"] as? String)
-        let onAC = state.map { $0 != "Battery Power" } ?? true
-        let charging = (battery["Is Charging"] as? Bool) ?? false
-        return PowerSourceReading(hasBattery: true, percent: percent, isOnAC: onAC, isCharging: charging)
     }
 }

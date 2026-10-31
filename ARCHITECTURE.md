@@ -33,7 +33,7 @@ Read these first. They are the product and UX source of truth, and this file imp
 |---|---|---|---|
 | `Insomnia` | executable | `Contents/MacOS/Insomnia` | The app, CLI dispatch, `HelperBackend` + `SudoersBackend` |
 | `InsomniaHelper` | executable | `Contents/MacOS/InsomniaHelper` | Root launchd daemon (`CLOSED_LID.md` §2.5). Foundation + IOKit + Security only, no AppKit. |
-| `InsomniaShared` | library (static, linked into both) | n/a | `HelperProtocol` (the XPC `@objc` protocol), `HelperResult`, `HelperInfo` (label, Mach name, plist name, install path, constants, requirement builders + validator), `CodeSignature` (own Team ID + kernel cdhash, `readSelf()`), `InstallLocation` (root-owned bundle check), `Spawn` (fixed argv, explicit environment, timeout), `HelperPolicy` + `HelperPaths` (the helper's decisions as pure, unit-tested functions) |
+| `InsomniaShared` | library (static, linked into both) | n/a | `HelperProtocol` (the XPC `@objc` protocol), `HelperResult`, `HelperInfo` (label, Mach name, plist name, install path, constants, requirement builders + validator), `CodeSignature` (own Team ID + kernel cdhash, `readSelf()`), `InstallLocation` (root-owned bundle check), `Spawn` (fixed argv, explicit environment, timeout, optional stdout/stderr capture) + `WaitStatus`, `RootDomainRegistry` (IOPMrootDomain Bool reads such as `SleepDisabled`) + `PowerSourceReading` (the one IOPS parse), `HelperPolicy` + `HelperPaths` (the helper's decisions as pure, unit-tested functions) |
 
 - **No Xcode project, no app extensions, no third-party dependencies.**
 - **Frameworks:** AppKit, SwiftUI, IOKit, Carbon (hotkey), ServiceManagement (launch at login, helper daemon), Security (code signatures), UserNotifications.
@@ -79,6 +79,7 @@ Read these first. They are the product and UX source of truth, and this file imp
 | `Sources/Insomnia/Core/Settings.swift` | `Settings.shared`: `@Observable`, backed by UserDefaults, posts `.insomniaSettingsDidChange` with `userInfo["key"]` = the UserDefaults key. Clamps the battery floor to 10–50 and snaps the caps in setters (no `didSet` recursion): `lidMaxOnBatteryMinutes` to 15/30/60/120/240/480 (default 60, always on), `lidMaxOnACMinutes` to 60/120/240/480/720/1440 (default 240, used only when `lidCapOnACEnabled`, default false). Bookkeeping: `helperRegisteredCDHash` (bundled helper cdhash at the last `register()`). |
 | `Sources/InsomniaShared/HelperProtocol.swift` | `@objc(INSHelperProtocol) HelperProtocol` (`status`, `engage`, `release`, `heartbeat`), `HelperResult` (incl. `.otherUser`) |
 | `Sources/InsomniaShared/HelperInfo.swift` | `HelperInfo` (label, Mach service, plist name, `installedAppPath`, bundled paths, `version`, `sleepDisabledKey`, heartbeat 10 s / timeout 45 s, backstop 10% / poll ≤ 15% every 60 s, `clientRequirement(teamID:)`, `helperRequirement(teamID:)`, `isValidRequirement(_:)`), `CodeSignature` (`readSelf()` → Team ID + kernel cdhash + `matchesDisk`, `currentTeamID()`, `cdhash(ofFileAt:)`), `InstallLocation.check(bundle:)` |
+| `Sources/InsomniaShared/PowerSources.swift` | `RootDomainRegistry.bool(_:)` (IOPMrootDomain Bool properties), `PowerSourceReading` (`current()`, pure `parse(providingType:descriptions:)`): the app's `PowerMonitor` and the helper's battery backstop read power the same way |
 
 Everything is `@MainActor` unless noted. SwiftUI observes `@Observable` objects directly. AppKit controllers observe the `Notification.Name` events.
 
@@ -87,6 +88,7 @@ Everything is `@MainActor` unless noted. SwiftUI observes `@Observable` objects 
 ## Core
 
 ### `Core/RootDomain.swift`: IORegistry reader (no privileges)
+The reads go through `InsomniaShared`'s `RootDomainRegistry.bool(_:)`, which the helper's `FlagController` uses too (one key, `HelperInfo.sleepDisabledKey`).
 ```swift
 enum RootDomain {
     /// IOPMrootDomain "SleepDisabled". nil if unreadable.
@@ -250,7 +252,6 @@ final class Watchdog {
     /// Babysit / CLI watch: calls `onExit` once (main actor) when the target is gone for 5 s (grace).
     func watch(_ target: WatchTarget, onExit: @escaping @MainActor () -> Void) -> UUID
     func cancelWatch(_ id: UUID)
-    func isRunning(_ target: WatchTarget) -> Bool
     /// For the While… menu: running regular apps + running suggested processes.
     func runningApps() -> [(bundleID: String, name: String, icon: NSImage)]
     func runningSuggestedProcesses() -> [(name: String, pid: Int32)]  // only names the matcher finds: claude codex xcodebuild ffmpeg rsync make cargo npm python3
@@ -415,14 +416,11 @@ enum Banner: Equatable {
     func line(_ m: Moment, _ p: Personality, now: Date = Date()) -> String?
     /// Earned date line for an `activated` / `idle` moment: 1 in 3 inside a window, at most once per window.
     func dateLine(_ p: Personality, now: Date) -> String?
-    /// Plain in every tier (docs/PRODUCT.md §5 headlines).
-    func headline(status: AwakeStatus, lid: LidStatus) -> String
-    func subline(status: AwakeStatus, lid: LidStatus, remaining: TimeInterval?, now: Date) -> String
-    func lidSublabel(_ lid: LidStatus, settingOn: Bool, isAwake: Bool) -> String?
-    func durationName(_ d: AwakeDuration, _ p: Personality) -> String?      // nil in .professional; 47 min → "One more episode" (unhinged)
+    /// Title and plain body from `FallbackCopy.notification`; a personality body only for the ids UX §10 allows.
     func notification(_ id: NotificationID, _ p: Personality, context: [String: String]) -> (title: String, body: String)
-    func accessibilityValue(status: AwakeStatus, lid: LidStatus, remaining: TimeInterval?) -> String
 }
+// Plain surfaces (headline, subline, lid sublabel, duration names, VoiceOver values) are plain in every tier and live in
+// `FallbackCopy` / `PlainCopy`, not here; the engine's headline is `AwakeEngine.headline`.
 // NotificationID (ending-soon, ended, battery-floor, battery-stop, lid-heat, lid-lpm, lid-cap, lid-error, lid-stuck,
 // foreign-flag, recovered, target-exited; + isSessionNotification) is declared in Models.swift (the engine posts from M1).
 ```
@@ -608,9 +606,9 @@ These implement `UX.md` §2 exactly: rows A–H′ and J (no holds list, no exte
 
 ### `UI/WhyAwakeMenu.swift`
 ```swift
-@MainActor enum WhyAwakeMenu { static func make() -> NSMenu; static func reportText() -> String }
+@MainActor enum WhyAwakeMenu { static func make() -> NSMenu }
 ```
-The menu sections follow `UX.md` §1.5, built from `AwakeEngine.holds`, `guards`, `AssertionInspector.foreignAssertions()`, `RootDomain` and `ClosedLidController.foreignSleepDisabled`. **"Copy Report"** puts `reportText()` on the pasteboard.
+The menu sections follow `UX.md` §1.5, built from `AwakeEngine.holds`, `guards`, `AssertionInspector.foreignAssertions()`, `RootDomain` and `ClosedLidController.foreignSleepDisabled`. **"Copy Report"** puts the report's `text(generatedAt:)` on the pasteboard. `insomnia why` renders the same `WhyAwakeReport` (`WhyAwakeInput.make` with the control responder's dependencies), as does Settings ▸ Diagnostics.
 
 ### `UI/DockController.swift`
 ```swift
@@ -644,7 +642,7 @@ struct HotKeyRecorder: View        // click to record; next key whose modifiers 
 ```swift
 @MainActor @Observable final class EventLog { static let shared: EventLog; private(set) var entries: [Entry]; func log(_ kind: String, _ message: String); func clear(); func text() -> String }
 ```
-An in-memory ring of 200 entries, also mirrored to `os.Logger(subsystem: "com.gdeml.Insomnia", category: kind)`. Engine, lid, guard, URL and CLI events all log here.
+An in-memory ring of 200 entries. Engine, lid, guard, URL and CLI events all log here, each after logging to its own `os.Logger(subsystem: "com.gdeml.Insomnia", …)`, so the shared ring doesn't mirror to the unified log again.
 
 ---
 
@@ -704,7 +702,7 @@ struct URLCommand: Equatable { /* parsed, pure */ static func parse(_ url: URL) 
 | Host | Parameters |
 |---|---|
 | `toggle` | none |
-| `on` | `for=45m\|2h\|90\|forever`, `until=HH:mm` (next occurrence), `screen=0\|1`. Always fixed options with `lid: false`. |
+| `on` | `for=45m\|2h\|90\|forever` (the CLI's `ControlDuration` parser, capped at 7 days), `until=HH:mm` (next occurrence), `screen=0\|1`. Always fixed options with `lid: false`. |
 | `off` | none |
 | `extend` | `by=15m` |
 | `sleep` | none. Asks first ("Put your Mac to sleep now?"): any web page can open a link. |

@@ -274,8 +274,6 @@ struct BannerView: View {
 
 /// `⋯` (C): Sleep Now, Why awake?…, Settings… ⌘,, About Insomnia, Quit ⌘Q.
 struct MoreMenuButton: View {
-    /// Settings… is disabled only when no Settings window is wired (bare snapshots).
-    var canOpenSettings = true
     let send: (PanelAction) -> Void
     var body: some View {
         Menu {
@@ -284,7 +282,6 @@ struct MoreMenuButton: View {
             Divider()
             Button("Settings…") { send(.settings(.general)) }
                 .keyboardShortcut(",", modifiers: .command)
-                .disabled(!canOpenSettings)
             Button("About Insomnia") { send(.about) }
             Divider()
             Button("Quit Insomnia") { send(.quit) }

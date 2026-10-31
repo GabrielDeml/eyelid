@@ -16,7 +16,6 @@ private final class LabelNarrator: Narrating {
         default: return nil
         }
     }
-    func headline(status: AwakeStatus, lid: LidStatus) -> String { "" }
     func notification(_ id: NotificationID, _ p: Personality, context: [String: String]) -> (title: String, body: String) {
         ("", "")
     }

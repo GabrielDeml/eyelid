@@ -107,11 +107,7 @@ struct LiveWelcomeCard: View {
     var body: some View {
         WelcomeCard(hasLid: PowerMonitor.shared.hasLid, leftClickAction: settings.leftClickAction,
                     showInDock: $settings.showInDock,
-                    setUpLid: {
-                        if AppRouter.shared.startLidSetupHandler != nil { AppRouter.shared.startLidSetup() } else {
-                            AppRouter.shared.openSettings(.lidSafety)
-                        }
-                    },
+                    setUpLid: { AppRouter.shared.startLidSetup() },
                     done: { EpicMoments.shared.completeOnboarding() })
     }
 }

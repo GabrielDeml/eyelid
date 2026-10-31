@@ -35,11 +35,9 @@ struct PanelState: Equatable {
     var hasLid = false
     var keepScreenOn = true
     var closedLidMode = false
-    /// The privileged backend's readiness. Without a lid controller (M1) it is `.notInstalled`, exactly as the engine
-    /// treats it, so the switch and H′ never promise lid mode that can't engage.
+    /// The privileged backend's readiness. Without a lid controller (tests) it is `.notInstalled`, exactly as the
+    /// engine treats it, so the switch and H′ never promise lid mode that can't engage.
     var helper: HelperStatus = .notInstalled
-    /// Settings… is available (a Settings window handler is wired; false only in bare snapshots).
-    var canOpenSettings = true
     /// A fixed-options manual hold (CLI flags / URL) without lid is running: H′ "Off for this session".
     var fixedHoldWithoutLid = false
     var personality: Personality = .cheeky
@@ -57,9 +55,8 @@ struct PanelState: Equatable {
 
     var isAwake: Bool { status.isAwake }
     var isTimed: Bool { if case .timed = status { return true } else { return false } }
-    var isLidEngaged: Bool { if case .engaged = lid { return true } else { return false } }
     var heavyLids: Bool { isTimed && (remaining ?? .infinity) <= 60 }
-    var bags: Int { !isAwake ? 0 : (awakeFor >= 72 * 3600 ? 2 : (awakeFor >= 24 * 3600 ? 1 : 0)) }
+    var bags: Int { isAwake ? EyeBags.level(awakeFor: awakeFor) : 0 }
     /// The lid switch position (UX §5): off while setup is missing; otherwise the setting.
     var lidToggleOn: Bool { closedLidMode && helper == .installed && lid != .needsSetup }
 }
@@ -105,8 +102,6 @@ final class PanelModel {
     var isVisible = false
     var showUntil = false
     var cues = EyesCues()
-    /// Set when the lid switch was flipped on but setup is missing and no setup flow is available yet.
-    var lidSetupNudge = false
     /// Which kind of control has keyboard focus (mirrored from the view's FocusState for the key handler).
     @ObservationIgnored var focus: PanelFocus?
 
@@ -141,20 +136,16 @@ final class PanelModel {
         case .setLid(true):
             if state.helper != .installed {
                 // UX §2.2 H: with the helper missing, turning the switch on opens setup instead of writing the setting.
-                // Without a setup flow (bare snapshots) the sublabel says "Setup needed ›".
-                if AppRouter.shared.startLidSetupHandler != nil { AppRouter.shared.startLidSetup(requestedLid: true) } else { lidSetupNudge = true }
+                AppRouter.shared.startLidSetup(requestedLid: true)
                 return
             }
-        case .setLid(false):
-            lidSetupNudge = false
         default: break
         }
         handler(action)
     }
 
     func presentWhileMenu() {
-        guard let anchor = whileAnchor else { return }
-        let menu = whileMenuProvider?() ?? PanelModel.stubWhileMenu()
+        guard let anchor = whileAnchor, let menu = whileMenuProvider?() else { return }
         let y = anchor.isFlipped ? anchor.bounds.maxY + 4 : -4
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: y), in: anchor)
     }
@@ -190,19 +181,6 @@ final class PanelModel {
             send(.setLid(!s.lidToggleOn)); return true
         default: return false
         }
-    }
-
-    private static func stubWhileMenu() -> NSMenu {
-        let menu = NSMenu(title: "While…")
-        let apps = NSMenuItem(title: "Running apps", action: nil, keyEquivalent: "")
-        apps.isEnabled = false
-        menu.addItem(apps)
-        for title in ["Suggested", "Process name…", "PID…"] {
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-        }
-        return menu
     }
 }
 
@@ -262,7 +240,7 @@ enum PlainCopy {
             text = "Until you say so"
         case .watching(let t):
             text = "While \(t.displayName) runs"
-            link = InlineLink(title: "Stop", action: .stopBabysit, accessibilityLabel: "Stop watching \(shortName(t))")
+            link = InlineLink(title: "Stop", action: .stopBabysit, accessibilityLabel: "Stop watching \(FallbackCopy.shortName(t))")
         case .client(let label):
             text = "Held by \(label) (CLI)"
         case .automatic:
@@ -291,14 +269,14 @@ enum PlainCopy {
     }
 
     /// H′ wording per `LidStatus` (UX §5). nil = silent (the slot stays, empty).
-    static func lidSublabel(_ s: PanelState, nudge: Bool) -> Sublabel? {
+    static func lidSublabel(_ s: PanelState) -> Sublabel? {
         func sec(_ t: String) -> Sublabel { Sublabel(text: t, tone: .secondary) }
         func warn(_ t: String) -> Sublabel { Sublabel(text: t, tone: .warning) }
         let retry = InlineLink(title: "Retry", action: .lidRetry, accessibilityLabel: "Retry lid mode")
         switch s.lid {
         case .off:
             // The switch can't be on without setup (UX §5): say what's missing rather than "Armed".
-            if nudge || (s.closedLidMode && s.helper != .installed) {
+            if s.closedLidMode && s.helper != .installed {
                 return setupSublabel(s.helper)
             }
             guard s.closedLidMode else { return nil }
@@ -311,15 +289,11 @@ enum PlainCopy {
             return Sublabel(text: "Applying…", tone: .secondary, spinner: true)
         case .engaged(let closed):
             return sec(closed ? "Engaged · lid closed" : "Ready · close the lid anytime")
+        case .suspended(.acRequired):
+            return sec("Waiting for power adapter")
         case .suspended(let g):
-            switch g {
-            case .thermal: return warn("Paused · running hot")
-            case .lowPowerMode: return warn("Paused · Low Power Mode")
-            case .batteryFloor, .awakeBatteryFloor: return warn("Paused · battery at \(s.batteryFloor)%")
-            case .acRequired: return sec("Waiting for power adapter")
-            case .lidBatteryCap: return sec("Paused · \(capText(s.lidBatteryCapMinutes)) limit on battery")
-            case .lidACCap: return sec("Paused · \(capText(s.lidACCapMinutes)) limit on power")
-            }
+            let text = "Paused · " + guardPhrase(g, s)
+            return g == .lidBatteryCap || g == .lidACCap ? sec(text) : warn(text)
         case .latched:
             return sec("Paused · open the lid to resume")
         case .error(.foreignFlag):
@@ -374,14 +348,14 @@ enum PlainCopy {
         case .asleep: v = s.pausedRuleSummary == nil ? "Sleep allowed" : "Sleep allowed, rules paused"
         case .timed: v = "Awake, \(spokenRemaining(s.remaining ?? 0)) left"
         case .indefinite: v = "Awake until you stop it"
-        case .watching(let t): v = "Awake while \(shortName(t)) runs"
+        case .watching(let t): v = "Awake while \(FallbackCopy.shortName(t)) runs"
         case .client(let label): v = "Awake while \(label) runs"
         case .automatic(let c): v = "Awake, rule: \(c.first?.phrase ?? "active")"
         case .suspended: return "Paused, battery at \(s.batteryFloor) percent"
         }
         switch s.lid {
         case .engaged: v += ", lid mode on"
-        case .suspended(let g): v += ", lid mode paused: \(guardPhrase(g, s))"
+        case .suspended(let g): v += ", lid mode paused: \(guardPhrase(g, s, spoken: true))"
         case .latched: v += ", lid mode paused: open the lid to resume"
         default: break
         }
@@ -394,7 +368,7 @@ enum PlainCopy {
         case .asleep, .suspended: return "Off"
         case .timed: return "On, \(spokenRemaining(s.remaining ?? 0)) left"
         case .indefinite: return "On, until you stop it"
-        case .watching(let t): return "On, while \(shortName(t)) runs"
+        case .watching(let t): return "On, while \(FallbackCopy.shortName(t)) runs"
         case .client(let label): return "On, held by \(label)"
         case .automatic(let c): return "On, rule: \(c.first?.phrase ?? "active")"
         }
@@ -470,33 +444,44 @@ enum PlainCopy {
 
     // MARK: Helpers
 
-    static func shortName(_ t: WatchTarget) -> String { FallbackCopy.shortName(t) }
+    /// A lid cap, short: "15 min", "4 h", "1 h 30 min" (banners, notifications, Why awake, the CLI).
+    static func capText(_ minutes: Int) -> String { TimeFormat.hoursMinutes(minutes) }
 
-    static func capText(_ minutes: Int) -> String {
-        minutes % 60 == 0 ? "\(minutes / 60) h" : (minutes > 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min")
-    }
+    /// A lid cap, long: "15 minutes", "1 hour", "4 hours" (the setup sheet and the Lid & Safety pickers).
+    static func capLong(_ minutes: Int) -> String { spokenMinutes(minutes) }
 
     private static func longRemaining(_ r: TimeInterval) -> String {
-        let m = Int((r / 60).rounded(.up)), h = m / 60, mm = m % 60
-        return mm == 0 ? "\(h) h" : "\(h) h \(mm) min"
+        TimeFormat.hoursMinutes(Int((r / 60).rounded(.up)))
     }
 
     static func spokenRemaining(_ r: TimeInterval) -> String {
-        let m = max(1, Int((r / 60).rounded(.up))), h = m / 60, mm = m % 60
+        spokenMinutes(max(1, Int((r / 60).rounded(.up))))
+    }
+
+    private static func spokenMinutes(_ m: Int) -> String {
+        let h = m / 60, mm = m % 60
         func unit(_ n: Int, _ w: String) -> String { "\(n) \(w)\(n == 1 ? "" : "s")" }
         if h == 0 { return unit(mm, "minute") }
         return mm == 0 ? unit(h, "hour") : unit(h, "hour") + " " + unit(mm, "minute")
     }
 
-    private static func guardPhrase(_ g: GuardReason, _ s: PanelState) -> String {
+    /// What a guard is pausing on ("running hot", "1 h limit on battery"), for every surface: Why awake,
+    /// `insomnia why` / `status`, H′ ("Paused · …") and VoiceOver (`spoken`: "percent" instead of "%").
+    static func guardPhrase(_ g: GuardReason, batteryFloor: Int, batteryCap: Int, acCap: Int,
+                            spoken: Bool = false) -> String {
         switch g {
         case .thermal: return "running hot"
         case .lowPowerMode: return "Low Power Mode"
-        case .batteryFloor, .awakeBatteryFloor: return "battery at \(s.batteryFloor) percent"
+        case .batteryFloor, .awakeBatteryFloor: return "battery at \(batteryFloor)\(spoken ? " percent" : "%")"
         case .acRequired: return "waiting for power adapter"
-        case .lidBatteryCap: return "\(capText(s.lidBatteryCapMinutes)) limit on battery"
-        case .lidACCap: return "\(capText(s.lidACCapMinutes)) limit on power"
+        case .lidBatteryCap: return "\(capText(batteryCap)) limit on battery"
+        case .lidACCap: return "\(capText(acCap)) limit on power"
         }
+    }
+
+    private static func guardPhrase(_ g: GuardReason, _ s: PanelState, spoken: Bool = false) -> String {
+        guardPhrase(g, batteryFloor: s.batteryFloor, batteryCap: s.lidBatteryCapMinutes, acCap: s.lidACCapMinutes,
+                    spoken: spoken)
     }
 
 }
@@ -536,8 +521,7 @@ enum LivePanelState {
         s.batteryFloor = settings.batteryFloorPercent
         s.lidBatteryCapMinutes = settings.lidMaxOnBatteryMinutes
         s.lidACCapMinutes = settings.lidMaxOnACMinutes
-        s.helper = engine.lidController?.helper ?? .notInstalled   // the engine's own fallback (M1: no controller)
-        s.canOpenSettings = AppRouter.shared.openSettingsHandler != nil
+        s.helper = engine.lidController?.helper ?? .notInstalled   // the engine's own fallback (no controller: tests)
 
         let holds = engine.holds
         if let manual = engine.manualHold { s.selectedPreset = preset(matching: manual) }
@@ -573,14 +557,11 @@ enum LivePanelState {
         case .settings(let tab): AppRouter.shared.openSettings(tab)
         case .about:
             AppRouter.shared.closePanel()
-            if AppRouter.shared.showAboutHandler != nil { AppRouter.shared.showAbout() } else {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.orderFrontStandardAboutPanel(nil)
-            }
+            AppRouter.shared.showAbout()
         case .quit: AppRouter.shared.quit()
         case .dismissBanner: engine.dismissBanner()
         case .lidSetup:
-            if AppRouter.shared.startLidSetupHandler != nil { AppRouter.shared.startLidSetup() } else { AppRouter.shared.openSettings(.lidSafety) }
+            AppRouter.shared.startLidSetup()
         case .lidRetry: ClosedLidController.shared.retry()
         case .lidReset: Task { await ClosedLidController.shared.resetWithPassword() }
         case .closePanel: AppRouter.shared.closePanel()

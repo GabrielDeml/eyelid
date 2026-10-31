@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import UserNotifications
 @testable import Insomnia
+import InsomniaShared
 
 // Regression tests for the 2026-10-31 review, group D (engine, narrator, notifier). Each test names its finding.
 
@@ -23,7 +24,6 @@ private final class StubNarrator: Narrating {
         defer { date = nil }
         return date
     }
-    func headline(status: AwakeStatus, lid: LidStatus) -> String { "" }
     func notification(_ id: NotificationID, _ p: Personality, context: [String: String]) -> (title: String, body: String) {
         FallbackCopy.notification(id, context: context)
     }

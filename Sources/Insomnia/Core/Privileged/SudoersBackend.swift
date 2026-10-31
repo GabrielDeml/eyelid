@@ -84,8 +84,9 @@ struct SudoersBackend: PrivilegedBackend {
     private static func daemonEnabled() -> Bool {
         let sm = SMAppService.statusForLegacyPlist(at: URL(fileURLWithPath: daemonPlist))
         if sm == .requiresApproval || sm == .notRegistered { return false }
-        let out = Spawn.runCapturingStdout("/bin/launchctl", ["print-disabled", "system"], timeout: 5)
-        return !isDisabled(label: daemonLabel, printDisabledOutput: out)
+        let r = Spawn.run("/bin/launchctl", ["print-disabled", "system"],
+                          environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"], timeout: 5, captureStdout: true)
+        return !isDisabled(label: daemonLabel, printDisabledOutput: r.status == -1 ? "" : r.stdout)
     }
 
     /// Lines look like `"com.example" => disabled` (macOS 14+) or `=> true` (older).
@@ -306,36 +307,5 @@ struct SudoersBackend: PrivilegedBackend {
         /bin/rm -f "/Library/LaunchDaemons/$L.plist" \(sudoersFile) /etc/sudoers.d/.insomnia.* /Library/LaunchDaemons/.insomnia.* \(bootMarker)
         [ ! -e \(sudoersFile) ] && [ ! -e "/Library/LaunchDaemons/$L.plist" ] || exit 20
         """
-    }
-}
-
-extension Spawn {
-    /// stdout of a short read-only command (launchctl print-disabled). Empty on failure.
-    static func runCapturingStdout(_ path: String, _ arguments: [String], timeout: TimeInterval) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
-        let out = Pipe()
-        process.standardOutput = out
-        process.standardError = FileHandle.nullDevice
-        process.standardInput = FileHandle.nullDevice
-        do { try process.run() } catch { return "" }
-        let deadline = DispatchTime.now() + timeout
-        let reader = DispatchQueue.global(qos: .utility)
-        let box = OSAllocatedUnfairLock(initialState: Data())
-        let group = DispatchGroup()
-        group.enter()
-        reader.async {
-            let data = out.fileHandleForReading.readDataToEndOfFile()
-            box.withLock { $0 = data }
-            group.leave()
-        }
-        if group.wait(timeout: deadline) == .timedOut {
-            process.terminate()
-            return ""
-        }
-        process.waitUntilExit()
-        return String(decoding: box.withLock { $0 }, as: UTF8.self)
     }
 }

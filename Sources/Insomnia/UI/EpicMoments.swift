@@ -126,9 +126,6 @@ final class EpicMoments {
         settings.hasCompletedOnboarding = true
         Notifier.requestAuthorization()
     }
-
-    /// For snapshots and previews.
-    func setWelcomeVisibleForPreview(_ on: Bool) { welcomeVisible = on }
 }
 
 // MARK: - Mission report (UX §6 "Lid reopens", §2.4)
@@ -261,7 +258,7 @@ struct CountUp<Content: View>: View {
 // MARK: - Eye bags
 
 enum EyeBags {
-    /// 0 none, 1 bags (≥ 24 h continuously awake), 2 bags + veins (≥ 72 h). Mirrors `PanelState.bags`.
+    /// 0 none, 1 bags (≥ 24 h continuously awake), 2 bags + veins (≥ 72 h). `PanelState.bags` gates it on awake.
     static func level(awakeFor: TimeInterval) -> Int {
         awakeFor >= 72 * 3600 ? 2 : (awakeFor >= 24 * 3600 ? 1 : 0)
     }

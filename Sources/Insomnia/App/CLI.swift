@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import InsomniaShared
 
 // MARK: - `insomnia …`: the same binary in CLI mode (ARCHITECTURE.md "App/CLI.swift", Decision 11)
 //
@@ -220,9 +221,7 @@ enum CLIFormat {
 
     /// "42 min", "1 h", "2 h 5 min" (rounded up to the minute, like the panel).
     static func remaining(_ seconds: Int) -> String {
-        let m = max(1, (seconds + 59) / 60), h = m / 60, mm = m % 60
-        if h == 0 { return "\(mm) min" }
-        return mm == 0 ? "\(h) h" : "\(h) h \(mm) min"
+        TimeFormat.hoursMinutes(max(1, (seconds + 59) / 60))
     }
 
     /// UX.md §1.5 as text. Sections keep the server's order; System uses "who: what".
@@ -866,14 +865,3 @@ enum CLIRunner {
 }
 
 struct SpawnError: Error, Equatable { let code: Int32 }
-
-/// `waitpid` status, decoded (the W* macros don't import into Swift).
-enum WaitStatus: Equatable {
-    case exited(Int32)
-    case signaled(Int32)
-
-    init(_ raw: Int32) {
-        let low = raw & 0x7f
-        self = low == 0 ? .exited((raw >> 8) & 0xff) : .signaled(low)
-    }
-}

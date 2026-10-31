@@ -9,15 +9,7 @@ import InsomniaShared
 /// Used only on the daemon's serial queue (every call blocks for up to ~5.6 s).
 struct FlagController {
     /// IOPMrootDomain "SleepDisabled"; nil if unreadable.
-    func read() -> Bool? {
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
-        guard service != IO_OBJECT_NULL else { return nil }
-        defer { IOObjectRelease(service) }
-        guard let value = IORegistryEntryCreateCFProperty(service, HelperInfo.sleepDisabledKey as CFString,
-                                                          kCFAllocatorDefault, 0)?.takeRetainedValue()
-        else { return nil }
-        return (value as? NSNumber)?.boolValue
-    }
+    func read() -> Bool? { RootDomainRegistry.bool(HelperInfo.sleepDisabledKey) }
 
     /// The saved setting from `IOPMCopySystemPowerSettings()` (no header; resolved with dlsym so a missing symbol
     /// can never stop the helper loading). `.unavailable` = the symbol is missing: IORegistry alone decides.
@@ -104,33 +96,6 @@ struct FlagController {
         guard written == bytes.count else { return false }
         _ = fchmod(fd, 0o644)
         return fsync(fd) == 0
-    }
-}
-
-/// One IOPS read in the helper (it can't link the app's PowerMonitor). Same keys as PowerSourceReading.
-struct BatteryReading: Equatable {
-    var onBattery: Bool
-    var percent: Int?
-
-    static func current() -> BatteryReading {
-        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return BatteryReading(onBattery: false) }
-        let providing = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String?
-        let list = (IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef]) ?? []
-        let battery = list.lazy.compactMap {
-            IOPSGetPowerSourceDescription(info, $0)?.takeUnretainedValue() as? [String: Any]
-        }.first { ($0[kIOPSTypeKey] as? String) == kIOPSInternalBatteryType }
-        guard let battery else { return BatteryReading(onBattery: false) }
-        var percent: Int?
-        if let current = battery[kIOPSCurrentCapacityKey] as? Int, let max = battery[kIOPSMaxCapacityKey] as? Int, max > 0 {
-            percent = Swift.min(100, Swift.max(0, Int((Double(current) / Double(max) * 100).rounded())))
-        }
-        let state = providing ?? (battery[kIOPSPowerSourceStateKey] as? String)
-        return BatteryReading(onBattery: state == kIOPSBatteryPowerValue, percent: percent)
-    }
-
-    init(onBattery: Bool, percent: Int? = nil) {
-        self.onBattery = onBattery
-        self.percent = percent
     }
 }
 

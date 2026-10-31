@@ -188,34 +188,42 @@ enum ControlDuration {
     /// A year. Anything longer is a typo, and "forever" exists.
     static let maxMinutes = 366 * 24 * 60
 
-    private static let foreverWords: Set<String> = ["forever", "indefinite", "indefinitely", "inf", "infinity", "∞"]
+    private static let foreverWords: Set<String> = ["forever", "indefinite", "indefinitely", "inf", "infinite",
+                                                    "infinity", "∞"]
 
-    /// "45m", "2h", "1h30m", "90" (minutes), "1d", "forever" → a duration. nil if unreadable, zero or > a year.
-    static func parse(_ text: String) -> AwakeDuration? {
+    /// "45m", "2h", "1h30m", "1h30", "90" (minutes), "1d", "forever" → a duration. nil if unreadable or zero.
+    /// Past `cap`: nil, or `cap` when `saturating` (URLs: any web page can send these values, so the arithmetic
+    /// saturates instead of overflowing).
+    static func parse(_ text: String, cap: Int = maxMinutes, saturating: Bool = false) -> AwakeDuration? {
         let t = text.trimmingCharacters(in: .whitespaces).lowercased()
         if foreverWords.contains(t) { return .indefinite }
-        return minutes(t).map { .minutes($0) }
+        return minutes(t, cap: cap, saturating: saturating).map { .minutes($0) }
     }
 
-    /// Minutes only (no "forever"): for `extend` and timed `on`.
-    static func minutes(_ text: String) -> Int? {
+    /// Minutes only (no "forever"): for `extend` and timed `on`. A bare number is minutes, and so is a bare number
+    /// after the last unit ("1h30").
+    static func minutes(_ text: String, cap: Int = maxMinutes, saturating: Bool = false) -> Int? {
         let t = text.trimmingCharacters(in: .whitespaces).lowercased()
         guard !t.isEmpty else { return nil }
-        if t.allSatisfy(\.isASCIIDigit) {
-            guard t.count <= 7, let m = Int(t), m > 0, m <= maxMinutes else { return nil }
-            return m
-        }
         var total = 0
         var rest = Substring(t)
         while !rest.isEmpty {
             let digits = rest.prefix(while: \.isASCIIDigit)
-            guard !digits.isEmpty, digits.count <= 7, let n = Int(digits) else { return nil }
+            guard !digits.isEmpty else { return nil }
             rest = rest.dropFirst(digits.count).drop(while: { $0 == " " })
             let unit = rest.prefix(while: { $0.isLetter })
             rest = rest.dropFirst(unit.count).drop(while: { $0 == " " })
-            guard let scale = unitMinutes[String(unit)] else { return nil }
+            // A bare number only last: the whole text ("90"), or trailing minutes after a unit ("1h30").
+            guard let scale = unit.isEmpty && rest.isEmpty ? 1 : unitMinutes[String(unit)] else { return nil }
+            // More than 7 digits is past any cap; saturating parsers clamp instead of overflowing.
+            guard digits.count <= 7, let n = Int(digits) else {
+                if saturating { total = cap; continue } else { return nil }
+            }
             total += n * scale
-            guard total <= maxMinutes else { return nil }
+            if total > cap {
+                guard saturating else { return nil }
+                total = cap
+            }
         }
         return total > 0 ? total : nil
     }
@@ -226,9 +234,12 @@ enum ControlDuration {
         "d": 1440, "day": 1440, "days": 1440,
     ]
 
-    /// "17:30", "7:05" → (17, 30). 24-hour clock.
+    /// "17:30", "7:05", "0730" → (17, 30). 24-hour clock.
     static func clock(_ text: String) -> (hour: Int, minute: Int)? {
-        let parts = text.trimmingCharacters(in: .whitespaces).split(separator: ":", omittingEmptySubsequences: false)
+        let t = text.trimmingCharacters(in: .whitespaces)
+        let parts: [Substring] = t.count == 4 && !t.contains(":")
+            ? [t.prefix(2), t.suffix(2)]
+            : t.split(separator: ":", omittingEmptySubsequences: false)
         guard parts.count == 2, (1...2).contains(parts[0].count), parts[1].count == 2,
               parts.allSatisfy({ $0.allSatisfy(\.isASCIIDigit) }),
               let h = Int(parts[0]), let m = Int(parts[1]), (0...23).contains(h), (0...59).contains(m) else { return nil }

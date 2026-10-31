@@ -143,7 +143,7 @@ final class Narrator: Narrating {
         return line
     }
 
-    /// Maps a moment onto its pool. nil = no copy for this moment (e.g. a replaced hold, a client disconnecting).
+    /// Maps a moment onto its pool. nil = no copy for this moment (e.g. the setup sheet's test drive ending).
     static func kind(for m: Moment) -> CopyKind? {
         switch m {
         case .activated: return .activated
@@ -153,7 +153,7 @@ final class Narrator: Narrating {
             case .timerExpired: return .deactivatedTimer
             case .batteryFloor: return .deactivatedBattery
             case .targetExited: return .targetExited
-            case .clientDisconnected, .appQuit, .replaced: return nil
+            case .replaced: return nil
             }
         case .idle: return .idle
         case .awake(let hours):
@@ -245,52 +245,11 @@ final class Narrator: Narrating {
         return out
     }
 
-    // MARK: - Plain copy (every tier; UX.md §5, §8). One source: FallbackCopy / PlainCopy.
-
-    func headline(status: AwakeStatus, lid: LidStatus) -> String {
-        FallbackCopy.headline(status: status, lid: lid, batteryFloor: settings.batteryFloorPercent)
-    }
-
-    func subline(status: AwakeStatus, lid: LidStatus, remaining: TimeInterval?, now: Date) -> String {
-        PlainCopy.subline(plainState(status: status, lid: lid, remaining: remaining, now: now)).joined
-    }
-
-    func lidSublabel(_ lid: LidStatus, settingOn: Bool, isAwake: Bool) -> String? {
-        var s = plainState(status: isAwake ? .indefinite : .asleep, lid: lid, remaining: nil, now: Date())
-        s.closedLidMode = settingOn
-        return PlainCopy.lidSublabel(s, nudge: false)?.joined
-    }
-
-    func durationName(_ d: AwakeDuration, _ p: Personality) -> String? {
-        PlainCopy.durationName(d, p)
-    }
-
-    func accessibilityValue(status: AwakeStatus, lid: LidStatus, remaining: TimeInterval?) -> String {
-        PlainCopy.accessibilityValue(plainState(status: status, lid: lid, remaining: remaining, now: Date()))
-    }
-
-    private func plainState(status: AwakeStatus, lid: LidStatus, remaining: TimeInterval?, now: Date) -> PanelState {
-        var s = PanelState()
-        s.status = status
-        s.lid = lid
-        s.now = now
-        s.remaining = remaining
-        s.batteryFloor = settings.batteryFloorPercent
-        s.lidBatteryCapMinutes = settings.lidMaxOnBatteryMinutes
-        s.lidACCapMinutes = settings.lidMaxOnACMinutes
-        s.closedLidMode = settings.closedLidMode
-        s.personality = settings.personality
-        return s
-    }
-
     // MARK: - Notifications (UX.md §10)
 
     /// Title: plain, identical in every tier. Body: personality only for the ids UX §10 marks, otherwise plain.
     func notification(_ id: NotificationID, _ p: Personality, context: [String: String]) -> (title: String, body: String) {
-        var plain = FallbackCopy.notification(id, context: context)
-        if id == .endingSoon, let minutes = context["minutes"].flatMap(Int.init), minutes != 5 {
-            plain.title = "Insomnia: \(minutes) minute\(minutes == 1 ? "" : "s") left"
-        }
+        let plain = FallbackCopy.notification(id, context: context)
         let kind: CopyKind?
         switch id {
         case .endingSoon: kind = .endingSoon
@@ -306,16 +265,7 @@ final class Narrator: Narrating {
             if values["floor"] == nil { values["floor"] = "\(settings.batteryFloorPercent)" }
             return (plain.title, Self.fill(line, values))
         }
-        return (plain.title, plain.body.isEmpty ? Self.plainBody(id, context: context) : plain.body)
-    }
-
-    /// Plain bodies for ids whose FallbackCopy body is empty, so a notification never arrives blank.
-    private static func plainBody(_ id: NotificationID, context: [String: String]) -> String {
-        switch id {
-        case .lidLPM: return "Lid mode resumes when Low Power Mode is off."
-        case .lidCap: return "Open the lid to reset the limit."
-        default: return ""
-        }
+        return plain
     }
 
     // MARK: - Settings ▸ General live sample

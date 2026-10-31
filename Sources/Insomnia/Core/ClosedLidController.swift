@@ -29,8 +29,6 @@ final class ClosedLidController: LidControlling {
     private(set) var reopenReport: ReopenReport?
     /// Signed builds: files from an earlier unsigned (sudoers) setup exist → "Remove old setup…".
     private(set) var hasLegacySudoers = false
-    /// True while the approval step polls the helper status every second.
-    private(set) var isWatchingApproval = false
     /// The last setup / removal / reset failure (nil after a success or a cancelled prompt), for inline UI copy.
     private(set) var lastSetupError: LidSetupError?
 
@@ -195,7 +193,6 @@ final class ClosedLidController: LidControlling {
         if on { approvalWatchers.insert(watcher) } else { approvalWatchers.remove(watcher) }
         guard !approvalWatchers.isEmpty else { stopApprovalWatch(); return }
         guard approvalTask == nil else { return }
-        isWatchingApproval = true
         approvalTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -206,14 +203,12 @@ final class ClosedLidController: LidControlling {
             // Cancelled: a replacement may already own `approvalTask`. Only a poll that ended by itself clears it.
             guard !Task.isCancelled else { return }
             self?.approvalTask = nil
-            self?.isWatchingApproval = false
         }
     }
 
     private func stopApprovalWatch() {
         approvalTask?.cancel()
         approvalTask = nil
-        isWatchingApproval = false
     }
 
     /// Release → backend.uninstall → delete marker → Settings.closedLidMode = false. A cancelled or failed removal
@@ -475,7 +470,8 @@ final class ClosedLidController: LidControlling {
     private func setStatus(_ new: LidStatus) {
         guard new != status else { return }
         let wasEngaged = isEngaged
-        log.notice("lid: \(String(describing: self.status), privacy: .public) → \(String(describing: new), privacy: .public)")
+        // Debug only: the engine logs every lid transition it shows ("[lid] old → new"), so this would be a double.
+        log.debug("lid: \(String(describing: self.status), privacy: .public) → \(String(describing: new), privacy: .public)")
         status = new
         if isEngaged && !wasEngaged { didEngage() }
         if !isEngaged && wasEngaged { didDisengage() }

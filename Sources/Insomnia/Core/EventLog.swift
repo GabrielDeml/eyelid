@@ -2,13 +2,13 @@ import Foundation
 import Observation
 import os
 
-/// In-memory ring of the last 200 events (engine, lid, guard, URL, CLI, watch), shown in Settings ▸ Diagnostics and
-/// mirrored to the unified log (`os.Logger`, subsystem `com.gdeml.Insomnia`, category = the event kind).
+/// In-memory ring of the last 200 events (engine, lid, guard, URL, CLI, watch), shown in Settings ▸ Diagnostics.
+/// The shared log doesn't mirror to the unified log: every caller already logs to its own `os.Logger` first.
 /// ARCHITECTURE.md "Core/EventLog.swift". Nothing is written to disk.
 @MainActor
 @Observable
 final class EventLog: EventLogging {
-    static let shared = EventLog()
+    static let shared = EventLog(mirrorsToSystemLog: false)
 
     struct Entry: Identifiable, Equatable, Sendable {
         /// Monotonic sequence number (stable SwiftUI identity even after the ring drops old entries).

@@ -126,7 +126,7 @@ struct LidSetupView: View {
     }
 
     private var bullets: [LocalizedStringKey] {
-        let cap = LidSetupCopy.capText(settings.lidMaxOnBatteryMinutes)
+        let cap = PlainCopy.capLong(settings.lidMaxOnBatteryMinutes)
         let floor = settings.batteryFloorPercent
         var b: [LocalizedStringKey] = ["Your Mac won't sleep when you close the lid. The screen turns off."]
         if lid.backendKind == .sudoers {
@@ -452,10 +452,6 @@ enum LidSetupActions {
 /// Plain copy shared by the setup sheet and Lid & Safety. No jokes in errors.
 enum LidSetupCopy {
     static let unsafeLocationInfo = "The helper runs as root, so it only runs from /Applications/Insomnia.app owned by the system. make install puts it there."
-
-    static func capText(_ minutes: Int) -> String {
-        minutes < 60 ? "\(minutes) min" : (minutes == 60 ? "1 hour" : "\(minutes / 60) hours")
-    }
 
     static func problem(for error: LidSetupError) -> SetupProblem {
         switch error {

@@ -257,7 +257,7 @@ final class DockController {
             })
         }
         durations.addItem(ActionMenuItem("Until…") { [weak self] in
-            if let handler = self?.untilHandler { handler() } else { self?.openPanel() }
+            self?.untilHandler?()
         })
         keepAwake.submenu = durations
         menu.addItem(keepAwake)
@@ -286,9 +286,7 @@ final class DockController {
                 menu.addItem(lid)
             } else {
                 menu.addItem(ActionMenuItem("Stay Awake With Lid Closed: Set Up…") {
-                    if AppRouter.shared.startLidSetupHandler != nil { AppRouter.shared.startLidSetup() } else {
-                        AppRouter.shared.openSettings(.lidSafety)
-                    }
+                    AppRouter.shared.startLidSetup()
                 })
             }
         }
@@ -296,9 +294,7 @@ final class DockController {
         menu.addItem(.separator())
         menu.addItem(ActionMenuItem("Open Panel") { [weak self] in self?.openPanel() })
         menu.addItem(ActionMenuItem("Why Awake?") { AppRouter.shared.showWhyAwake() })
-        let settingsItem = ActionMenuItem("Settings…") { AppRouter.shared.openSettings(.general) }
-        settingsItem.isEnabled = AppRouter.shared.openSettingsHandler != nil
-        menu.addItem(settingsItem)
+        menu.addItem(ActionMenuItem("Settings…") { AppRouter.shared.openSettings(.general) })
         return menu
     }
 
@@ -366,7 +362,8 @@ final class DockTileView: NSView {
     }
 }
 
-/// An NSMenuItem that runs a closure (the Dock menu has no responder chain to send to). Menus fire on the main thread.
+/// An NSMenuItem that runs a closure (the item is its own target): the Dock, Why awake and While… menus. Menus fire on
+/// the main thread.
 @MainActor
 final class ActionMenuItem: NSMenuItem {
     private let handler: @MainActor () -> Void

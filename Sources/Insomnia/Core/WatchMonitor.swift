@@ -173,19 +173,6 @@ final class WatchMonitor: WatchMonitoring {
 
     // MARK: - Queries (While… menu, Why awake, Automations)
 
-    /// Running now? `.process` uses the last scan when the name is being tracked, else scans synchronously.
-    func isRunning(_ target: WatchTarget) -> Bool {
-        switch target {
-        case .app: return isAppRunning(target)
-        case .pid(let pid, _): return system.pidIsAlive(pid)
-        case .process(let name):
-            let key = Self.key(name)
-            guard !key.isEmpty else { return false }
-            if scannedNames.contains(key) { return !(processMatches[key] ?? []).isEmpty }
-            return !(ProcessMatcher.excludingApps(ProcessTable.scan([key]), appPIDs: Self.appPIDs(apps))[key] ?? []).isEmpty
-        }
-    }
-
     /// The PID shown next to a target: the (lowest) matched PID for a process name, the app's PID, or the PID itself.
     func matchedPID(for target: WatchTarget) -> Int32? {
         switch target {

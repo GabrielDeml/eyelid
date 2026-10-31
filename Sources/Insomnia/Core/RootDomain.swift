@@ -1,6 +1,7 @@
 import Foundation
 import IOKit
 import IOKit.pwr_mgt
+import InsomniaShared
 
 /// Read-only access to IOPMrootDomain (docs/CLOSED_LID.md §1 "State readback"). No privileges, never parses `pmset`.
 /// Every IOKit object obtained here is released before returning.
@@ -16,13 +17,13 @@ enum RootDomain {
     private static let clamshellCausesSleepKey = "AppleClamshellCausesSleep"  // kAppleClamshellCausesSleepKey
 
     /// IOPMrootDomain "SleepDisabled". nil if unreadable.
-    static func sleepDisabled() -> Bool? { boolProperty(sleepDisabledKey) }
+    static func sleepDisabled() -> Bool? { RootDomainRegistry.bool(HelperInfo.sleepDisabledKey) }
 
     /// IOPMrootDomain "AppleClamshellState"; true = lid closed. nil on desktops (no lid).
-    static func clamshellClosed() -> Bool? { boolProperty(clamshellStateKey) }
+    static func clamshellClosed() -> Bool? { RootDomainRegistry.bool(clamshellStateKey) }
 
     /// IOPMrootDomain "AppleClamshellCausesSleep". Diagnostics only.
-    static func clamshellCausesSleep() -> Bool? { boolProperty(clamshellCausesSleepKey) }
+    static func clamshellCausesSleep() -> Bool? { RootDomainRegistry.bool(clamshellCausesSleepKey) }
 
     /// Decodes a clamshell interest message argument. Pure; unit-tested.
     static func decodeClamshell(_ bits: UInt) -> (closed: Bool, causesSleep: Bool) {
@@ -36,21 +37,6 @@ enum RootDomain {
     @MainActor
     static func observeClamshell(_ handler: @escaping @MainActor (_ closed: Bool, _ causesSleep: Bool) -> Void) -> AnyObject {
         ClamshellObservation(handler: handler)
-    }
-
-    // MARK: Private
-
-    /// "SleepDisabled" — same string as HelperInfo.sleepDisabledKey; kept local so this file needs only IOKit.
-    private static let sleepDisabledKey = "SleepDisabled"
-
-    private static func boolProperty(_ key: String) -> Bool? {
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
-        guard service != IO_OBJECT_NULL else { return nil }
-        defer { IOObjectRelease(service) }
-        guard let value = IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)?
-            .takeRetainedValue() else { return nil }
-        // CFBoolean bridges to NSNumber; some kernels publish these as numbers. Both read as Bool.
-        return (value as? NSNumber)?.boolValue
     }
 }
 

@@ -143,7 +143,7 @@ struct PanelView: View {
                           focus: $focus) {
                     model.send(.setLid($0))
                 }
-                LidSublabelView(sublabel: PlainCopy.lidSublabel(s, nudge: model.lidSetupNudge), send: model.send, focus: $focus)
+                LidSublabelView(sublabel: PlainCopy.lidSublabel(s), send: model.send, focus: $focus)
             }
         }
     }
@@ -191,7 +191,7 @@ private struct PanelHeader: View {
                         .contentTransition(.opacity)
                         .accessibilityAddTraits(.isHeader)
                     Spacer(minLength: 4)
-                    MoreMenuButton(canOpenSettings: s.canOpenSettings, send: model.send)
+                    MoreMenuButton(send: model.send)
                         .focused(focus, equals: .control)
                         .offset(x: 4)
                 }

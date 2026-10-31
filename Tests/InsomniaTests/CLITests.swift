@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import Insomnia
+import InsomniaShared
 
 // CLI parsing and formatting (pure), wait-status decoding, the `run` spawner, and the CLI symlink installer.
 

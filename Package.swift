@@ -12,7 +12,7 @@ let package = Package(
         .target(
             name: "InsomniaShared",
             path: "Sources/InsomniaShared",
-            linkerSettings: [.linkedFramework("Security")]
+            linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("Security")]
         ),
         .executableTarget(
             name: "Insomnia",

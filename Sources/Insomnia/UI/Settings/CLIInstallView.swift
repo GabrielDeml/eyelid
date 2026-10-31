@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import InsomniaShared
 import Observation
 import SwiftUI
 
@@ -186,23 +187,17 @@ enum ShellPATH {
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_adddup2(&actions, writeEnd, 1)
         posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
-        var defaults = sigset_t(0)
-        for sig in [SIGPIPE, SIGINT, SIGTERM, SIGHUP] { defaults |= sigset_t(1) << sigset_t(sig - 1) }
-        var mask = sigset_t(0)
-        posix_spawnattr_setsigdefault(&attr, &defaults)
-        posix_spawnattr_setsigmask(&attr, &mask)
         // A new session: no controlling terminal for an interactive shell to grab (and stop on SIGTTOU over).
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSID
-                                              | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+        Spawn.configureAttributes(&attr, extraFlags: Int32(POSIX_SPAWN_SETSID))
 
-        var argv: [UnsafeMutablePointer<CChar>?] = ([executable] + arguments).map { strdup($0) } + [nil]
         var environment = ProcessInfo.processInfo.environment
         environment["TERM"] = "dumb"
-        var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
-        defer { for p in argv + envp { free(p) } }
-
         var pid: pid_t = 0
-        let rc = posix_spawn(&pid, executable, &actions, &attr, &argv, &envp)
+        let rc = Spawn.withCStrings([executable] + arguments) { argv in
+            Spawn.withCStrings(environment.map { "\($0.key)=\($0.value)" }) { envp in
+                posix_spawn(&pid, executable, &actions, &attr, argv, envp)
+            }
+        }
         close(writeEnd)
         guard rc == 0 else { return nil }
 

@@ -384,8 +384,9 @@ final class EngineControlResponder: ControlResponding {
     /// The responder behind `ControlServer.shared`.
     static let shared = EngineControlResponder()
 
-    /// M3 hook: "Other apps" rows for `insomnia why` (AssertionInspector). nil → the section is omitted.
-    var otherAppsRows: (@MainActor () -> [WhyRow])?
+    /// Other processes' assertions for `insomnia why` (AssertionInspector), and the PIDs of apps (shown by name
+    /// only). nil → the section is omitted.
+    var foreignProvider: (@MainActor () -> (assertions: [ForeignAssertion], appPIDs: Set<Int32>))?
 
     private let engine: AwakeEngine
     private let settings: Settings
@@ -515,8 +516,6 @@ final class EngineControlResponder: ControlResponding {
         }
         let lidClosedEngaged = engine.lid == .engaged(lidClosed: true) && power.externalDisplayCount == 0
         let screen = engine.isAwake && !lidClosedEngaged && engine.holds.contains { $0.options.screen }
-        let headline = engine.narrator?.headline(status: engine.status, lid: engine.lid)
-            ?? FallbackCopy.headline(status: engine.status, lid: engine.lid, batteryFloor: settings.batteryFloorPercent)
         return StatusPayload(
             state: state,
             remainingSeconds: remaining,
@@ -524,8 +523,8 @@ final class EngineControlResponder: ControlResponding {
             screen: screen,
             lid: Self.lidName(engine.lid),
             guards: orderedGuards().map(\.rawValue),
-            holds: engine.holds.map { describe($0).joined },
-            headline: headline,
+            holds: holdTitles(),
+            headline: engine.headline,
             lidDetail: lidDetail(engine.lid))
     }
 
@@ -548,7 +547,10 @@ final class EngineControlResponder: ControlResponding {
         case .needsSetup: return "needs setup (Insomnia ▸ Settings ▸ Lid & Safety)"
         case .engaging: return "applying…"
         case .engaged(let closed): return closed ? "on · lid closed" : "on · close the lid anytime"
-        case .suspended(let g): return "paused · " + guardPhrase(g)
+        case .suspended(let g):
+            return "paused · " + PlainCopy.guardPhrase(g, batteryFloor: settings.batteryFloorPercent,
+                                                       batteryCap: settings.lidMaxOnBatteryMinutes,
+                                                       acCap: settings.lidMaxOnACMinutes)
         case .latched: return "paused · open the lid to resume"
         case .error(.foreignFlag): return "another app already turned sleep off"
         case .error(.otherUser): return "another user on this Mac is using it"
@@ -558,117 +560,28 @@ final class EngineControlResponder: ControlResponding {
         }
     }
 
-    private func guardPhrase(_ g: GuardReason) -> String {
-        switch g {
-        case .thermal: return "running hot"
-        case .lowPowerMode: return "Low Power Mode"
-        case .batteryFloor, .awakeBatteryFloor: return "battery at \(settings.batteryFloorPercent)%"
-        case .acRequired: return "waiting for power adapter"
-        case .lidBatteryCap: return "\(PlainCopy.capText(settings.lidMaxOnBatteryMinutes)) limit on battery"
-        case .lidACCap: return "\(PlainCopy.capText(settings.lidMaxOnACMinutes)) limit on power"
-        }
-    }
-
     private func orderedGuards() -> [GuardReason] {
         (engine.guards.contains(.awakeBatteryFloor) ? [.awakeBatteryFloor] : []) + engine.lidGuards
     }
 
-    // MARK: Why awake (UX.md §1.5 sections)
+    // MARK: Why awake (UX.md §1.5): the same report as the ⌥-click menu and Diagnostics
 
     func whyRows() -> [WhyRow] {
-        var rows = engine.holds.map { hold -> WhyRow in
-            let d = describe(hold)
-            return WhyRow(section: WhyRow.Section.insomnia, who: d.who, what: d.what)
-        }
-        if engine.guards.contains(.awakeBatteryFloor) {
-            rows.append(WhyRow(section: WhyRow.Section.guards, who: "Paused keeping awake",
-                               what: guardPhrase(.awakeBatteryFloor)))
-        }
-        // Lid guards only matter while something asks for lid mode.
-        if engine.holds.contains(where: { $0.options.lid }) {
-            for g in engine.lidGuards {
-                rows.append(WhyRow(section: WhyRow.Section.guards, who: "Paused lid mode", what: guardPhrase(g)))
-            }
-            if engine.lid == .latched {
-                rows.append(WhyRow(section: WhyRow.Section.guards, who: "Paused lid mode", what: "open the lid to resume"))
-            }
-        }
-        rows += otherAppsRows?() ?? []
-        rows.append(WhyRow(section: WhyRow.Section.system, who: "SleepDisabled", what: sleepDisabledText()))
-        rows.append(WhyRow(section: WhyRow.Section.system, who: "Power", what: powerText()))
-        return rows
+        let foreign = foreignProvider?()
+        let input = whyInput(sleepDisabled: sleepDisabled(), foreign: foreign?.assertions ?? [],
+                             appPIDs: foreign?.appPIDs ?? [])
+        return WhyAwakeReport.build(input).cliRows.map { WhyRow(section: $0.section, who: $0.who, what: $0.what) }
     }
 
-    private func sleepDisabledText() -> String {
-        guard let on = sleepDisabled() else { return "unknown" }
-        guard on else { return "No" }
-        switch engine.lid {
-        case .engaged, .engaging: return "Yes (set by Insomnia)"
-        case .stuck: return "Yes (stuck; reset it from the Insomnia panel)"
-        case .error(.foreignFlag): return "Yes (set by another app)"
-        default: return "Yes"
-        }
+    /// "You · 1h timer · screen on · lid", worded as Why awake words them.
+    private func holdTitles() -> [String] {
+        let input = whyInput(sleepDisabled: nil, foreign: [], appPIDs: [])
+        return input.holds.map { WhyAwakeReport.holdRow($0, input).title }
     }
 
-    private func powerText() -> String {
-        var parts: [String] = []
-        if power.hasLid { parts.append(power.isLidClosed ? "Lid: closed" : "Lid: open") }
-        parts.append("Thermal: " + Self.thermalName(power.thermalState))
-        if power.hasBattery {
-            parts.append(power.isOnAC ? "AC" : "Battery")
-            if let p = power.batteryPercent { parts.append("\(p)%") }
-        }
-        if power.isLowPowerMode { parts.append("Low Power Mode") }
-        if power.externalDisplayCount > 0 {
-            parts.append(power.externalDisplayCount == 1 ? "1 external display" : "\(power.externalDisplayCount) external displays")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    static func thermalName(_ t: ProcessInfo.ThermalState) -> String {
-        switch t {
-        case .nominal: return "nominal"
-        case .fair: return "fair"
-        case .serious: return "serious"
-        case .critical: return "critical"
-        @unknown default: return "unknown"
-        }
-    }
-
-    // MARK: Hold descriptions ("You · 1h timer · screen on · lid")
-
-    private struct HoldLine {
-        var who: String
-        var what: String
-        var joined: String { "\(who) · \(what)" }
-    }
-
-    private func describe(_ hold: Hold) -> HoldLine {
-        var what: String
-        let who: String
-        switch hold.owner {
-        case .manual(let source):
-            who = source == .cli ? "You (command line)" : source == .urlScheme ? "Link" : "You"
-            if let end = hold.end {
-                let minutes = Int((end.timeIntervalSince(hold.start) / 60).rounded())
-                what = (minutes > 0 ? AwakeDuration.minutes(minutes).shortLabel + " timer" : "timer")
-                    + " · until " + TimeFormat.endTime(end)
-            } else {
-                what = "until you say so"
-            }
-        case .babysit(let target):
-            who = "Watching"
-            what = target.displayName
-        case .rule(let id):
-            who = "Rule"
-            what = settings.rules.first(where: { $0.id == id })?.condition.phrase ?? "a rule"
-        case .client(_, let label):
-            who = "Command"
-            what = label
-        }
-        if hold.options.screen { what += " · screen on" }
-        if hold.options.lid { what += " · lid" }
-        return HoldLine(who: who, what: what)
+    private func whyInput(sleepDisabled: Bool?, foreign: [ForeignAssertion], appPIDs: Set<Int32>) -> WhyAwakeInput {
+        WhyAwakeInput.make(engine: engine, settings: settings, power: power, sleepDisabled: sleepDisabled,
+                           foreign: foreign, appPIDs: appPIDs)
     }
 
     // MARK: Helpers

@@ -14,7 +14,6 @@ final class RecordingNarrator: Narrating {
         default: return nil
         }
     }
-    func headline(status: AwakeStatus, lid: LidStatus) -> String { "" }
     func notification(_ id: NotificationID, _ p: Personality, context: [String: String]) -> (title: String, body: String) {
         ("", "")
     }
@@ -39,12 +38,12 @@ struct IntegrationHookTests {
         var s = PanelState()
         s.hasLid = true
         s.lid = .error(.readbackMismatch)
-        #expect(PlainCopy.lidSublabel(s, nudge: false)?.link?.action == .lidRetry)
+        #expect(PlainCopy.lidSublabel(s)?.link?.action == .lidRetry)
         s.lid = .stuck
-        #expect(PlainCopy.lidSublabel(s, nudge: false)?.link?.action == .lidReset)
+        #expect(PlainCopy.lidSublabel(s)?.link?.action == .lidReset)
         s.lid = .off
         s.closedLidMode = true
-        let setup = PlainCopy.lidSublabel(s, nudge: false)
+        let setup = PlainCopy.lidSublabel(s)
         #expect(setup?.link?.action == .lidSetup)
         #expect(setup?.joined == "Setup needed ›")
 

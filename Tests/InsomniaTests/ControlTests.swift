@@ -187,7 +187,7 @@ struct ControlResponderTests {
         #expect(response.ok)
         #expect(response.status?.state == "client")
         #expect(response.status?.headline == "Awake for make")
-        #expect(response.status?.holds == ["Command · make"])
+        #expect(response.status?.holds == ["Command · make (CLI)"])   // worded as Why awake words it
         #expect(!r.respond(to: .hold(label: "again", screen: false, lid: false), connection: connection, peerPID: 42).ok)
         // The eyes (and `toggle`) can't release a command's hold.
         #expect(!r.respond(to: .toggle, connection: UUID(), peerPID: nil).ok)
@@ -220,14 +220,16 @@ struct ControlResponderTests {
     @Test func whyListsHoldsAndSystem() {
         let h = Harness()
         let r = make(h, sleepDisabled: false)
-        r.otherAppsRows = { [WhyRow(section: WhyRow.Section.otherApps, who: "zoom.us", what: "Preventing display sleep")] }
+        r.foreignProvider = {
+            ([ForeignAssertion(id: "100:1", pid: 100, process: "zoom.us", type: "PreventUserIdleDisplaySleep",
+                               name: "Meeting", since: nil)], [100])
+        }
         _ = r.respond(to: .hold(label: "ffmpeg", screen: true, lid: false), connection: UUID(), peerPID: nil)
         let rows = r.respond(to: .why, connection: UUID(), peerPID: nil).why ?? []
-        #expect(rows.first == WhyRow(section: "Insomnia", who: "Command", what: "ffmpeg · screen on"))
+        #expect(rows.first == WhyRow(section: "Insomnia", who: "Command", what: "ffmpeg (CLI) · screen on"))
         #expect(rows.contains(WhyRow(section: "Other apps", who: "zoom.us", what: "Preventing display sleep")))
         #expect(rows.contains(WhyRow(section: "System", who: "SleepDisabled", what: "No")))
-        #expect(rows.last?.who == "Power")
-        #expect(rows.last?.what.contains("Lid: open") == true)
+        #expect(rows.contains { $0.who == "Power" && $0.what.contains("Lid: open") })
     }
 
     @Test func labelsAreSanitized() {

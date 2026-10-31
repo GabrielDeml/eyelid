@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import Insomnia
+import InsomniaShared
 
 // The pure lid pieces of the engine: desired flag, latch, LidStatus derivation, lid-closed counters, EyeMood.
 // docs/CLOSED_LID.md §5, §7; ARCHITECTURE.md AwakeEngine steps 6–8.

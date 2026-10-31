@@ -189,7 +189,7 @@ struct FixBTests {
         s.closedLidMode = true
         s.helper = .installed
         s.fixedHoldWithoutLid = LivePanelState.fixedHoldWithoutLid([client])
-        #expect(PlainCopy.lidSublabel(s, nudge: false)?.text == "Off for this session")
+        #expect(PlainCopy.lidSublabel(s)?.text == "Off for this session")
     }
 
     // MARK: R78: the awake battery-floor banner talks about keeping awake, not lid mode

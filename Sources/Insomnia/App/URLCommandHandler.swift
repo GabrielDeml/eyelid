@@ -67,7 +67,7 @@ struct URLCommand: Equatable, Sendable {
         case "on":
             var when = When.defaultDuration
             if let value = take("until") {
-                guard let t = parseClock(value) else { return nil }
+                guard let t = ControlDuration.clock(value) else { return nil }
                 when = .until(hour: t.hour, minute: t.minute)
                 if take("for") != nil { ignored.append("for") }   // `until` wins over `for`
             } else if let value = take("for") {
@@ -106,75 +106,19 @@ struct URLCommand: Equatable, Sendable {
         return URLCommand(action: action, ignored: ignored)
     }
 
-    // MARK: Value parsers (shared shapes with the CLI: "45m", "2h", "90", "1h30m", "forever")
+    // MARK: Value parsers (the CLI's: "45m", "2h", "90", "1h30m", "1h30", "1d", "forever"; "17:30", "0730")
 
-    /// Minutes are capped at 7 days; zero or negative is invalid. Any web page can send these values, so arithmetic
-    /// saturates at the cap instead of overflowing.
+    /// The CLI's parser with a 7-day cap; zero or negative is invalid. Any web page can send these values, so
+    /// arithmetic saturates at the cap instead of overflowing.
     static func parseDuration(_ raw: String) -> When? {
-        let s = raw.trimmingCharacters(in: .whitespaces).lowercased()
-        if ["forever", "indefinite", "infinite", "inf", "∞"].contains(s) { return .forever }
-        if !s.isEmpty, s.allSatisfy(\.isASCIIDigitChar) { return clampMinutes(saturatingNumber(s)) }
-        // Sequence of <number><unit>, units h / m (also "hr", "min", "mins").
-        var total = 0
-        var digits = ""
-        var sawUnit = false
-        var rest = Substring(s)
-        func add(_ n: Int, times scale: Int) { total = min(total + n * scale, maxMinutes + 1) }
-        while let c = rest.first {
-            if c.isASCIIDigitChar {
-                digits.append(c)
-                rest = rest.dropFirst()
-                continue
-            }
-            guard !digits.isEmpty else { return nil }
-            let n = saturatingNumber(digits)
-            digits = ""
-            if rest.hasPrefix("hours") || rest.hasPrefix("hour") || rest.hasPrefix("hrs") || rest.hasPrefix("hr") || rest.hasPrefix("h") {
-                add(n, times: 60)
-                rest = rest.drop { $0.isLetter }
-            } else if rest.hasPrefix("minutes") || rest.hasPrefix("minute") || rest.hasPrefix("mins") || rest.hasPrefix("min") || rest.hasPrefix("m") {
-                add(n, times: 1)
-                rest = rest.drop { $0.isLetter }
-            } else {
-                return nil
-            }
-            sawUnit = true
+        switch ControlDuration.parse(raw, cap: maxMinutes, saturating: true) {
+        case .indefinite?: return .forever
+        case .minutes(let m)?: return .minutes(m)
+        default: return nil
         }
-        if !digits.isEmpty {
-            guard sawUnit else { return nil }
-            add(saturatingNumber(digits), times: 1)   // "1h30" → trailing minutes
-        }
-        return sawUnit ? clampMinutes(total) : nil
     }
 
-    private static let maxMinutes = 7 * 24 * 60
-
-    /// ASCII digits → Int, saturating at 10,000,000 (anything that long is past the cap anyway).
-    private static func saturatingNumber(_ digits: String) -> Int {
-        guard digits.count <= 7, let n = Int(digits) else { return 10_000_000 }
-        return n
-    }
-
-    private static func clampMinutes(_ m: Int) -> When? {
-        guard m > 0 else { return nil }
-        return .minutes(min(m, maxMinutes))
-    }
-
-    /// "17:30", "7:05", "0730" → (17, 30). 24-hour clock.
-    static func parseClock(_ raw: String) -> (hour: Int, minute: Int)? {
-        let s = raw.trimmingCharacters(in: .whitespaces)
-        let parts: [Substring]
-        if s.contains(":") {
-            parts = s.split(separator: ":", omittingEmptySubsequences: false)
-        } else if s.count == 4, s.allSatisfy(\.isNumber) {
-            parts = [s.prefix(2), s.suffix(2)]
-        } else {
-            return nil
-        }
-        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]), parts[1].count == 2,
-              (0..<24).contains(h), (0..<60).contains(m) else { return nil }
-        return (h, m)
-    }
+    static let maxMinutes = 7 * 24 * 60
 
     static func parseBool(_ raw: String) -> Bool? {
         switch raw.lowercased() {
@@ -285,8 +229,4 @@ enum URLCommandHandler {
         }
         return shown.joined(separator: separator) + (names.count > 5 ? " +\(names.count - 5) more" : "")
     }
-}
-
-private extension Character {
-    var isASCIIDigitChar: Bool { isASCII && isNumber }
 }

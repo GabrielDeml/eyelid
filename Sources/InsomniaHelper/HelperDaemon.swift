@@ -132,9 +132,9 @@ final class HelperDaemon: @unchecked Sendable {
             handleOverride()
             now = flag.read()
         }
-        let battery = BatteryReading.current()
+        let battery = PowerSourceReading.current()
         let decision = HelperPolicy.engage(alreadyEngaged: session.engaged, engagedUID: engagedUID,
-                                           requesterUID: session.uid, onBattery: battery.onBattery,
+                                           requesterUID: session.uid, onBattery: !battery.isOnAC,
                                            batteryPercent: battery.percent, flag: now, ownsFlag: ownsFlag)
         switch decision {
         case .alreadyEngaged:
@@ -306,9 +306,9 @@ final class HelperDaemon: @unchecked Sendable {
 
     func checkBackstop(reason: String) {
         dispatchPrecondition(condition: .onQueue(queue))
-        let battery = BatteryReading.current()
-        setBackstopPoll(HelperPolicy.needsBackstopPoll(onBattery: battery.onBattery, batteryPercent: battery.percent))
-        guard HelperPolicy.backstopTrips(onBattery: battery.onBattery, batteryPercent: battery.percent,
+        let battery = PowerSourceReading.current()
+        setBackstopPoll(HelperPolicy.needsBackstopPoll(onBattery: !battery.isOnAC, batteryPercent: battery.percent))
+        guard HelperPolicy.backstopTrips(onBattery: !battery.isOnAC, batteryPercent: battery.percent,
                                          flag: flag.read()) else { return }
         HelperLog.backstop.fault("battery at \(battery.percent ?? -1, privacy: .public)% with SleepDisabled = 1 (\(reason, privacy: .public)): resetting and sleeping")
         dropAll(.backstop)

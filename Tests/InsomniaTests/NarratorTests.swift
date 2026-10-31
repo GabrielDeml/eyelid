@@ -152,7 +152,6 @@ struct NarratorTests {
     @Test func silentMoments() {
         let n = Self.narrator()
         #expect(n.line(.deactivated(.replaced), .cheeky, now: Self.ordinary) == nil)
-        #expect(n.line(.deactivated(.clientDisconnected), .unhinged, now: Self.ordinary) == nil)
         #expect(n.line(.awake(hours: 1), .cheeky, now: Self.ordinary) == nil)
         #expect(n.line(.milestone(hours: 50), .cheeky, now: Self.ordinary) == nil)
     }
@@ -230,15 +229,18 @@ struct NarratorTests {
         }
     }
 
-    @Test func plainCopyMatchesFallback() {
-        let n = Self.narrator()
-        #expect(n.headline(status: .indefinite, lid: .off) == "Wide awake")
-        #expect(n.headline(status: .asleep, lid: .stuck) == "Lid mode is stuck on")
-        #expect(n.durationName(.minutes(47), .unhinged) == "One more episode")
-        #expect(n.durationName(.minutes(60), .professional) == nil)
-        #expect(n.accessibilityValue(status: .indefinite, lid: .engaged(lidClosed: false), remaining: nil)
-                == "Awake until you stop it, lid mode on")
-        #expect(n.lidSublabel(.engaged(lidClosed: true), settingOn: true, isAwake: true) == "Engaged · lid closed")
+    @Test func plainCopyIsOneSource() {
+        var s = PanelState()
+        s.status = .indefinite
+        #expect(PlainCopy.headline(s) == "Wide awake")
+        #expect(FallbackCopy.headline(status: .asleep, lid: .stuck) == "Lid mode is stuck on")
+        #expect(PlainCopy.durationName(.minutes(47), .unhinged) == "One more episode")
+        #expect(PlainCopy.durationName(.minutes(60), .professional) == nil)
+        s.lid = .engaged(lidClosed: false)
+        #expect(PlainCopy.accessibilityValue(s) == "Awake until you stop it, lid mode on")
+        s.lid = .engaged(lidClosed: true)
+        s.closedLidMode = true
+        #expect(PlainCopy.lidSublabel(s)?.joined == "Engaged · lid closed")
     }
 
     // MARK: Helpers

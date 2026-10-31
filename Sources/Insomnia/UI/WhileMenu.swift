@@ -102,7 +102,7 @@ enum WhileMenu {
     }
 
     private static func item(_ title: String, action: @escaping @MainActor () -> Void) -> NSMenuItem {
-        WhyAwakeMenu.ActionItem(title, handler: action)
+        ActionMenuItem(title, handler: action)
     }
 
     private static func disabled(_ title: String) -> NSMenuItem {

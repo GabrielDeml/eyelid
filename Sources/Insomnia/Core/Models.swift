@@ -161,7 +161,7 @@ struct Rule: Codable, Hashable, Identifiable, Sendable {
     var allowLid: Bool = false
     var enabled: Bool = true
 
-    var options: AwakeOptions { AwakeOptions(screen: keepScreenOn, lid: allowLid) }
+    func options(closedLidMode: Bool) -> AwakeOptions { AwakeOptions(screen: keepScreenOn, lid: allowLid || closedLidMode) }
 }
 
 // MARK: Guards (safety; always win over holds). See docs/CLOSED_LID.md §6.
@@ -357,10 +357,8 @@ enum DeactivationReason: Hashable, Sendable {
     case timerExpired
     case batteryFloor(percent: Int)
     case targetExited(WatchTarget)
-    case clientDisconnected
     case sleepNow
-    case appQuit
-    /// A new manual hold replaced the old one (no copy shown).
+    /// Ended without a word: the setup sheet's test drive (no copy shown).
     case replaced
 }
 
@@ -539,6 +537,13 @@ enum TimeFormat {
     static let endTimeOnlyHorizon: TimeInterval = 20 * 3600
     /// Up to here an end time shows weekday + time; beyond it, a date.
     static let endWeekdayHorizon: TimeInterval = 6 * 86_400
+
+    /// "42 min", "1 h", "2 h 5 min", "0 min": whole minutes, rounded by the caller (lid caps, time left).
+    static func hoursMinutes(_ minutes: Int) -> String {
+        let h = minutes / 60, m = minutes % 60
+        if h == 0 { return "\(m) min" }
+        return m == 0 ? "\(h) h" : "\(h) h \(m) min"
+    }
 
     /// Long human form for stats: "3 days, 4 hours", "12 hours, 5 minutes", "7 minutes"
     static func humanLong(_ interval: TimeInterval) -> String {

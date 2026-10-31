@@ -158,9 +158,6 @@ actor LidReconciler {
         return .stuck
     }
 
-    /// Drop the session without disarming (quit timeout). Bypasses nothing: the backend locks its own state.
-    func abandon() async { await backend?.abandon() }
-
     // MARK: Heartbeat and drift (§4.1, §4.3)
 
     func heartbeat() async -> LidError? {

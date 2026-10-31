@@ -14,7 +14,7 @@ final class InsomniaApplication: NSApplication {
 
 /// App lifecycle (ARCHITECTURE.md "App/AppDelegate.swift"). Modules from later milestones are marked where they plug in.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: StatusItemController?
     /// Strongly retained: UNUserNotificationCenter only keeps a weak reference to its delegate.
     private let notificationDelegate = NotificationDelegate()
@@ -121,9 +121,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             log.error("control socket: \(String(describing: error), privacy: .public)")
             EventLog.shared.log("cli", "control socket unavailable: \(error)")
         }
-        EngineControlResponder.shared.otherAppsRows = {
-            WhyAwakeReport.build(.live()).section(.otherApps)?.rows
-                .map { WhyRow(section: WhyRow.Section.otherApps, who: $0.who, what: $0.what) } ?? []
+        EngineControlResponder.shared.foreignProvider = {
+            (AssertionInspector.foreignAssertions(), WhyAwakeInput.liveAppPIDs())
         }
 
         // A plain SIGTERM would skip applicationShouldTerminate; route it through the normal quit instead.
@@ -289,9 +288,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func showAbout(_ sender: Any?) { AppRouter.shared.showAbout() }
 
     @objc private func showSettings(_ sender: Any?) { AppRouter.shared.openSettings(.general) }
-
-    func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(showSettings(_:)) { return AppRouter.shared.openSettingsHandler != nil }
-        return true
-    }
 }

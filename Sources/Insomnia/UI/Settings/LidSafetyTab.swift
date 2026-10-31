@@ -140,14 +140,14 @@ struct LidSafetyTab: View {
             Toggle("Only on power adapter", isOn: $settings.lidRequiresAC)
             LabeledContent("Time limit with the lid closed") { EmptyView() }
             Picker("On battery", selection: $settings.lidMaxOnBatteryMinutes) {
-                ForEach(Settings.lidBatteryCapChoices, id: \.self) { Text(Self.duration($0)).tag($0) }
+                ForEach(Settings.lidBatteryCapChoices, id: \.self) { Text(PlainCopy.capLong($0)).tag($0) }
             }
             .padding(.leading, 14)
             LabeledContent {
                 HStack(spacing: 8) {
                     Toggle("Limit on power adapter", isOn: $settings.lidCapOnACEnabled).labelsHidden()
                     Picker("Limit on power adapter", selection: $settings.lidMaxOnACMinutes) {
-                        ForEach(Settings.lidACCapChoices, id: \.self) { Text(Self.duration($0)).tag($0) }
+                        ForEach(Settings.lidACCapChoices, id: \.self) { Text(PlainCopy.capLong($0)).tag($0) }
                     }
                     .labelsHidden()
                     .fixedSize()
@@ -224,12 +224,6 @@ struct LidSafetyTab: View {
                 problem = LidSetupCopy.problem(for: error)
             }
         }
-    }
-
-    static func duration(_ minutes: Int) -> String {
-        if minutes < 60 { return "\(minutes) minutes" }
-        let h = minutes / 60
-        return h == 1 ? "1 hour" : "\(h) hours"
     }
 
     private struct SetupSheet: Identifiable {

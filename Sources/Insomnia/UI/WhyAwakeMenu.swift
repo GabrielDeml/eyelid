@@ -110,6 +110,7 @@ struct WhyAwakeInput {
     var isOnAC = true
     var isCharging = false
     var lowPowerMode = false
+    var externalDisplays = 0
     var footer: [String] = []
 }
 
@@ -128,7 +129,7 @@ extension WhyAwakeReport {
         // Guards: only the ones that change something right now.
         var guards: [Row] = []
         if input.guards.contains(.awakeBatteryFloor) {
-            let what = "battery at \(input.batteryFloor)%"
+            let what = guardText(.awakeBatteryFloor, input)
             guards.append(Row(id: "guard-awakeBatteryFloor", who: "Paused keeping awake", what: what,
                               title: "Paused keeping awake · \(what)"))
         }
@@ -169,7 +170,7 @@ extension WhyAwakeReport {
 
     // MARK: Rows
 
-    private static func holdRow(_ hold: Hold, _ input: WhyAwakeInput) -> Row {
+    static func holdRow(_ hold: Hold, _ input: WhyAwakeInput) -> Row {
         var who: String
         var parts: [String]
         switch hold.owner {
@@ -208,15 +209,9 @@ extension WhyAwakeReport {
         return "until \(TimeFormat.endTime(end))"
     }
 
-    static func guardText(_ g: GuardReason, _ input: WhyAwakeInput) -> String {
-        switch g {
-        case .batteryFloor, .awakeBatteryFloor: return "battery at \(input.batteryFloor)%"
-        case .thermal: return "running hot"
-        case .lowPowerMode: return "Low Power Mode"
-        case .acRequired: return "waiting for power adapter"
-        case .lidBatteryCap: return "\(PlainCopy.capText(input.lidBatteryCapMinutes)) limit on battery"
-        case .lidACCap: return "\(PlainCopy.capText(input.lidACCapMinutes)) limit on power"
-        }
+    private static func guardText(_ g: GuardReason, _ input: WhyAwakeInput) -> String {
+        PlainCopy.guardPhrase(g, batteryFloor: input.batteryFloor, batteryCap: input.lidBatteryCapMinutes,
+                              acCap: input.lidACCapMinutes)
     }
 
     private static func systemRows(_ input: WhyAwakeInput) -> [Row] {
@@ -232,8 +227,12 @@ extension WhyAwakeReport {
         var parts: [String] = []
         if input.hasLid { parts.append("Lid: \(input.lidClosed ? "closed" : "open")") }
         parts.append("Thermal: \(thermalText(input.thermal))")
-        parts.append(powerText(input, includeCharging: false))
+        parts.append(powerText(hasBattery: input.hasBattery, isOnAC: input.isOnAC, batteryPercent: input.batteryPercent,
+                               isCharging: nil))
         if input.lowPowerMode { parts.append("Low Power Mode") }
+        if input.externalDisplays > 0 {
+            parts.append(input.externalDisplays == 1 ? "1 external display" : "\(input.externalDisplays) external displays")
+        }
         let line = parts.joined(separator: " · ")
         rows.append(Row(id: "sys-power", who: "Power", what: line, title: line))
 
@@ -253,12 +252,13 @@ extension WhyAwakeReport {
         }
     }
 
-    /// "AC · 95%", "Battery · 61%", "AC" (desktop). With charging: "AC · 95% · charging" / "not charging".
-    static func powerText(_ input: WhyAwakeInput, includeCharging: Bool) -> String {
-        guard input.hasBattery else { return "AC" }
-        var parts = [input.isOnAC ? "AC" : "Battery"]
-        if let p = input.batteryPercent { parts.append("\(p)%") }
-        if includeCharging && input.isOnAC { parts.append(input.isCharging ? "charging" : "not charging") }
+    /// "AC · 95%", "Battery · 61%", "AC" (desktop). With `isCharging`: "AC · 95% · charging" / "not charging".
+    /// The one power formatter (the report, `insomnia why`, Settings ▸ Diagnostics).
+    static func powerText(hasBattery: Bool, isOnAC: Bool, batteryPercent: Int?, isCharging: Bool?) -> String {
+        guard hasBattery else { return "AC" }
+        var parts = [isOnAC ? "AC" : "Battery"]
+        if let p = batteryPercent { parts.append("\(p)%") }
+        if let isCharging, isOnAC { parts.append(isCharging ? "charging" : "not charging") }
         return parts.joined(separator: " · ")
     }
 
@@ -286,14 +286,13 @@ extension WhyAwakeInput {
     /// from the lid controller's status (engaged / applying / stuck = ours).
     @MainActor static var foreignSleepDisabledProvider: (@MainActor () -> Bool)?
 
+    /// Everything but the Copy Report footer, from injected dependencies: `live()` passes the app's, and
+    /// `insomnia why` its responder's, so both render the same report.
     @MainActor
-    static func live() -> WhyAwakeInput {
-        let engine = AwakeEngine.shared
-        let settings = Settings.shared
-        let power = PowerMonitor.shared
+    static func make(engine: AwakeEngine, settings: Settings, power: any PowerReading, sleepDisabled: Bool?,
+                     foreign: [ForeignAssertion], appPIDs: Set<Int32>) -> WhyAwakeInput {
         var input = WhyAwakeInput()
-        input.headline = engine.narrator?.headline(status: engine.status, lid: engine.lid)
-            ?? FallbackCopy.headline(status: engine.status, lid: engine.lid, batteryFloor: settings.batteryFloorPercent)
+        input.headline = engine.headline
         input.holds = engine.holds
         input.rules = settings.rules
         input.pausedRuleIDs = engine.pausedRuleIDs
@@ -311,12 +310,11 @@ extension WhyAwakeInput {
             }
         }
 
-        input.foreign = AssertionInspector.foreignAssertions()
-        input.appPIDs = Set(NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy != .prohibited }.map(\.processIdentifier))
+        input.foreign = foreign
+        input.appPIDs = appPIDs
 
-        input.sleepDisabled = RootDomain.sleepDisabled()
-        if input.sleepDisabled == true {
+        input.sleepDisabled = sleepDisabled
+        if sleepDisabled == true {
             if let provider = foreignSleepDisabledProvider {
                 input.sleepDisabledByInsomnia = !provider()
             } else {
@@ -335,7 +333,16 @@ extension WhyAwakeInput {
         input.isOnAC = power.isOnAC
         input.isCharging = power.isCharging
         input.lowPowerMode = power.isLowPowerMode
+        input.externalDisplays = power.externalDisplayCount
+        return input
+    }
 
+    @MainActor
+    static func live() -> WhyAwakeInput {
+        let engine = AwakeEngine.shared
+        var input = make(engine: engine, settings: .shared, power: PowerMonitor.shared,
+                         sleepDisabled: RootDomain.sleepDisabled(), foreign: AssertionInspector.foreignAssertions(),
+                         appPIDs: liveAppPIDs())
         let info = Bundle.main.infoDictionary
         let version = (info?["CFBundleShortVersionString"] as? String) ?? "dev"
         let build = (info?["CFBundleVersion"] as? String) ?? "0"
@@ -345,6 +352,12 @@ extension WhyAwakeInput {
         }
         input.footer = footer
         return input
+    }
+
+    /// Apps (Dock and menu bar apps): shown by name only in "Other apps".
+    @MainActor
+    static func liveAppPIDs() -> Set<Int32> {
+        Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy != .prohibited }.map(\.processIdentifier))
     }
 }
 
@@ -372,7 +385,7 @@ enum HelperStatusText {
 @MainActor
 enum WhyAwakeMenu {
     /// Builds the menu from a fresh live report. Rows are informational (disabled); the footer has
-    /// Open Diagnostics… (when a Settings window exists) and Copy Report.
+    /// Open Diagnostics… and Copy Report.
     static func make() -> NSMenu {
         make(report: WhyAwakeReport.build(.live()), now: Date())
     }
@@ -406,39 +419,14 @@ enum WhyAwakeMenu {
         }
 
         menu.addItem(.separator())
-        if AppRouter.shared.openSettingsHandler != nil {
-            menu.addItem(ActionItem("Open Diagnostics…") { AppRouter.shared.openSettings(.diagnostics) })
-        }
+        menu.addItem(ActionMenuItem("Open Diagnostics…") { AppRouter.shared.openSettings(.diagnostics) })
         let text = report.text(generatedAt: now)
-        menu.addItem(ActionItem("Copy Report") { copyToPasteboard(text) })
+        menu.addItem(ActionMenuItem("Copy Report") { copyToPasteboard(text) })
         return menu
-    }
-
-    /// Fresh live report as plain text.
-    static func reportText() -> String {
-        WhyAwakeReport.build(.live()).text(generatedAt: Date())
     }
 
     static func copyToPasteboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    /// A menu item that runs a closure (menus need an Objective-C target; the item is its own).
-    @MainActor
-    final class ActionItem: NSMenuItem {
-        private var handler: (@MainActor () -> Void)?
-
-        init(_ title: String, keyEquivalent: String = "", handler: @escaping @MainActor () -> Void) {
-            self.handler = handler
-            super.init(title: title, action: #selector(run(_:)), keyEquivalent: keyEquivalent)
-            target = self
-        }
-
-        required init(coder: NSCoder) {
-            super.init(coder: coder)
-        }
-
-        @objc private func run(_ sender: Any?) { handler?() }
     }
 }

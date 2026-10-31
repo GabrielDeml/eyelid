@@ -1,18 +1,18 @@
 import Foundation
 
-// MARK: - Integration points for later milestones (ARCHITECTURE.md "Build order").
+// MARK: - The engine's dependencies
 //
-// AwakeEngine works on its own (M1) and treats every dependency below as optional. Each milestone plugs its module in
-// by conforming the concrete type and assigning it before `AwakeEngine.start()`, e.g. in AppDelegate:
+// AwakeEngine treats every dependency below as optional, so tests run it with fakes (or none). AppDelegate assigns the
+// real ones before `AwakeEngine.start()`:
 //
-//     AwakeEngine.shared.lidController = ClosedLidController.shared   // M2
-//     AwakeEngine.shared.watchMonitor  = WatchMonitor.shared          // M3
-//     AwakeEngine.shared.eventLog      = EventLog.shared              // M3
-//     AwakeEngine.shared.narrator      = Narrator.shared              // M4
-//     AwakeEngine.shared.notifier      = Notifier.self                // M4
-//     AwakeEngine.shared.stats         = Stats.shared                 // M4
+//     AwakeEngine.shared.lidController = ClosedLidController.shared
+//     AwakeEngine.shared.watchMonitor  = WatchMonitor.shared
+//     AwakeEngine.shared.eventLog      = EventLog.shared
+//     AwakeEngine.shared.narrator      = Narrator.shared
+//     AwakeEngine.shared.notifier      = Notifier.self
+//     AwakeEngine.shared.stats         = Stats.shared
 //
-// ControlServer (M5) needs no hook: it calls `beginClientHold` / `endClientHold` / `activate(_:source:.cli,options:)`.
+// ControlServer needs no hook: it calls `beginClientHold` / `endClientHold` / `activate(_:source:.cli,options:)`.
 // The requirement names match the ARCHITECTURE.md contracts, so conformance is a one-line `extension X: P {}`.
 
 /// M2 — `ClosedLidController` conforms. The engine publishes the desired flag and merges the controller's status with
@@ -64,7 +64,6 @@ protocol Narrating: AnyObject {
     func line(_ m: Moment, _ p: Personality, now: Date) -> String?
     /// An earned date line to show instead of an `activated` / `idle` line, or nil (PRODUCT.md §4 rule 10).
     func dateLine(_ p: Personality, now: Date) -> String?
-    func headline(status: AwakeStatus, lid: LidStatus) -> String
     func notification(_ id: NotificationID, _ p: Personality, context: [String: String]) -> (title: String, body: String)
 }
 
@@ -91,23 +90,26 @@ protocol StatsRecording: AnyObject {
     func awardPokeBadge()
 }
 
-// MARK: - Plain fallbacks (used only while no Narrator is attached)
+// MARK: - Plain copy: the one headline and every notification's plain title and body
 
-/// Minimal plain copy so notifications and VoiceOver announcements still say something correct before M4.
-/// Titles follow UX.md §10; headlines follow UX.md §8. No jokes here, ever.
+/// The engine's headline (`AwakeEngine.headline`, UX.md §8) and notification titles and plain bodies (UX.md §10).
+/// Narrator draws personality bodies on top; without one (tests) these are posted as they are. No jokes here, ever.
 enum FallbackCopy {
     static func notification(_ id: NotificationID, context: [String: String]) -> (title: String, body: String) {
         let floor = context["floor"] ?? "low"
         switch id {
-        case .endingSoon: return ("Insomnia: 5 minutes left", "")
+        case .endingSoon:
+            let minutes = context["minutes"].flatMap(Int.init) ?? 5
+            return ("Insomnia: \(minutes) minute\(minutes == 1 ? "" : "s") left", "")
         case .ended: return ("Your Mac can sleep again", "")
         case .batteryFloor: return ("Lid mode off at \(floor)% battery", "Your Mac will sleep normally.")
         case .batteryStop: return ("Stopped keeping awake at \(floor)% battery", "Plug in to resume.")
         case .lidHeat: return ("Lid mode paused: Mac is hot", "")
-        case .lidLPM: return ("Lid mode paused: Low Power Mode", "")
+        case .lidLPM: return ("Lid mode paused: Low Power Mode", "Lid mode resumes when Low Power Mode is off.")
         case .lidCap:
-            if let acCap = context["acCap"] { return ("Lid mode paused after \(acCap) closed", "") }
-            return ("Lid mode paused after \(context["cap"] ?? "the limit") closed on battery", "")
+            let body = "Open the lid to reset the limit."
+            if let acCap = context["acCap"] { return ("Lid mode paused after \(acCap) closed", body) }
+            return ("Lid mode paused after \(context["cap"] ?? "the limit") closed on battery", body)
         case .lidError:
             return (context["overridden"] == "1" ? "Lid mode was turned off" : "Lid mode couldn't be applied",
                     "Your Mac will sleep normally.")
@@ -119,8 +121,8 @@ enum FallbackCopy {
         }
     }
 
-    /// The one plain headline (UX.md §8). The panel and status item use it too (via `PlainCopy`), so every surface
-    /// says the same words until Narrator takes over.
+    /// The one plain headline (UX.md §8), in every tier: the engine (`AwakeEngine.headline`: VoiceOver, the CLI,
+    /// Why awake), the panel, status item and Dock (via `PlainCopy`) all say the same words.
     static func headline(status: AwakeStatus, lid: LidStatus, batteryFloor: Int? = nil) -> String {
         if lid == .stuck { return "Lid mode is stuck on" }
         if case .error(let e) = lid, e.alarms { return "Lid mode needs attention" }

@@ -219,12 +219,9 @@ enum Notifier: NotificationPosting {
         case nil:
             guard actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
             // A click on the notification itself: show the thing it's about.
-            switch NotificationID(rawValue: requestIdentifier) {
-            case .lidError, .lidStuck, .lidCap, .lidHeat, .lidLPM, .batteryFloor:
-                AppRouter.shared.showPanel()
-            case .foreignFlag:
+            if NotificationID(rawValue: requestIdentifier) == .foreignFlag {
                 AppRouter.shared.showWhyAwake()
-            default:
+            } else {
                 AppRouter.shared.showPanel()
             }
         }

@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import Insomnia
+import InsomniaShared
 
 /// Regression tests for the 2026-10-31 review, group E (CLI, URL scheme, app lifecycle, control socket):
 /// nohup and `run` (R30), CLI launches (R31, R99), URL queueing and scheme case (R87, R77), URL log sanitising (R4),
