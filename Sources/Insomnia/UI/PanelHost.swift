@@ -62,6 +62,13 @@ final class PanelHost: NSObject {
         return openInWindow == wantsWindow ? .refocus : .replace
     }
 
+    /// Whether a finished fade-out orders the window out. Not if it was shown again during the fade (R34): the newer
+    /// fade-in owns it then. A popover that replaced the window (`.replace`) doesn't count as the window being open:
+    /// otherwise the window would stay ordered in at alpha 0.
+    static func fadeOutOrdersOut(tokenIsCurrent: Bool, windowIsOpen: Bool) -> Bool {
+        tokenIsCurrent && !windowIsOpen
+    }
+
     /// The window frame for content of `size`: the top edge stays put, kept inside `visible` (UX §2.1: the panel grows
     /// for the welcome card and row J banners).
     static func resizedFrame(_ frame: NSRect, to size: CGSize, within visible: NSRect?) -> NSRect {
@@ -301,8 +308,8 @@ final class PanelHost: NSObject {
             w.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
-                // Shown again during the fade (R34): the newer fade-in owns the window now.
-                guard let self, self.fades.isCurrent(token), !self.isOpen else { return }
+                guard let self, Self.fadeOutOrdersOut(tokenIsCurrent: self.fades.isCurrent(token),
+                                                       windowIsOpen: self.isOpen && self.popover == nil) else { return }
                 w.orderOut(nil)
             }
         })

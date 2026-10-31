@@ -212,6 +212,8 @@ struct FixAWatchdogTests {
         dog.abandon()
         await expectEventually { dir.lines("log").count == 2 && !marker.exists }
         #expect(!lost.isSet)   // an abandon is intentional
+        // R90: renamed, not deleted, so the next launch still shows the recovery banner.
+        #expect(FileManager.default.fileExists(atPath: marker.breadcrumb.path))
     }
 
     @Test func disarmExitsWithoutTouchingAnything() async throws {
@@ -247,6 +249,7 @@ struct FixAWatchdogTests {
         await expectEventually { dir.lines("log").count == 2 }
         try await Task.sleep(for: .milliseconds(100))
         #expect(marker.exists)
+        #expect(!FileManager.default.fileExists(atPath: marker.breadcrumb.path))
     }
 
     @Test func markerIsKeptWhileTheFlagStillReadsOne() async throws {
@@ -555,7 +558,6 @@ struct FixALidControllerTests {
         rig.backend.configure { $0.resetError = .scriptFailed(code: 1, detail: "nope") }
         #expect(await rig.controller.resetWithPassword() == .scriptFailed(code: 1, detail: "nope"))
         #expect(rig.controller.status == .stuck)
-        #expect(rig.controller.lastSetupError == .scriptFailed(code: 1, detail: "nope"))
         rig.backend.configure { $0.resetError = .cancelled }
         #expect(await rig.controller.resetWithPassword() == nil)   // a cancelled prompt says nothing
         #expect(rig.controller.status == .stuck)

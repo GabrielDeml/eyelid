@@ -51,7 +51,7 @@ Read these first. They are the product and UX source of truth, and this file imp
   - No notarization for local use (pending `CLOSED_LID.md` §10 #6). Developer ID + notarization only for distributing to others (Later).
 - **`Makefile`:**
   - `make` builds the app; `make run`.
-  - `make install`: requires a signed build. `sudo mktemp -d /Applications/.insomnia.XXXXXX` (root-owned, `0755`, same volume), `sudo ditto build/Insomnia.app` into it, `sudo chown -R root:wheel` and `sudo chmod -R go-w` it, then **verify the staged copy** (`scripts/lid-verify.sh --staged`: seal, both code requirements, the pinned helper cdhash, `RunAtLoad`, root ownership); only then quit a running Insomnia (`scripts/quit-running.sh`: one quit Apple Event, so its lid release runs; abort the swap if it doesn't quit), rename any old copy into the staging dir, rename the new one to `/Applications/Insomnia.app`, delete the staging dir, and reopen the app if it was running. Lid mode is set up **only** from this copy (`CLOSED_LID.md` §2.3); the next launch re-registers a changed helper silently.
+  - `make install`: requires a signed build. `sudo mktemp -d /Applications/.insomnia.XXXXXX` (root-owned, `0755`, same volume), `sudo ditto build/Insomnia.app` into it, `sudo chown -R root:wheel` and `sudo chmod -R go-w` it, then **verify the staged copy** (`scripts/lid-verify.sh --staged`: seal, both code requirements, the pinned helper cdhash, `RunAtLoad`, root ownership); only then quit every running Insomnia (`scripts/quit-running.sh`: found with `pgrep` on the app executable, each copy gets one SIGTERM, which the app routes through its normal quit so its lid release runs, and a copy only LaunchServices sees gets one quit Apple Event; it fails closed, so if it can't tell or a copy doesn't quit, the swap is aborted), rename any old copy into the staging dir, rename the new one to `/Applications/Insomnia.app`, delete the staging dir, and reopen the app if it was running. Lid mode is set up **only** from this copy (`CLOSED_LID.md` §2.3); the next launch re-registers a changed helper silently.
   - `make uninstall` (`CLOSED_LID.md` §9, in this order): quit every running copy (`scripts/quit-running.sh`; abort if it won't), `/Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper`, then if the lid marker exists `sudo pmset -a disablesleep 0` and delete the marker only once the flag reads 0 (abort otherwise), then remove sudoers-fallback leftovers if present (bootout the safety daemon, its plist, the sudoers rule, staging files, the boot marker), then `sudo rm -rf /Applications/Insomnia.app`.
   - `make snapshot`: debug build, `Insomnia --snapshot build/snapshots` (the snapshot renderer is compiled into debug builds only).
   - `make clean`: `rm -rf build .build` (no registration ever points into `build/`).
@@ -260,7 +260,7 @@ final class Watchdog {
 | Target or condition | How it's checked |
 |---|---|
 | `.app` | `NSWorkspace.runningApplications` (bundle id) and KVO on it, bursts coalesced. Not `didLaunch`/`didTerminateApplicationNotification`: AppKit doesn't post those for LSUIElement apps (Docker, Ollama). |
-| `.process` | `proc_listallpids`; a pid matches if any of `proc_name`, `basename(proc_pidpath)`, `basename(argv[0])` (`KERN_PROCARGS2`) or, for interpreters, the first non-flag argument equals the name, case-insensitively (rule in `Models.swift`). Python binaries also answer to `python3` and `python3.x` (`python3` re-execs into `Python.framework/Versions/3.x/…/Python`), and a retitled interpreter to the first word of argv[0] (npm sets `process.title`, so argv is `["npm run build", "", …]`). Other users' and root's processes are read with `PROC_PIDT_SHORTBSDINFO` + `proc_pidpath` (name and path only: `PROC_PIDTBSDINFO` and argv are refused). PIDs of running apps with a UI never match, so `claude` means the CLI, not Claude.app; an app is watched with `.app`. Matched pid and real name are shown in the subline and Why awake. **Polled every 5 s, only while some rule or watch needs it.** A process rule stays on for the 5 s grace after its last match. |
+| `.process` | `proc_listallpids`; a pid matches if any of `proc_name`, `basename(proc_pidpath)`, `basename(argv[0])` (`KERN_PROCARGS2`) or, for interpreters, the first non-flag argument equals the name, case-insensitively (rule in `Models.swift`). Python binaries also answer to `python3` and `python3.x` (`python3` re-execs into `Python.framework/Versions/3.x/…/Python`), and a retitled interpreter to the first word of argv[0] (npm sets `process.title`, so argv is `["npm run build", "", …]`). Other users' and root's processes are read with `PROC_PIDT_SHORTBSDINFO` + `proc_pidpath` (name and path only: `PROC_PIDTBSDINFO` and argv are refused). A running app with a UI never matches its own name or executable name, so `claude` means the CLI, not Claude.app (an app is watched with `.app`); other names still match it, and an interpreter's app (a framework Python showing a plot window) is never dropped, so `python3` and `train.py` still find it. Matched pid and real name are shown in the subline and Why awake. **Polled every 5 s, only while some rule or watch needs it.** A process rule stays on for the 5 s grace after its last match. |
 | `.pid` | `DispatchSource.makeProcessSource(identifier:eventMask: .exit)`, no polling. If the PID is already gone, fire `onExit` immediately. |
 | `.onAC` / `.externalDisplay` | `PowerMonitor` |
 
@@ -424,7 +424,7 @@ enum Banner: Equatable {
 // NotificationID (ending-soon, ended, battery-floor, battery-stop, lid-heat, lid-lpm, lid-cap, lid-error, lid-stuck,
 // foreign-flag, recovered, target-exited; + isSessionNotification) is declared in Models.swift (the engine posts from M1).
 ```
-- **Pools:** `[MomentKind: [String]]` static arrays in the Copy files, with placeholders `{name}`, `{floor}`, `{cap}` and `{duration}`.
+- **Pools:** `[MomentKind: [String]]` static arrays in the Copy files, with placeholders `{name}`, `{floor}` and `{cap}`.
 - **Pool sizes:** Cheeky and Unhinged each need **≥ 40 lines** in total, and **≥ 10** each for `activated`, `deactivated`, `idle` and `awake` (UX.md §11 has the seeds).
 - **Date-aware lines** (3–5 AM, Oct 31, New Year): replace an `activated` or `idle` line with 1-in-3 probability, at most once per window. Earned: the engine shows them outside the quip budget without spending it. Never in Professional.
 - **Never in titles:** notification titles and headlines contain no jokes.
@@ -508,7 +508,7 @@ enum ControlPaths { static var directory: URL; static var socket: URL }   // ~/L
 enum ControlDuration { static func parse(_:) -> AwakeDuration?; static func minutes(_:) -> Int?; static func clock(_:) -> (hour: Int, minute: Int)? }
 
 @MainActor protocol ControlResponding: AnyObject { func respond(to:connection:peerPID:) -> ControlResponse; func connectionClosed(_:) }
-@MainActor final class EngineControlResponder: ControlResponding { static let shared; var otherAppsRows: (@MainActor () -> [WhyRow])? }   // requests → AwakeEngine; M3 sets otherAppsRows
+@MainActor final class EngineControlResponder: ControlResponding { static let shared; var foreignProvider: (@MainActor () -> (assertions: [ForeignAssertion], appPIDs: Set<Int32>))? }   // requests → AwakeEngine; AppDelegate sets foreignProvider (AssertionInspector + app PIDs); `why` renders WhyAwakeReport
 @MainActor final class ControlServer {
     static let shared: ControlServer               // ControlPaths.socket + EngineControlResponder()
     init(socketURL: URL, responder: any ControlResponding, ready: Bool = false)
@@ -705,7 +705,7 @@ struct URLCommand: Equatable { /* parsed, pure */ static func parse(_ url: URL) 
 | `on` | `for=45m\|2h\|90\|forever` (the CLI's `ControlDuration` parser, capped at 7 days), `until=HH:mm` (next occurrence), `screen=0\|1`. Always fixed options with `lid: false`. |
 | `off` | none |
 | `extend` | `by=15m` |
-| `sleep` | none. Asks first ("Put your Mac to sleep now?"): any web page can open a link. |
+| `sleep` | none. Any web page can open a link, so it is refused and logged ("sleep now: refused, …") while `engine.clientHolds`, `engine.ruleHolds` or the babysit hold exist; otherwise it sleeps at once. Never a dialog: Shortcuts and scripts run it unattended. |
 | `panel` | none |
 | `settings` | `tab=` |
 

@@ -11,9 +11,9 @@ extension Snapshot {
         var ok = true
         PowerMonitor.shared.start()
         let shots: [(String, AnyView)] = [
-            ("lid-setup-explain", AnyView(sheet(LidSetupView(requestedLid: true, startAt: .explain, onClose: {})))),
-            ("lid-setup-approve", AnyView(sheet(LidSetupView(requestedLid: true, startAt: .approve, onClose: {})))),
-            ("lid-setup-done", AnyView(sheet(LidSetupView(requestedLid: true, startAt: .done, onClose: {})))),
+            ("lid-setup-explain", AnyView(sheet(LidSetupView(requestedLid: true, startAt: .explain, approvalWatcher: UUID(), onClose: {})))),
+            ("lid-setup-approve", AnyView(sheet(LidSetupView(requestedLid: true, startAt: .approve, approvalWatcher: UUID(), onClose: {})))),
+            ("lid-setup-done", AnyView(sheet(LidSetupView(requestedLid: true, startAt: .done, approvalWatcher: UUID(), onClose: {})))),
             ("settings-automations", AnyView(tab(.automations))),
             ("settings-lid-safety", AnyView(tab(.lidSafety))),
             ("settings-diagnostics", AnyView(tab(.diagnostics))),

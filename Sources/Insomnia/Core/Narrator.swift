@@ -51,7 +51,7 @@ enum CopyKind: String, CaseIterable, Hashable, Sendable {
 }
 
 /// The copy tables live in `Core/Copy/Copy+<Tier>.swift` (Swift source, never resources: `Bundle.module` breaks in a
-/// hand-assembled bundle). Placeholders: `{name}`, `{floor}`, `{cap}`, `{duration}`.
+/// hand-assembled bundle). Placeholders: `{name}`, `{floor}`, `{cap}`.
 enum Copy {
     static func pool(_ kind: CopyKind, _ p: Personality) -> [String] {
         switch p {
@@ -240,7 +240,7 @@ final class Narrator: Narrating {
         guard template.contains("{") else { return template }
         var out = template
         for (key, value) in values { out = out.replacingOccurrences(of: "{\(key)}", with: value) }
-        let fallbacks = ["{name}": "it", "{floor}": "low", "{cap}": "the", "{duration}": "for now"]
+        let fallbacks = ["{name}": "it", "{floor}": "low", "{cap}": "the"]
         for (key, value) in fallbacks { out = out.replacingOccurrences(of: key, with: value) }
         return out
     }
@@ -275,6 +275,6 @@ final class Narrator: Narrating {
         let kind: CopyKind = p == .professional ? .lidEngaged : [.lidEngaged, .activated, .idle].randomElement(using: &rng) ?? .lidEngaged
         let pool = Copy.pool(kind, p)
         let line = pool.randomElement(using: &rng) ?? "Lid mode is on."
-        return Self.fill(line, ["duration": "for 1 hour", "floor": "\(settings.batteryFloorPercent)"])
+        return Self.fill(line, ["floor": "\(settings.batteryFloorPercent)"])
     }
 }

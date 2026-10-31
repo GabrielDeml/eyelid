@@ -143,7 +143,7 @@ Height budget: header 96 · chips 28 · F 28 · G+H+H′ 72 · J 34, plus separa
 Variants:
 
 - **Asleep:** the eyes are closed with a floating "z", the headline is "Sleep allowed", and the subline is "Click the eyes to stay awake".
-- **Safety banner** (battery floor, heat, crash recovery, mission report): **replaces row J** with an icon, plain text and a ✕. Stays until dismissed or the next state change (the lid opening or closing while lid mode stays engaged isn't one). The crash-recovery banner stays until dismissed.
+- **Safety banner** (battery floor, heat, crash recovery, mission report): **replaces row J** with an icon, plain text and a ✕. Stays until dismissed or the next state change (the lid opening or closing while lid mode stays engaged isn't one, and neither is lid mode re-engaging right after the mission report, off → engaging → engaged, when a guard had released it while the lid was shut). The crash-recovery banner stays until dismissed.
 - **First-run card** (§7.1): shown above row E on first launch only.
 
 ### 2.2 Element specs
@@ -310,7 +310,7 @@ URL scheme (works from Shortcuts → "Open URLs" or Terminal → open "…"; lin
   insomnia://on?until=17:30&screen=1  [⧉]
   insomnia://off                   [⧉]
   insomnia://extend?by=15m         [⧉]
-  insomnia://toggle  · insomnia://panel  · insomnia://sleep        [⧉]   (sleep asks first)
+  insomnia://toggle  · insomnia://panel  · insomnia://sleep        [⧉]   (sleep: refused while a command, rule or While… watch holds; never asks)
 ```
 
 Each rule is one sentence-shaped row; there's never a modal form. The `screen` and `lid` checkboxes are per rule and default to off.
@@ -347,7 +347,7 @@ Guards
 - **Unsigned builds (sudoers backend)** show the old rows instead: "● Ready (sudoers rule ✓ · safety daemon ✓)", "◐ Partly installed: safety daemon missing [Repair…]", "◐ Safety daemon is off in Login Items [Open Login Items]". If a helper from a signed build is still registered (`.leftoverHelper`), the only row is "◐ A helper from a signed build is still registered [Remove…]"; the sudoers setup isn't offered until it's gone.
 - Signed build with leftover sudoers files: an extra row "Old password-based setup found [Remove old setup…]".
 - The battery-floor slider moves in whole percents and saves when you let go (keyboard and VoiceOver changes save at once), so dragging past the current level can't end a session mid-drag.
-- **Reset with password…** (when stuck) shows a failed reset inline like the other actions; a cancelled prompt says nothing. A cancelled or failed Remove… leaves lid mode as it was (it re-engages if it's wanted).
+- **Reset with password…** (when stuck) shows a failed reset inline like the other actions; a cancelled prompt says nothing. The panel's H′ link, the Dock menu item and the `lid-stuck` notification's **Reset…** have no inline row, so a failed reset there posts `lid-stuck` again: "Lid mode is still stuck on" / "The reset didn't work: {problem} Your Mac won't sleep until it's reset." A cancelled or failed Remove… leaves lid mode as it was (it re-engages if it's wanted).
 
 ### 4.4 Diagnostics
 
@@ -529,7 +529,7 @@ The egg is off in Professional (the toggles still work).
 | `lid-lpm` | Lid suspended for Low Power Mode, once per engagement | always | "Lid mode paused: Low Power Mode" | plain | none |
 | `lid-cap` | Lid suspended for a time cap | always | "Lid mode paused after {cap} closed on battery" / "Lid mode paused after {acCap} closed" | plain | none |
 | `lid-error` | Apply/readback failed, safety net lost, or overridden (not `foreignFlag`) | always | "Lid mode couldn't be applied" / "Lid mode was turned off" | "Your Mac will sleep normally." | **Retry** |
-| `lid-stuck` | Flag is 1 and every reset failed | always | "Lid mode is stuck on" | "Your Mac won't sleep until it's reset." | **Reset…** |
+| `lid-stuck` | Flag is 1 and every reset failed; again after a failed Reset with password… from the panel, Dock or this notification (§4.3) | always | "Lid mode is stuck on" | "Your Mac won't sleep until it's reset." | **Reset…** |
 | `foreign-flag` | `SleepDisabled = 1` without our marker (once per boot) | always | "Something else turned off sleep" | "Another app or admin set it. Insomnia won't change it." | **Why Awake?** |
 | `recovered` | Launch recovery reset the flag | always | "Normal sleep restored" | `recovered` pool | none |
 | `target-exited` | Babysit target exited and the hold ended | `sessionNotifications` | "ffmpeg finished" | e.g. "Babysitting shift over." | none |
@@ -578,7 +578,7 @@ Professional has no quip row: `Narrator.line` is `nil` for every moment. Its one
 | **date: Oct 31** | nil | Boo. Your Mac is too awake to be scared. | Spooky season. The call is coming from inside the menu bar. |
 | **date: New Year 00:00–00:10** | nil | You stayed up for this. So did I. | NEW YEAR. SAME EYES. |
 
-**Escalation buckets:** `.awake(hours:)` fires on entering 2, 8, 24 and 72 h of continuous awake. Each bucket fires once per hold. **Quip budget** and Professional placement: `PRODUCT.md` §4 rules 7 and 11 (Professional lines appear only in notification bodies). `{floor}`, `{cap}` (battery cap), `{acCap}` and `{duration}` are filled from Settings and the hold; never hard-code them.
+**Escalation buckets:** `.awake(hours:)` fires on entering 2, 8, 24 and 72 h of continuous awake. Each bucket fires once per hold. **Quip budget** and Professional placement: `PRODUCT.md` §4 rules 7 and 11 (Professional lines appear only in notification bodies). `{floor}`, `{cap}` (battery cap) and `{acCap}` are filled from Settings; never hard-code them. There is no `{duration}`: a line can't know the hold's length.
 
 **Date lines:** they replace an `activated` or `idle` line with 1-in-3 probability when their window matches, at most once per window. They are earned, so they neither wait for nor spend the quip budget, and a date line on panel open doesn't use up the day's `idle` line. Never in Professional.
 

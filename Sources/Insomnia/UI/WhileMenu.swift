@@ -187,8 +187,8 @@ final class WhilePrompt: NSObject, NSPopoverDelegate {
             let key = trimmed.lowercased()
             let raw = await Task.detached(priority: .userInitiated) { ProcessTable.scan([key]) }.value
             // The same app filter as rules and watches: Claude.app is not the `claude` CLI.
-            let appPIDs = WatchMonitor.appPIDs(LiveWatchSystem().runningApps())
-            let pids = (ProcessMatcher.excludingApps(raw, appPIDs: appPIDs)[key] ?? []).map(\.pid)
+            let apps = WatchMonitor.appNames(LiveWatchSystem().runningApps())
+            let pids = (ProcessMatcher.excludingApps(raw, apps: apps)[key] ?? []).map(\.pid)
             return processLookup(name: trimmed, pids: pids, appMatched: pids.isEmpty && !(raw[key] ?? []).isEmpty)
         case .pid:
             guard let pid = Int32(trimmed), pid > 0 else { return .unavailable("Enter a process number") }

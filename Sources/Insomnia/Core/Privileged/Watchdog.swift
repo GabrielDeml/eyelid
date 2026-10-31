@@ -10,15 +10,17 @@ import InsomniaShared
 /// died (crash or quit timeout mid-engage; the `sudo` child outlives us) can land after the first reset, never after
 /// the second. `resetSettle` is longer than the engage spawn timeout (5 s).
 ///
-/// After the second reset reads back 0 it deletes the lid marker (`$M`), but only while the marker still names the
-/// app that armed it (`$P`, its pid): a stale marker would otherwise make the next launch treat a later, foreign
-/// `SleepDisabled = 1` as ours and clear it (Decision 23), and a newer instance's marker is never touched.
+/// After the second reset reads back 0 it renames the lid marker (`$M`) to `$M.recovered`
+/// (`LidMarker.breadcrumb`), but only while the marker still names the app that armed it (`$P`, its pid): a stale
+/// marker would otherwise make the next launch treat a later, foreign `SleepDisabled = 1` as ours and clear it
+/// (Decision 23), and a newer instance's marker is never touched. The breadcrumb never makes a flag ours; it only lets
+/// the next launch show the recovery banner, as the helper backend does (R90).
 final class Watchdog: Sendable {
     static let resetSettle = 6
     static let script = "r(){ /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0; sleep \(resetSettle); "
         + "/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0 && /usr/sbin/ioreg -r -c IOPMrootDomain -d 1 "
         + "| /usr/bin/grep -q '\"SleepDisabled\" = No' && [ -n \"$M\" ] && IFS=' ' read -r p _ < \"$M\" "
-        + "&& [ \"$p\" = \"$P\" ] && /bin/rm -f \"$M\"; exit 0; }; trap r TERM HUP INT; "
+        + "&& [ \"$p\" = \"$P\" ] && /bin/mv -f \"$M\" \"$M.recovered\"; exit 0; }; trap r TERM HUP INT; "
         + "while IFS= read -r -t \(Int(HelperInfo.heartbeatTimeout)) l; do [ \"$l\" = disarm ] && exit 0; done; r"
 
     enum ArmError: Error { case pipe(Int32), spawn(Int32) }

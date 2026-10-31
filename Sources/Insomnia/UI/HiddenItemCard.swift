@@ -61,6 +61,14 @@ final class HiddenItemCardController: NSObject, NSWindowDelegate {
     private var keyMonitor: Any?
     /// The item went hidden while the panel was open; the card waits for the panel to close (R95).
     private var pending = false
+    var isPending: Bool { pending }
+    /// Only `hiddenItemCardShown` is read through this (tests pass a scratch store).
+    private let settings: Settings
+
+    init(settings: Settings = .shared) {
+        self.settings = settings
+        super.init()
+    }
 
     enum Decision: Equatable { case skip, waitForPanel, show }
 
@@ -74,7 +82,6 @@ final class HiddenItemCardController: NSObject, NSWindowDelegate {
     /// Shows the card once ever (`Settings.hiddenItemCardShown`). `force` ignores the flag (debug / snapshots).
     /// With the panel open it is held back, unmarked, until `panelDidClose`.
     func showIfNeeded(force: Bool = false, panelOpen: Bool = false) {
-        let settings = Settings.shared
         switch Self.decide(alreadyShown: settings.hiddenItemCardShown, force: force, panelOpen: panelOpen) {
         case .skip:
             return
@@ -88,13 +95,14 @@ final class HiddenItemCardController: NSObject, NSWindowDelegate {
     }
 
     /// The panel closed: show a held-back card if the item is still hidden. On the next turn, so the card doesn't take
-    /// focus in the middle of the panel's own close.
-    func panelDidClose(itemStillHidden: Bool) {
+    /// focus in the middle of the panel's own close. `panelOpen` is asked again then: a popover ↔ window switch
+    /// (`PanelHost.show`, `.replace`) closes and reopens the panel in one turn, and the card waits for that one too.
+    func panelDidClose(itemStillHidden: Bool, panelOpen: @escaping @MainActor @Sendable () -> Bool) {
         guard pending else { return }
         pending = false
         guard itemStillHidden else { return }
         DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.showIfNeeded() }
+            MainActor.assumeIsolated { self?.showIfNeeded(panelOpen: panelOpen()) }
         }
     }
 

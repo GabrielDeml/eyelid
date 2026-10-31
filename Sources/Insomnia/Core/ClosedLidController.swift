@@ -29,8 +29,6 @@ final class ClosedLidController: LidControlling {
     private(set) var reopenReport: ReopenReport?
     /// Signed builds: files from an earlier unsigned (sudoers) setup exist → "Remove old setup…".
     private(set) var hasLegacySudoers = false
-    /// The last setup / removal / reset failure (nil after a success or a cancelled prompt), for inline UI copy.
-    private(set) var lastSetupError: LidSetupError?
 
     @ObservationIgnored var onChange: (@MainActor () -> Void)?
 
@@ -174,13 +172,7 @@ final class ClosedLidController: LidControlling {
             if case .success(let s) = r { self.setHelper(s) } else { await self.refreshHelperNow() }
             return r
         }
-        switch result {
-        case .success:
-            lastSetupError = nil
-        case .failure(let e):
-            lastSetupError = e
-            throw e
-        }
+        if case .failure(let e) = result { throw e }
     }
 
     func openApprovalSettings() {
@@ -232,7 +224,6 @@ final class ClosedLidController: LidControlling {
             if err != nil { await self.converge() }
             return err
         }
-        lastSetupError = error
         if let error { throw error }
     }
 
@@ -243,7 +234,6 @@ final class ClosedLidController: LidControlling {
             await self.refreshHelperNow()
             return err
         }
-        lastSetupError = error
         if let error { throw error }
     }
 
@@ -275,7 +265,6 @@ final class ClosedLidController: LidControlling {
             await self.converge()
             return nil
         }
-        lastSetupError = error == .cancelled ? nil : error
         return error == .cancelled ? nil : error
     }
 

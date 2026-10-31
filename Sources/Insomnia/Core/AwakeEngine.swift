@@ -565,8 +565,13 @@ final class AwakeEngine {
         handleTimedHeadsUp(now: t)
         handleEscalation(now: t)
         // The lid opening or closing while engaged is the same state (the mission report arrives with it), and the
-        // crash-recovery banner is a launch fact that stays until dismissed (UX.md §2.1).
-        let stateChanged = previousStatus != status || Self.lidStateChanged(from: previousLid, to: lid)
+        // crash-recovery banner is a launch fact that stays until dismissed (UX.md §2.1). While the mission report is
+        // up, lid mode coming back on as the lid opens (off → engaging → engaged, after a guard released it while
+        // closed) is the same reopen too (R12).
+        let reopenShown: Bool = if case .reopen = banner { true } else { false }
+        let lidChanged = Self.lidStateChanged(from: previousLid, to: lid)
+            && !(reopenShown && Self.isReopenSequence(lid))
+        let stateChanged = previousStatus != status || lidChanged
         if stateChanged && !bannerIsFresh && banner != .recovered { banner = nil }
         bannerIsFresh = false
         flushMoments(stateChanged: stateChanged, now: t)
@@ -1040,6 +1045,14 @@ final class AwakeEngine {
     private static func lidStateChanged(from old: LidStatus, to new: LidStatus) -> Bool {
         if case .engaged = old, case .engaged = new { return false }
         return old != new
+    }
+
+    /// Lid states lid mode passes through as it re-engages after the lid opens.
+    private static func isReopenSequence(_ s: LidStatus) -> Bool {
+        switch s {
+        case .off, .engaging, .engaged: return true
+        default: return false
+        }
     }
 
     private func setIfChanged<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<AwakeEngine, T>, _ value: T) {

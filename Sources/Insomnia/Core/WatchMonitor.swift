@@ -11,8 +11,8 @@ import os
 // | .app                | NSWorkspace.runningApplications + KVO on it (no polling; the didLaunch / didTerminate    |
 // |                     | notifications skip LSUIElement apps such as Docker and Ollama), bursts coalesced         |
 // | .process            | ProcessTable.scan (proc_listallpids + ProcessMatcher), every 5 s ONLY while some enabled  |
-// |                     | process rule or process watch exists; the scan runs off the main thread. PIDs of running |
-// |                     | apps with a UI are dropped (Claude.app is an app, not the `claude` CLI)                  |
+// |                     | process rule or process watch exists; the scan runs off the main thread. A running app   |
+// |                     | with a UI never matches its own names (Claude.app is an app, not the `claude` CLI)       |
 // | .pid                | DispatchSource process-exit source (no polling); already gone → onExit right away        |
 // | .onAC / .externalDisplay | PowerMonitor (`.insomniaPowerDidChange`)                                            |
 //
@@ -26,8 +26,11 @@ struct RunningAppInfo: Equatable, Sendable {
     var pid: Int32
     /// `.regular` activation policy (has a Dock icon). Only these are offered in While… ▸ Running apps.
     var isRegular: Bool
-    /// Not `.prohibited` (regular or LSUIElement/accessory): an app with a UI. Its PID never counts as a process match.
+    /// Not `.prohibited` (regular or LSUIElement/accessory): an app with a UI. Its PID doesn't count as a process match
+    /// for the app's own names (`WatchMonitor.appNames`).
     var hasUI: Bool = true
+    /// The executable's file name ("Claude", "Python"); nil if unknown.
+    var executable: String? = nil
 }
 
 /// One process that matched a name.
@@ -209,7 +212,7 @@ final class WatchMonitor: WatchMonitoring {
         let raw = await Task.detached(priority: .userInitiated) { ProcessTable.scan(names) }.value
         let uid = getuid()
         // GUI apps are under Running apps (the Claude desktop app would otherwise match "claude").
-        let hits = ProcessMatcher.excludingApps(raw, appPIDs: Self.appPIDs(system.runningApps()))
+        let hits = ProcessMatcher.excludingApps(raw, apps: Self.appNames(system.runningApps()))
         let result = Self.suggestedNames.flatMap { name in
             (hits[name] ?? []).filter { $0.uid == uid }.map { (name: name, pid: $0.pid) }
         }
@@ -226,9 +229,9 @@ final class WatchMonitor: WatchMonitoring {
     func performScan() async {
         let names = namesNeeded()
         let raw = names.isEmpty ? [:] : await system.scanProcesses(names)
-        // After the scan, on the main actor: a running app's PID is never a process match (Claude.app's executable is
+        // After the scan, on the main actor: a running app is not a match for its own names (Claude.app's executable is
         // "Claude", so a rule or watch for the `claude` CLI would otherwise never end while the app is open).
-        let results = ProcessMatcher.excludingApps(raw, appPIDs: Self.appPIDs(apps))
+        let results = ProcessMatcher.excludingApps(raw, apps: Self.appNames(apps))
         var matches: [String: [Int32]] = [:]
         for name in names { matches[name] = (results[name] ?? []).map(\.pid).sorted() }
         scannedNames = names
@@ -485,10 +488,24 @@ final class WatchMonitor: WatchMonitoring {
         name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    /// PIDs of running apps with a UI (regular or LSUIElement): never process matches. Shared by the rule/watch scan,
-    /// While… ▸ Suggested and the Process name… prompt.
+    /// PIDs of running apps with a UI (regular or LSUIElement), for Why awake's "app" labels.
     nonisolated static func appPIDs(_ apps: [RunningAppInfo]) -> Set<Int32> {
         Set(apps.filter(\.hasUI).map(\.pid))
+    }
+
+    /// Running apps with a UI, by PID → the names the app itself answers to (its name and executable, lower-cased).
+    /// A hit on one of those names is the app, not a process (`ProcessMatcher.excludingApps`); any other name still
+    /// matches. An interpreter's app is left out: a framework Python showing a plot or Tk window is a regular app
+    /// named "Python", yet `python3` and `train.py` must still find it (R23). Shared by the rule/watch scan,
+    /// While… ▸ Suggested and the Process name… prompt.
+    nonisolated static func appNames(_ apps: [RunningAppInfo]) -> [Int32: Set<String>] {
+        var out: [Int32: Set<String>] = [:]
+        for app in apps where app.hasUI {
+            let names = Set([app.name, app.executable].compactMap { $0?.lowercased() }.filter { !$0.isEmpty })
+            guard !names.contains(where: ProcessMatcher.isInterpreter) else { continue }
+            out[app.pid] = names
+        }
+        return out
     }
 
     private func log(_ message: String) {
@@ -508,7 +525,8 @@ final class LiveWatchSystem: WatchSystem {
             guard !app.isTerminated, let id = app.bundleIdentifier else { return nil }
             return RunningAppInfo(bundleID: id, name: app.localizedName ?? id, pid: app.processIdentifier,
                                   isRegular: app.activationPolicy == .regular,
-                                  hasUI: app.activationPolicy != .prohibited)
+                                  hasUI: app.activationPolicy != .prohibited,
+                                  executable: app.executableURL?.lastPathComponent)
         }
     }
 
@@ -739,11 +757,14 @@ enum ProcessMatcher {
         return !key.isEmpty && candidateNames(procName: procName, path: path, argv: argv).contains(key)
     }
 
-    /// Drops hits whose PID is a running app with a UI (`WatchMonitor.appPIDs`): an app is watched as an app, not by
-    /// process name. Run on the main actor right after the scan.
-    static func excludingApps(_ hits: [String: [ProcessHit]], appPIDs: Set<Int32>) -> [String: [ProcessHit]] {
-        guard !appPIDs.isEmpty else { return hits }
-        return hits.mapValues { $0.filter { !appPIDs.contains($0.pid) } }
+    /// Drops a hit whose PID is a running app with a UI when the name is one of that app's own (`WatchMonitor.appNames`):
+    /// an app is watched as an app, not by process name. Any other name the process answers to still matches. Run on
+    /// the main actor right after the scan. `hits` is keyed by lower-cased name.
+    static func excludingApps(_ hits: [String: [ProcessHit]], apps: [Int32: Set<String>]) -> [String: [ProcessHit]] {
+        guard !apps.isEmpty else { return hits }
+        var out = hits
+        for (name, list) in hits { out[name] = list.filter { apps[$0.pid]?.contains(name) != true } }
+        return out
     }
 
     /// The name to show for a process (see `ProcessTable.displayName(pid:)`). nil if nothing is known.

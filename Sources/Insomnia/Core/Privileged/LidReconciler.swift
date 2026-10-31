@@ -179,7 +179,8 @@ actor LidReconciler {
     // MARK: Launch recovery (§4.3)
 
     func recover() async -> RecoveryOutcome {
-        guard marker.exists, let backend else { return .nothing }
+        // The sudoers watchdog already reset the flag and renamed the marker (R90): the banner, nothing else.
+        guard marker.exists, let backend else { return marker.takeBreadcrumb() ? .recovered : .nothing }
         guard system.sleepDisabled() == true else {
             marker.delete()   // layer 2 (helper / watchdog) already reset it
             return .recovered

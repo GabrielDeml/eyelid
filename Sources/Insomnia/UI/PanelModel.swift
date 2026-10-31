@@ -563,7 +563,7 @@ enum LivePanelState {
         case .lidSetup:
             AppRouter.shared.startLidSetup()
         case .lidRetry: ClosedLidController.shared.retry()
-        case .lidReset: Task { await ClosedLidController.shared.resetWithPassword() }
+        case .lidReset: LidResetAction.run()   // the Dock menu item too
         case .closePanel: AppRouter.shared.closePanel()
         }
     }

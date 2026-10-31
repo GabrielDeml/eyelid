@@ -73,7 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.notifier = Notifier.self
         engine.stats = Stats.shared
         Notifier.retryLidHandler = { ClosedLidController.shared.retry() }
-        Notifier.resetLidHandler = { Task { await ClosedLidController.shared.resetWithPassword() } }
+        Notifier.resetLidHandler = { LidResetAction.run() }
 
         // 2. Power readings.
         PowerMonitor.shared.start()
@@ -230,7 +230,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: URL scheme
 
-    @objc private func handleGetURL(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
+    /// Internal for the GURL test (R77).
+    @objc func handleGetURL(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
         // URLCommand.parse checks the scheme (case-insensitively, `Insomnia://` too) and logs what it rejects.
         guard let string = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
               let url = URL(string: string) else { return }

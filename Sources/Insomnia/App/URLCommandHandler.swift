@@ -10,12 +10,13 @@ import os
 /// | `on`       | `for=45m|2h|90|1h30m|forever`, `until=HH:mm` (next occurrence), `screen=0|1` |
 /// | `off`      | none                                                                        |
 /// | `extend`   | `by=15m` (default 15 minutes)                                               |
-/// | `sleep`    | none (asks first)                                                           |
+/// | `sleep`    | none (refused while a command, rule or While… hold is running)              |
 /// | `panel`    | none                                                                        |
 /// | `settings` | `tab=general|automations|lid|diagnostics`                                   |
 ///
 /// Any web page can open `insomnia://`, so URL holds **never** get lid mode (Decision 10): `lid=` is ignored and logged,
-/// and every `on` hold carries fixed options with `lid: false`. `sleep` asks for confirmation before it sleeps the Mac.
+/// and every `on` hold carries fixed options with `lid: false`. `sleep` never overrides a hold for work in progress
+/// (`insomnia run`/`watch`, a rule, a While… watch) and never asks, so Shortcuts and scripts can use it unattended.
 /// The URL scheme never writes Settings. Unknown hosts and parameters are ignored and logged (sanitised: the names are
 /// the page's choice too).
 struct URLCommand: Equatable, Sendable {
@@ -144,8 +145,7 @@ struct URLCommand: Equatable, Sendable {
 enum URLCommandHandler {
     private static let log = Logger(subsystem: "com.gdeml.Insomnia", category: "url")
 
-    static func handle(_ url: URL, settings: Settings = .shared, engine: AwakeEngine = .shared,
-                       confirmSleep: @MainActor () -> Bool = askToSleep) {
+    static func handle(_ url: URL, settings: Settings = .shared, engine: AwakeEngine = .shared) {
         guard let command = URLCommand.parse(url) else {
             record("ignored \(redacted(url))", engine)
             return
@@ -153,12 +153,10 @@ enum URLCommandHandler {
         if !command.ignored.isEmpty {
             record("\(LogText.oneLine(url.host ?? "?", limit: 40)): ignored \(names(command.ignored, separator: ", "))", engine)
         }
-        perform(command, settings: settings, engine: engine, confirmSleep: confirmSleep)
+        perform(command, settings: settings, engine: engine)
     }
 
-    /// `confirmSleep`: any web page can open `insomnia://sleep`, so it asks before sleeping (tests answer for it).
-    static func perform(_ command: URLCommand, settings: Settings, engine: AwakeEngine, now: Date = Date(),
-                        confirmSleep: @MainActor () -> Bool = askToSleep) {
+    static func perform(_ command: URLCommand, settings: Settings, engine: AwakeEngine, now: Date = Date()) {
         // Fixed options for a hold a URL starts; unset fields come from Settings now. Never lid (Decision 10).
         let noLid = AwakeOptions(screen: settings.keepScreenOn, lid: false)
         switch command.action {
@@ -183,8 +181,10 @@ enum URLCommandHandler {
             engine.extend(minutes: minutes, source: .urlScheme, options: noLid)
             record("extend +\(minutes)m", engine)
         case .sleep:
-            guard confirmSleep() else {
-                record("sleep now: declined", engine)
+            // Any web page can open this link (R32). It may end the user's own manual hold, but never a hold for work
+            // in progress elsewhere; no dialog either, which would leave an unattended Shortcut waiting.
+            if let reason = sleepRefusal(engine) {
+                record("sleep now: refused, \(reason)", engine)
                 return
             }
             record("sleep now", engine)
@@ -196,15 +196,13 @@ enum URLCommandHandler {
         }
     }
 
-    /// The confirmation for `insomnia://sleep`.
-    static func askToSleep() -> Bool {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Put your Mac to sleep now?"
-        alert.informativeText = "A link (insomnia://sleep) asked for it. Your Mac sleeps even if something is keeping it awake."
-        alert.addButton(withTitle: "Sleep")
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
+    /// Why `insomnia://sleep` must not sleep now (for the log), or nil: a command-line client, a rule or a While…
+    /// watch is holding the Mac awake.
+    static func sleepRefusal(_ engine: AwakeEngine) -> String? {
+        if !engine.clientHolds.isEmpty { return "a command is keeping the Mac awake" }
+        if !engine.ruleHolds.isEmpty { return "a rule is keeping the Mac awake" }
+        if engine.babysitHold != nil { return "a While… watch is keeping the Mac awake" }
+        return nil
     }
 
     private static func record(_ message: String, _ engine: AwakeEngine) {

@@ -68,7 +68,9 @@ final class StatusItemController: NSObject {
             self.statusItem?.button?.highlight(false)
             if #available(macOS 27, *) { self.statusItem?.expandedInterfaceSession?.cancel() }
             // A hidden-item card held back while the panel was up (R95).
-            HiddenItemCardController.shared.panelDidClose(itemStillHidden: self.isHidden)
+            HiddenItemCardController.shared.panelDidClose(itemStillHidden: self.isHidden) { [weak self] in
+                self?.panel.isVisible ?? false
+            }
         }
 
         let nc = NotificationCenter.default

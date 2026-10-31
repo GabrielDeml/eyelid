@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import Testing
@@ -6,7 +7,7 @@ import InsomniaShared
 
 /// Regression tests for the 2026-10-31 review, group E (CLI, URL scheme, app lifecycle, control socket):
 /// nohup and `run` (R30), CLI launches (R31, R99), URL queueing and scheme case (R87, R77), URL log sanitising (R4),
-/// insomnia://sleep confirmation (R32), URL `on` never-lid (R66), socket abuse paths (R70), and the run/watch hold
+/// insomnia://sleep refused over work holds (R32), URL `on` never-lid (R66), socket abuse paths (R70), and the run/watch hold
 /// lifecycle end to end, including taking the hold back after the app restarts (R100, R98).
 
 // MARK: - R30: signals ignored at start stay ignored
@@ -120,13 +121,24 @@ struct FixEURLTests {
         #expect(URLCommand.parse(url)?.action == .panel)
     }
 
+    /// R77 follow-up: the Apple Event handler itself takes `Insomnia://` (no case-sensitive scheme check of its own).
+    @Test func getURLEventWithACapitalisedSchemeIsQueued() throws {
+        let delegate = AppDelegate()
+        let event = NSAppleEventDescriptor(eventClass: AEEventClass(kInternetEventClass), eventID: AEEventID(kAEGetURL),
+                                           targetDescriptor: nil, returnID: AEReturnID(kAutoGenerateReturnID),
+                                           transactionID: AETransactionID(kAnyTransactionID))
+        event.setParam(NSAppleEventDescriptor(string: "Insomnia://panel"), forKeyword: keyDirectObject)
+        delegate.handleGetURL(event, withReply: NSAppleEventDescriptor.null())
+        #expect(delegate.pendingURLs == [try #require(URL(string: "Insomnia://panel"))])
+    }
+
     @Test func untrustedParameterNamesStayOneLine() throws {
         let h = Harness()
         let log = EventLog(mirrorsToSystemLog: false)
         h.engine.eventLog = log
         let forged = "x%0A2026-10-31%2015:01:12%20%20lid%20%20engaged%20(readback%20%E2%9C%93)"
         let url = try #require(URL(string: "insomnia://on?for=1m&\(forged)=1"))
-        URLCommandHandler.handle(url, settings: h.settings, engine: h.engine, confirmSleep: { false })
+        URLCommandHandler.handle(url, settings: h.settings, engine: h.engine)
         #expect(!log.entries.isEmpty)
         for entry in log.entries {
             #expect(!entry.message.contains("\n"))
@@ -137,7 +149,7 @@ struct FixEURLTests {
 
         // An unknown host: host and names are sanitised too.
         let bad = try #require(URL(string: "insomnia://nope?a%0Ab=1"))
-        URLCommandHandler.handle(bad, settings: h.settings, engine: h.engine, confirmSleep: { false })
+        URLCommandHandler.handle(bad, settings: h.settings, engine: h.engine)
         #expect(log.entries.last?.message == "ignored insomnia://nope?a b")
     }
 
@@ -151,21 +163,23 @@ struct FixEURLTests {
         #expect(LogText.oneLine("a\r\n\tb\u{7}c", limit: 40) == "a b c")
     }
 
-    @Test func sleepFromALinkAsksFirst() async throws {
+    /// R32 follow-up: no dialog (Shortcuts run it unattended); refused while a command-line client holds the Mac.
+    @Test func sleepFromALinkNeverOverridesWorkInProgress() async throws {
         let h = Harness()
         let log = EventLog(mirrorsToSystemLog: false)
         h.engine.eventLog = log
         h.engine.activate(.minutes(60), source: .panel)
-        var asked = 0
-        URLCommandHandler.perform(URLCommand(action: .sleep), settings: h.settings, engine: h.engine,
-                                  confirmSleep: { asked += 1; return false })
-        #expect(asked == 1)
-        #expect(h.engine.manualHold != nil)   // declined: nothing ended
-        #expect(log.entries.last?.message == "sleep now: declined")
+        let client = UUID()
+        h.engine.beginClientHold(connection: client, label: "make", options: AwakeOptions(screen: false, lid: false))
+        URLCommandHandler.perform(URLCommand(action: .sleep), settings: h.settings, engine: h.engine)
+        #expect(h.engine.manualHold != nil)   // refused: nothing ended
+        #expect(h.engine.clientHolds.count == 1)
+        #expect(log.entries.last?.message == "sleep now: refused, a command is keeping the Mac awake")
 
-        URLCommandHandler.perform(URLCommand(action: .sleep), settings: h.settings, engine: h.engine,
-                                  confirmSleep: { asked += 1; return true })
-        #expect(asked == 2)
+        // Only the user's own manual hold left: sleeps at once, without asking.
+        h.engine.endClientHold(connection: client)
+        URLCommandHandler.perform(URLCommand(action: .sleep), settings: h.settings, engine: h.engine)
+        #expect(log.entries.last?.message == "sleep now")
         for _ in 0..<50 where h.engine.manualHold != nil { try await Task.sleep(for: .milliseconds(10)) }
         #expect(h.engine.manualHold == nil)   // FakeLid.sleepNow: never sleeps this Mac
     }
@@ -275,13 +289,16 @@ private final class FakeHoldServer: @unchecked Sendable {
     let path: String
     private let fd: Int32
     private let reply: Data
+    /// Waits this long after reading a hold before answering it (and recording `.hold`).
+    private let replyDelay: TimeInterval
     private let lock = NSLock()
     private var recorded: [(Event, Date)] = []
     private let done = DispatchSemaphore(value: 0)
 
-    init(path: String, reply: Data) throws {
+    init(path: String, reply: Data, replyDelay: TimeInterval = 0) throws {
         self.path = path
         self.reply = reply
+        self.replyDelay = replyDelay
         unlink(path)
         fd = ControlSocket.make()
         guard let address = ControlSocket.address(path), ControlSocket.bind(fd, to: address) == 0, listen(fd, 4) == 0 else {
@@ -305,6 +322,7 @@ private final class FakeHoldServer: @unchecked Sendable {
                 var line = Data()
                 var byte: UInt8 = 0
                 while read(c, &byte, 1) == 1, byte != 0x0A { line.append(byte) }
+                if replyDelay > 0 { Thread.sleep(forTimeInterval: replyDelay) }
                 record(.hold)
                 _ = reply.withUnsafeBytes { write(c, $0.baseAddress, $0.count) }
                 if drop {
@@ -352,28 +370,63 @@ struct FixEHoldLifecycleTests {
                                                                       holds: ["Command · sh"], headline: "Awake")))
     }
 
-    private func makeServer() throws -> (FakeHoldServer, URL) {
+    private func makeServer(replyDelay: TimeInterval = 0) throws -> (FakeHoldServer, URL) {
         let dir = try shortSocketDirectory()
-        return (try FakeHoldServer(path: dir.appendingPathComponent("c.sock").path, reply: try okReply()), dir)
+        return (try FakeHoldServer(path: dir.appendingPathComponent("c.sock").path, reply: try okReply(),
+                                   replyDelay: replyDelay), dir)
+    }
+
+    private func modified(_ path: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
     }
 
     @Test func runHoldsForExactlyTheCommandsLifetime() throws {
-        let (server, dir) = try makeServer()
+        // The app answers the hold 200 ms late: a command started before the answer would be stamped before `.hold`.
+        let (server, dir) = try makeServer(replyDelay: 0.2)
         defer { server.stop(); try? FileManager.default.removeItem(at: dir) }
         server.serve(dropAfterReply: [false])
+        let started = dir.appendingPathComponent("started").path
 
-        let start = Date()
-        let code = CLIRunner.run(["/bin/sh", "-c", "sleep 0.3; exit 7"], options: options,
+        let code = CLIRunner.run(["/bin/sh", "-c", "/usr/bin/touch '\(started)'; sleep 0.3; exit 7"], options: options,
                                  connector: connector(server.path), inheritedIgnored: leaveSignalsAlone)
         #expect(code == 7)
         #expect(server.waitUntilServed())
         let events = server.events
         #expect(events.map(\.0) == [.hold, .eof])
-        // The hold was taken before the command started, and released only after it exited.
+        // The hold was answered before the command started, and released only after it exited.
+        let childStart = try #require(modified(started))
         if events.count == 2 {
-            #expect(events[0].1 < start.addingTimeInterval(0.3))
-            #expect(events[1].1.timeIntervalSince(start) >= 0.3)
+            #expect(childStart >= events[0].1)
+            #expect(events[1].1.timeIntervalSince(childStart) >= 0.3)
         }
+    }
+
+    /// R100 follow-up: a SIGTERM sent to `run` reaches the command, whose own exit code comes back. Only SIGTERM is
+    /// forwarded here, and the test sends it only once the command is up, i.e. while `run` has it set to SIG_IGN, so
+    /// the test process itself never sees it; its disposition is put back afterwards.
+    @Test func runForwardsSIGTERMToTheCommand() throws {
+        let (server, dir) = try makeServer()
+        defer { server.stop(); try? FileManager.default.removeItem(at: dir) }
+        server.serve(dropAfterReply: [false])
+        let started = dir.appendingPathComponent("started").path
+        var saved = sigaction()
+        sigaction(SIGTERM, nil, &saved)
+        defer { sigaction(SIGTERM, &saved, nil) }
+
+        let sender = Thread {
+            let deadline = Date().addingTimeInterval(5)
+            while !FileManager.default.fileExists(atPath: started) && Date() < deadline { usleep(10_000) }
+            guard FileManager.default.fileExists(atPath: started) else { return }
+            kill(getpid(), SIGTERM)
+        }
+        sender.start()
+        let script = "trap 'exit 9' TERM; /usr/bin/touch '\(started)'; i=0; "
+            + "while [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; exit 3"
+        let code = CLIRunner.run(["/bin/sh", "-c", script], options: options, connector: connector(server.path),
+                                 inheritedIgnored: [SIGINT, SIGHUP, SIGQUIT])
+        #expect(code == 9)
+        #expect(server.waitUntilServed())
+        #expect(server.events.map(\.0) == [.hold, .eof])
     }
 
     /// The app quits mid-run (R98): the command keeps running, and the hold comes back once the app answers again.

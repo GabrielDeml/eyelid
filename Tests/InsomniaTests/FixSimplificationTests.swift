@@ -27,9 +27,12 @@ struct FixSimplificationSpawnTests {
         #expect(r.stdout.isEmpty)
     }
 
-    /// More than a pipe buffer: the child never blocks on a full pipe, and the capture stops at 64 KB.
+    /// More than a pipe buffer: the child never blocks on a full pipe, and the capture stops at 64 KB. Pipe data wakes
+    /// the wait (R2): falling back to the 1 s poll would stall about a second per pipe buffer.
     @Test func largeOutputDoesNotDeadlock() {
+        let start = Date()
         let r = Spawn.run("/bin/sh", ["-c", "head -c 300000 /dev/zero | tr '\\0' x"], timeout: 10, captureStdout: true)
+        #expect(Date().timeIntervalSince(start) < 1.0)
         #expect(r.status == 0)
         #expect(r.stdout.utf8.count >= 64 * 1024 && r.stdout.utf8.count < 64 * 1024 + 4096)
     }
@@ -194,12 +197,28 @@ struct FixSimplificationDurationTests {
 
 @Suite("Fix simplification: power readers")
 struct FixSimplificationPowerTests {
-    /// The helper used to count a battery IOPS reports as not present.
+    /// The shared parser (app and helper) treats a battery IOPS reports as not present as a desktop. The app's copy
+    /// already did; the helper's own reader didn't, which is what `helperHasNoPowerReaderOfItsOwn` guards against.
     @Test func absentBatteryIsADesktop() {
         let r = PowerSourceReading.parse(providingType: "Battery Power", descriptions: [[
             "Type": "InternalBattery", "Is Present": false, "Current Capacity": 5, "Max Capacity": 100,
         ]])
         #expect(r == .desktop)
+    }
+
+    /// R11: the drift was a second IOPS reader in the helper. Only InsomniaShared/PowerSources.swift reads IOPS.
+    @Test func helperHasNoPowerReaderOfItsOwn() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources")
+        let files = try #require(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+        #expect(files.count > 10)
+        for file in files where file.lastPathComponent != "PowerSources.swift" {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            #expect(!text.contains("IOPSCopyPowerSources"), "\(file.lastPathComponent) reads IOPS itself")
+        }
+        let helper = try String(contentsOf: root.appendingPathComponent("InsomniaHelper/HelperDaemon.swift"), encoding: .utf8)
+        #expect(helper.contains("PowerSourceReading.current()"))
     }
 
     @Test func rootDomainGoesThroughTheSharedReader() {

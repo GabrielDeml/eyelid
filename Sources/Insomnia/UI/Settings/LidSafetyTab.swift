@@ -31,7 +31,7 @@ struct LidSafetyTab: View {
         .formStyle(.grouped)
         .task { await lid.refreshHelper() }
         .sheet(item: $setup) { sheet in
-            LidSetupView(requestedLid: false, startAt: sheet.startAt) { setup = nil }
+            Self.setupView(for: sheet) { setup = nil }
         }
         .confirmationDialog("Remove lid mode?", isPresented: $confirmRemove) {
             Button("Remove", role: .destructive) { run(.remove) }
@@ -226,9 +226,15 @@ struct LidSafetyTab: View {
         }
     }
 
-    private struct SetupSheet: Identifiable {
+    struct SetupSheet: Identifiable {
         let id = UUID()
         let startAt: LidSetupView.Step
+    }
+
+    /// The sheet's id is its approval-poll token (R46): this body re-renders while setup runs (`lid.helper`,
+    /// `engine.lid`), and every rebuilt view must hand `watchApproval` the token its `.onAppear` registered.
+    static func setupView(for sheet: SetupSheet, onClose: @escaping () -> Void) -> LidSetupView {
+        LidSetupView(requestedLid: false, startAt: sheet.startAt, approvalWatcher: sheet.id, onClose: onClose)
     }
 }
 

@@ -83,7 +83,7 @@ struct NarratorTests {
         let bannedPhrases = ["you should", "go to bed", "get some sleep", "you need sleep"]
         for kind in CopyKind.allCases {
             for template in Copy.pool(kind, p) {
-                let line = Narrator.fill(template, ["name": "ffmpeg", "floor": "20", "cap": "1 h", "duration": "for 1 hour"])
+                let line = Narrator.fill(template, ["name": "ffmpeg", "floor": "20", "cap": "1 h"])   // no {duration} (R51)
                 #expect(!line.contains("{") && !line.contains("}"), "unfilled placeholder: \(line)")
                 #expect(line.count <= 95, "too long for two quip lines: \(line)")
                 #expect(line.last.map { ".!?)\"…".contains($0) } ?? false, "ends without punctuation: \(line)")

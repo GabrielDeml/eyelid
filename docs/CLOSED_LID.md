@@ -290,7 +290,7 @@ env:  PATH=/usr/bin:/bin:/usr/sbin:/sbin  M=<lid marker path>  P=<app pid>
 parent: close(fds[0]); keep fds[1]; DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit)
 ```
 
-- `/bin/bash` explicitly (`read -t` and the trap need it). Heartbeat `"h\n"` every 10 s; EOF, 45 s of silence or TERM/HUP/INT → reset, then reset **again 6 s later**: a `sudo -n … 1` still in flight when the app died (crash or quit timeout mid-engage; the `sudo` child outlives the app) can land after the first reset but not after the second (6 s > the 5 s spawn timeout). Disarm = reset, read back 0, write `"disarm\n"`, close. `abandon()` = close **without** disarm, so the watchdog retries. After its second reset reads back 0, the watchdog deletes the lid marker if the marker still names the app that armed it (`$P`): a stale marker would make the next launch treat a later foreign flag as ours and clear it, and a newer instance's marker is never touched.
+- `/bin/bash` explicitly (`read -t` and the trap need it). Heartbeat `"h\n"` every 10 s; EOF, 45 s of silence or TERM/HUP/INT → reset, then reset **again 6 s later**: a `sudo -n … 1` still in flight when the app died (crash or quit timeout mid-engage; the `sudo` child outlives the app) can land after the first reset but not after the second (6 s > the 5 s spawn timeout). Disarm = reset, read back 0, write `"disarm\n"`, close. `abandon()` = close **without** disarm, so the watchdog retries. After its second reset reads back 0, the watchdog renames the lid marker to `lid-engaged.recovered` if the marker still names the app that armed it (`$P`): a stale marker would make the next launch treat a later foreign flag as ours and clear it, and a newer instance's marker is never touched. The renamed file never makes a flag ours; it only gives the next launch its recovery banner (§4.2).
 - **Engage order:** arm the new watchdog; **disarm** (never abandon) a previous one, and `SIGKILL` any abandoned watchdog still waiting on its delayed reset (only while it hasn't been reaped, so the pid is still its own); then `sudo -n … 1`. Afterwards, if this watchdog is no longer the armed one or a heartbeat write fails (the quit timeout abandoned it meanwhile), run `sudo -n … 0` and fail the engage (`-1`). If `sudo -n … 1` itself timed out (`-1`; the root `pmset` child can outlive the killed `sudo`), **abandon** the new watchdog instead of leaving it for the release to disarm, so its reset / 6 s / reset covers a set that lands late. Watchdog exits while engaged → `.error(.safetyNetLost)` (or `.stuck`). `posix_spawn` fails → refuse to engage (`.commandFailed(-1)`).
 - **fd hygiene:** the pipe and every child process (watchdog, `sudo`, `pmset`, `osascript`) are created only on `LidReconciler`.
 
@@ -324,7 +324,7 @@ L=com.gdeml.insomnia.safety
 | Spoofed helper on the Mach name | Only root can register in the system domain; the app checks the helper's signature too. | None known |
 | Helper killed or disabled while engaged | `SIGTERM` → reset. Crash or `SIGKILL` → `KeepAlive` restart → restart reset (§2.5). Login Items switch off → launchd stops it (`SIGTERM`); app sees `.requiresApproval`. | Between a `SIGKILL` and the restart (≈ launchd throttle, ≤ 10 s) the flag stays 1. |
 | Foreign setter (Amphetamine, admin, MDM) | Never taken over at engage (`.foreignFlag`) or cleared, except by the boot reset and the 10% backstop. | None (by design, Decision 23). |
-| A web page opens an `insomnia://` link | **URL holds never get lid** (`lid` param ignored and logged). `insomnia://sleep` asks before sleeping. | A page can keep the Mac awake with the lid open. Low impact. |
+| A web page opens an `insomnia://` link | **URL holds never get lid** (`lid` param ignored and logged). `insomnia://sleep` is refused (and logged) while a command-line client, a rule or a While… watch holds the Mac awake, so a page can't cut work in progress short; with only a manual hold or none it sleeps at once, never with a dialog (Shortcuts and scripts use it unattended). | A page can keep the Mac awake with the lid open. Low impact. |
 | App deleted without Remove | `make uninstall` / `--unregister-helper` first (§2.6, §9). | The BTM record stays and points at `/Applications/Insomnia.app`; the next bundle placed there with our team and identifier runs at boot without a new approval. A flag left at 1 at that moment gets no boot reset: `sudo pmset -a disablesleep 0` (§9). |
 | Ad-hoc rebuild strands a registered helper | build.sh refuses; the sudoers backend shows `.leftoverHelper` and never installs over it (§2.1). | None known. |
 
@@ -355,7 +355,7 @@ Layer 1 detail: Quit, logout and shutdown all arrive as a quit Apple Event: `app
 
 ### 4.2 Marker file
 
-- `~/Library/Application Support/Insomnia/lid-engaged`: our PID and an ISO date. Written (with `fsync`) **before** engaging; deleted after a verified release (sudoers: also by the watchdog after its verified reset, if the marker still has the app's pid). At launch, its presence means the last run ended uncleanly → recovery banner.
+- `~/Library/Application Support/Insomnia/lid-engaged`: our PID and an ISO date. Written (with `fsync`) **before** engaging; deleted after a verified release (sudoers: renamed to `lid-engaged.recovered` by the watchdog after its verified reset, if the marker still has the app's pid). At launch, its presence means the last run ended uncleanly → recovery banner. Without a marker, a `lid-engaged.recovered` left by the watchdog is deleted and also gives the recovery banner (and the `recovered` notification), without reading or touching the flag, so both backends report a crash the same way. Writing or deleting the marker deletes it too.
 - **Foreign flag:** `SleepDisabled == true` and not ours (helper: `status().ownsFlag == false`; sudoers: no marker) means something else set it. The app **never touches it**; Diagnostics says "set by something else", and `foreign-flag` posts once per boot.
 
 ### 4.3 Sequences (all on `actor LidReconciler`, one at a time)
@@ -493,7 +493,7 @@ Sudoers fallback (`INSOMNIA_SIGN_IDENTITY=-` build): T1, T3, T4, T7, T10 as abov
 
 ## 9. Uninstall by hand
 
-`make uninstall` runs these steps in this order, and stops before removing anything if the app won't quit or the flag won't read 0. It resets the flag only when the lid marker exists (otherwise it isn't ours, Decision 23), and deletes the marker only after a verified 0.
+`make uninstall` runs these steps in this order, and stops before removing anything if a running copy won't quit (or `scripts/quit-running.sh` can't tell whether one is running) or the flag won't read 0. It resets the flag only when the lid marker exists (otherwise it isn't ours, Decision 23), and deletes the marker only after a verified 0.
 
 ```sh
 /Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper   # FIRST: quits the app (releases the flag), unregisters, confirms

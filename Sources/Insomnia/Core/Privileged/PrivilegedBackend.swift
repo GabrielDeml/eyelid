@@ -57,12 +57,22 @@ struct LidMarker: Sendable {
 
     var exists: Bool { FileManager.default.fileExists(atPath: url.path) }
 
+    /// Sudoers only: the watchdog renames the marker to this after its verified reset (Watchdog.script). It never
+    /// makes a flag ours; launch recovery only turns it into the recovery banner (R90).
+    var breadcrumb: URL { URL(fileURLWithPath: url.path + ".recovered") }
+
+    /// Deletes the breadcrumb; true if there was one.
+    func takeBreadcrumb() -> Bool {
+        (try? FileManager.default.removeItem(at: breadcrumb)) != nil
+    }
+
     func write() -> Bool {
         let dir = url.deletingLastPathComponent()
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
         } catch { return false }
+        _ = takeBreadcrumb()   // a new engagement: an earlier watchdog's recovery is old news
         let text = "\(getpid()) \(ISO8601DateFormatter().string(from: Date()))\n"
         let fd = open(url.path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { return false }
@@ -74,6 +84,7 @@ struct LidMarker: Sendable {
 
     func delete() {
         try? FileManager.default.removeItem(at: url)
+        _ = takeBreadcrumb()   // a clean release while still running: nothing to report at the next launch
     }
 }
 

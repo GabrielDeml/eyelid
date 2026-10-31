@@ -34,7 +34,9 @@ private let table: [Proc] = [
     Proc(pid: 52604, name: "chrome-native-h", path: "/Applications/Claude.app/Contents/Helpers/chrome-native-host",
          argv: ["/Applications/Claude.app/Contents/Helpers/chrome-native-host", "chrome-extension://abc/"]),
     // `python3 train.py` (Homebrew) and `/usr/bin/python3 train.py` (CLT) re-exec into the framework's Python.app.
-    Proc(pid: 33189, name: "Python", path: python314, argv: [python314, "-u", "train.py"]),
+    // R23 follow-up: this one has a matplotlib (macosx backend) window open, so it is also a regular app named
+    // "Python"; python3 and train.py must still find it.
+    Proc(pid: 33189, name: "Python", path: python314, argv: [python314, "-u", "train.py"], isApp: true),
     Proc(pid: 33190, name: "Python", path: pythonCLT, argv: [pythonCLT, "train.py"]),
     // uv venv: the real binary is python3.11, argv[0] is the venv's `python`.
     Proc(pid: 10238, name: "python3.11", path: "/Users/x/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11",
@@ -66,8 +68,11 @@ private func matched(_ query: String, in procs: [Proc] = table) -> [Int32] {
             hits[key, default: []].append(ProcessHit(pid: p.pid, uid: p.uid))
         }
     }
-    let apps = Set(procs.filter(\.isApp).map(\.pid))
-    return (ProcessMatcher.excludingApps(hits, appPIDs: apps)[key] ?? []).map(\.pid).sorted()
+    let apps = WatchMonitor.appNames(procs.filter(\.isApp).map {
+        RunningAppInfo(bundleID: "app.\($0.pid)", name: $0.name, pid: $0.pid, isRegular: true,
+                       executable: $0.path.map { URL(fileURLWithPath: $0).lastPathComponent })
+    })
+    return (ProcessMatcher.excludingApps(hits, apps: apps)[key] ?? []).map(\.pid).sorted()
 }
 
 @Suite("Fix C: process matching table")

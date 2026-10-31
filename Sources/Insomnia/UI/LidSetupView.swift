@@ -17,7 +17,8 @@ struct LidSetupView: View {
     /// The lid switch asked for lid mode: switch the setting on once setup completes. Every other entry point
     /// (welcome card, Dock, Lid & Safety) only sets up: finishing never starts a session the user didn't ask for.
     let requestedLid: Bool
-    /// This view's token for ClosedLidController.watchApproval (one per window or sheet).
+    /// This view's token for ClosedLidController.watchApproval (one per window or sheet). The presenter owns it and
+    /// passes the same one every time the view value is rebuilt (R46), so no default here.
     let approvalWatcher: UUID
     let onClose: () -> Void
 
@@ -34,7 +35,7 @@ struct LidSetupView: View {
     private var power: PowerMonitor { PowerMonitor.shared }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(requestedLid: Bool, startAt: Step? = nil, approvalWatcher: UUID = UUID(), onClose: @escaping () -> Void) {
+    init(requestedLid: Bool, startAt: Step? = nil, approvalWatcher: UUID, onClose: @escaping () -> Void) {
         self.requestedLid = requestedLid
         self.approvalWatcher = approvalWatcher
         self.onClose = onClose
@@ -472,6 +473,28 @@ enum LidSetupCopy {
         case .unregisterIncomplete:
             return SetupProblem(message: "macOS didn't remove the helper. Switch Insomnia off in System Settings ▸ General ▸ Login Items & Extensions, or run make uninstall.")
         }
+    }
+}
+
+/// "Reset with password…" from the panel's H′ link, the Dock menu and the lid-stuck notification (R42). None of them
+/// has an inline row like Lid & Safety, so a failed reset posts the lid-stuck notification again, saying what went
+/// wrong; its Reset… action tries again. A cancelled prompt says nothing.
+@MainActor
+enum LidResetAction {
+    @discardableResult
+    static func run(reset: @escaping @MainActor () async -> LidSetupError? = { await ClosedLidController.shared.resetWithPassword() },
+                    post: @escaping @MainActor (NotificationID, String, String) -> Void = { Notifier.post($0, title: $1, body: $2) })
+        -> Task<Void, Never> {
+        Task { @MainActor in
+            guard let error = await reset() else { return }
+            let notice = failureNotice(error)
+            post(.lidStuck, notice.title, notice.body)
+        }
+    }
+
+    static func failureNotice(_ error: LidSetupError) -> (title: String, body: String) {
+        ("Lid mode is still stuck on",
+         "The reset didn't work: \(LidSetupCopy.problem(for: error).message) Your Mac won't sleep until it's reset.")
     }
 }
 
