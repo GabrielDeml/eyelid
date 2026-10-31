@@ -463,7 +463,8 @@ final class AppRouter {
     var openSettingsHandler: ((SettingsTab) -> Void)?
     var showWhyAwakeHandler: (() -> Void)?
     var showAboutHandler: (() -> Void)?
-    var startLidSetupHandler: (() -> Void)?
+    /// `requestedLid`: true only from the lid switch itself (finishing setup then turns lid mode on).
+    var startLidSetupHandler: ((_ requestedLid: Bool) -> Void)?
 
     func showPanel() { showPanelHandler?() }
     func closePanel() { closePanelHandler?() }
@@ -474,7 +475,7 @@ final class AppRouter {
     }
     func showWhyAwake() { showWhyAwakeHandler?() }
     func showAbout() { showAboutHandler?() }
-    func startLidSetup() { startLidSetupHandler?() }
+    func startLidSetup(requestedLid: Bool = false) { startLidSetupHandler?(requestedLid) }
     /// Terminates from the run loop, never from inside a main-queue block (a dispatch source, a Task): quitting answers
     /// `.terminateLater` and replies from a main-actor Task, which can't run while one of the main queue's own blocks
     /// is still on the stack.

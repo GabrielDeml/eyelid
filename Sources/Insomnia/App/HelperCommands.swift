@@ -21,16 +21,17 @@ enum HelperCommands {
     }
 
     /// `--unregister-helper`: asks a running GUI instance to quit (its Release runs) and waits up to 5 s, then
-    /// unregister(), and confirms `.notRegistered` / `.notFound`. Exit 0 = nothing registered any more.
+    /// unregister(), and confirms `.notRegistered` / `.notFound`. Exit 0 = nothing registered any more. The quit comes
+    /// first even when no helper is registered: a sudoers (unsigned) setup must release before its rule is removed.
     static func unregister() -> Int32 {
+        quitRunningApp(timeout: 5)
+
         let service = SMAppService.daemon(plistName: HelperInfo.plistName)
         guard isRegistered(service.status) else {
             print("No lid-mode helper is registered.")
             forgetRegistration()
             return 0
         }
-
-        quitRunningApp(timeout: 5)
 
         var failure: String?
         let done = Box()

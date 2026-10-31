@@ -68,6 +68,9 @@ final class ClosedLidController: LidControlling {
     @ObservationIgnored private var heartbeatInFlight = false
     @ObservationIgnored private var activity: NSObjectProtocol?
     @ObservationIgnored private var approvalTask: Task<Void, Never>?
+    /// One token per visible approval step (a sheet in Settings and the setup window can both be up).
+    @ObservationIgnored private var approvalWatchers: Set<UUID> = []
+    @ObservationIgnored private var resettingWithPassword = false
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var lastLidClosed = false
     @ObservationIgnored private var lastExternalDisplays = 0
@@ -141,6 +144,7 @@ final class ClosedLidController: LidControlling {
 
     func releaseForQuit(timeout: Duration) async {
         quitting = true
+        approvalWatchers.removeAll()
         stopApprovalWatch()
         guard status != .off || reconcilerMarkerExists else { return }
         let job = enqueue { await self.converge() }
@@ -185,9 +189,11 @@ final class ClosedLidController: LidControlling {
         SMAppService.openSystemSettingsLoginItems()
     }
 
-    /// While the approval step is visible: re-check the helper status every 1 s; stops itself on `.installed`.
-    func watchApproval(_ on: Bool) {
-        if !on { stopApprovalWatch(); return }
+    /// While an approval step is visible: re-check the helper status every 1 s; stops itself on `.installed`. Each
+    /// view passes its own token, so closing one of two setup views doesn't stop the poll the other still needs.
+    func watchApproval(_ on: Bool, by watcher: UUID) {
+        if on { approvalWatchers.insert(watcher) } else { approvalWatchers.remove(watcher) }
+        guard !approvalWatchers.isEmpty else { stopApprovalWatch(); return }
         guard approvalTask == nil else { return }
         isWatchingApproval = true
         approvalTask = Task { [weak self] in
@@ -197,6 +203,8 @@ final class ClosedLidController: LidControlling {
                 if self.helper == .installed { break }
                 try? await Task.sleep(for: .seconds(1))
             }
+            // Cancelled: a replacement may already own `approvalTask`. Only a poll that ended by itself clears it.
+            guard !Task.isCancelled else { return }
             self?.approvalTask = nil
             self?.isWatchingApproval = false
         }
@@ -208,11 +216,11 @@ final class ClosedLidController: LidControlling {
         isWatchingApproval = false
     }
 
-    /// Release → backend.uninstall → delete marker → Settings.closedLidMode = false.
+    /// Release → backend.uninstall → delete marker → Settings.closedLidMode = false. A cancelled or failed removal
+    /// changes nothing: lid mode re-engages if it is still wanted.
     func uninstall() async throws(LidSetupError) {
         let error: LidSetupError? = await serialized {
             self.removing = true
-            defer { self.removing = false }
             await self.converge()
             let err = await self.reconciler.uninstall(resetFlag: self.reconcilerMarkerExists)
             if err == nil {
@@ -225,6 +233,8 @@ final class ClosedLidController: LidControlling {
                 }
             }
             await self.refreshHelperNow()
+            self.removing = false
+            if err != nil { await self.converge() }
             return err
         }
         lastSetupError = error
@@ -248,16 +258,30 @@ final class ClosedLidController: LidControlling {
         enqueue { await self.converge() }
     }
 
-    /// From `.stuck`: admin prompt running `pmset -a disablesleep 0`, then read back.
-    func resetWithPassword() async {
-        await serialized {
-            let err = await self.reconciler.resetWithPassword()
-            self.lastSetupError = err == .cancelled ? nil : err
-            if await self.reconciler.flag() == false {
-                self.reconciler.marker.delete()
-                self.setStatus(.off)
+    /// From `.stuck`: admin prompt running `pmset -a disablesleep 0` (none if the flag already reads 0), read back,
+    /// then converge again (lid mode may still be wanted). Returns the failure for inline copy: nil on success, on a
+    /// cancelled prompt, outside `.stuck`, or while another reset's prompt is already up (repeated clicks).
+    @discardableResult
+    func resetWithPassword() async -> LidSetupError? {
+        guard !resettingWithPassword else { return nil }
+        resettingWithPassword = true
+        defer { resettingWithPassword = false }
+        let error: LidSetupError? = await serialized {
+            guard self.status == .stuck else { return nil }
+            var err: LidSetupError?
+            if await self.reconciler.flag() != false {
+                err = await self.reconciler.resetWithPassword()
             }
+            guard await self.reconciler.flag() == false else {
+                return err ?? .scriptFailed(code: 0, detail: "SleepDisabled still reads 1 after the reset")
+            }
+            self.reconciler.marker.delete()
+            self.setStatus(.off)
+            await self.converge()
+            return nil
         }
+        lastSetupError = error == .cancelled ? nil : error
+        return error == .cancelled ? nil : error
     }
 
     // MARK: - Convergence
@@ -358,8 +382,9 @@ final class ClosedLidController: LidControlling {
         }
     }
 
-    /// Tests drive the 10 s heartbeat by hand (no timers without `liveSystem`).
+    /// Tests drive the 10 s heartbeat and the stuck re-check by hand (no timers without `liveSystem`).
     func heartbeatForTesting() { heartbeatTick() }
+    func stuckCheckForTesting() { stuckCheck() }
 
     private func heartbeatTick() {
         guard isEngaged, !heartbeatInFlight else { return }
@@ -430,8 +455,9 @@ final class ClosedLidController: LidControlling {
             foreignSleepDisabled = foreign
             onChange?()
         }
-        // "Another app already turned sleep off" has no Retry link (UX §5): once that app lets go, try again by itself.
-        if status == .error(.foreignFlag), flag == false, wantsEngaged {
+        // "Another app already turned sleep off" / another user's lid mode have no Retry link (UX §5): once the flag
+        // is 0 again, try again by itself.
+        if status == .error(.foreignFlag) || status == .error(.otherUser), flag == false, wantsEngaged {
             retryRequested = true
             enqueue { await self.converge() }
         }
@@ -505,7 +531,7 @@ final class ClosedLidController: LidControlling {
     private func observeSystem() {
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: .insomniaPowerDidChange, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.powerChanged() }
+            MainActor.assumeIsolated { _ = self?.powerChanged() }
         })
         let ws = NSWorkspace.shared.notificationCenter
         observers.append(ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -524,10 +550,19 @@ final class ClosedLidController: LidControlling {
                 Task { await self.refreshHelper() }
             }
         })
+        // Fast user switching: back in our session, another user's lid mode may have let go (`.error(.otherUser)`).
+        observers.append(ws.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                Task { await self.refreshHelper() }
+            }
+        })
     }
 
-    /// Lid, displays, power source and heat, while engaged (§1 side effects 3–4, §7 reopen report).
-    func powerChanged() {
+    /// Lid, displays, power source and heat, while engaged (§1 side effects 3–4, §7 reopen report). Returns the
+    /// `displaysleepnow` task when it started one (tests await it).
+    @discardableResult
+    func powerChanged() -> Task<Void, Never>? {
         let closed = power.isLidClosed
         let ext = power.externalDisplayCount
         let onAC = power.isOnAC
@@ -541,17 +576,19 @@ final class ClosedLidController: LidControlling {
             closedRun = run
         }
         if !closed && lastLidClosed { finishClosedRun() }
-        guard isEngaged else { return }
+        guard isEngaged else { return nil }
         if closed != lastLidClosed {
             setStatus(.engaged(lidClosed: closed))
             if closed { beginClosedRun() }
         }
         // The lid just closed, or the last external display went away with the lid shut: blank the internal panel.
         // Never with an external display attached (it would blank that too).
+        var blank: Task<Void, Never>?
         if closed && ext == 0 && (!lastLidClosed || lastExternalDisplays > 0) {
-            Task { await reconciler.run(.displaySleepNow) }
+            blank = Task { await reconciler.run(.displaySleepNow) }
         }
         if onAC != lastOnAC { driftCheck() }
+        return blank
     }
 
     private func beginClosedRun() {

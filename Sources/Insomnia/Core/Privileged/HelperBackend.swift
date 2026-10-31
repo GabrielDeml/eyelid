@@ -210,15 +210,21 @@ final class HelperBackend: PrivilegedBackend {
         let result = await call(connection, timeout: 5, fallback: Int32(-1)) { helper, done in
             helper.heartbeat { done($0) }
         }
-        switch result {
+        return Self.heartbeatError(result)
+    }
+
+    /// Pure (unit-tested): a heartbeat reply → nil (still engaged), `.overridden`, or `.safetyNetLost` for anything
+    /// else (no answer, a dropped session's reason, a backstop drop).
+    static func heartbeatError(_ rc: Int32) -> LidError? {
+        switch rc {
         case HelperResult.ok.rawValue: return nil
         case HelperResult.overridden.rawValue: return .overridden
         default: return .safetyNetLost
         }
     }
 
-    func ownsFlag() async -> Bool {
-        await queryStatus()?.ownsFlag ?? false
+    func ownsFlag() async -> Bool? {
+        await queryStatus()?.ownsFlag
     }
 
     func resetWithPassword() async throws(LidSetupError) {

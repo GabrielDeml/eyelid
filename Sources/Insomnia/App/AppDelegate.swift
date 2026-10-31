@@ -71,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // 6. Router.
         AppRouter.shared.showAboutHandler = { AboutWindowController.shared.show() }
         AppRouter.shared.openSettingsHandler = { SettingsWindowController.shared.show(tab: $0) }
-        AppRouter.shared.startLidSetupHandler = { LidSetupWindow.show(requestedLid: true) }
+        AppRouter.shared.startLidSetupHandler = { LidSetupWindow.show(requestedLid: $0) }
 
         // 7. Global hotkey; HotKeyManager re-registers itself when the hotKey* settings change.
         HotKeyManager.shared.bind(to: .shared) { [weak self] in

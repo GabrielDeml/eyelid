@@ -9,10 +9,16 @@ import InsomniaShared
 /// It resets twice, `resetSettle` apart: a `sudo -n pmset -a disablesleep 1` that was still in flight when the app
 /// died (crash or quit timeout mid-engage; the `sudo` child outlives us) can land after the first reset, never after
 /// the second. `resetSettle` is longer than the engage spawn timeout (5 s).
+///
+/// After the second reset reads back 0 it deletes the lid marker (`$M`), but only while the marker still names the
+/// app that armed it (`$P`, its pid): a stale marker would otherwise make the next launch treat a later, foreign
+/// `SleepDisabled = 1` as ours and clear it (Decision 23), and a newer instance's marker is never touched.
 final class Watchdog: Sendable {
     static let resetSettle = 6
     static let script = "r(){ /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0; sleep \(resetSettle); "
-        + "exec /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0; }; trap r TERM HUP INT; "
+        + "/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0 && /usr/sbin/ioreg -r -c IOPMrootDomain -d 1 "
+        + "| /usr/bin/grep -q '\"SleepDisabled\" = No' && [ -n \"$M\" ] && IFS=' ' read -r p _ < \"$M\" "
+        + "&& [ \"$p\" = \"$P\" ] && /bin/rm -f \"$M\"; exit 0; }; trap r TERM HUP INT; "
         + "while IFS= read -r -t \(Int(HelperInfo.heartbeatTimeout)) l; do [ \"$l\" = disarm ] && exit 0; done; r"
 
     enum ArmError: Error { case pipe(Int32), spawn(Int32) }
@@ -42,7 +48,10 @@ final class Watchdog: Sendable {
     }
 
     /// `onExit` fires once, on a background queue, if the watchdog exits while armed (not after disarm/abandon).
-    static func arm(onExit: @escaping @Sendable () -> Void) throws -> Watchdog {
+    /// `environment` is added to the fixed PATH (`M` = the lid marker's path, `P` = our pid). `script` is replaced only
+    /// by tests, which run the real script with harmless stand-ins for `sudo` and `ioreg`.
+    static func arm(script: String = script, environment: [String: String] = [:],
+                    onExit: @escaping @Sendable () -> Void) throws -> Watchdog {
         var fds: [Int32] = [-1, -1]
         guard pipe(&fds) == 0 else { throw ArmError.pipe(errno) }
         _ = fcntl(fds[1], F_SETFD, FD_CLOEXEC)
@@ -62,7 +71,7 @@ final class Watchdog: Sendable {
 
         var pid: pid_t = 0
         let argv = ["bash", "-c", script]
-        let env = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin"]
+        let env = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin"] + environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
         let rc = Spawn.withCStrings(argv) { a in
             Spawn.withCStrings(env) { e in posix_spawn(&pid, "/bin/bash", &actions, &attr, a, e) }
         }

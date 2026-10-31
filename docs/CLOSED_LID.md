@@ -207,11 +207,11 @@ Re-check at launch, after setup/removal, on `didBecomeActive`, when Lid & Safety
 
 **Repair (`.unreachable`):** the same as upgrade.
 
-**Remove (`uninstall()`):** (1) Release (§4.3); (2) `unregister()`; launchd sends `SIGTERM`, and the helper resets an owned flag anyway; (3) succeed only if the status is now `.notRegistered` or `.notFound`, else `LidSetupError.unregisterIncomplete`; (4) clear `helperRegisteredCDHash`, delete the marker, `Settings.closedLidMode = false`. Leftover sudoers artefacts → offer **Remove old setup…**
+**Remove (`uninstall()`):** (1) Release (§4.3); (2) `unregister()`; launchd sends `SIGTERM`, and the helper resets an owned flag anyway; (3) succeed only if the status is now `.notRegistered` or `.notFound`, else `LidSetupError.unregisterIncomplete`; (4) clear `helperRegisteredCDHash`, delete the marker, `Settings.closedLidMode = false`. A cancelled or failed removal changes nothing: the controller converges again, so lid mode re-engages if it is still wanted. Leftover sudoers artefacts → offer **Remove old setup…**
 
 **Headless (`Insomnia` argv, no GUI; `ARCHITECTURE.md` App shell):**
 - `--helper-status`: prints the `SMAppService` status; exit 0 if registered (`.enabled` / `.requiresApproval`), 1 if not. Used by build.sh.
-- `--unregister-helper`: asks a running GUI instance to quit (its Release runs) and waits up to 5 s, then `unregister()` and confirms `.notRegistered` / `.notFound`; exit 0 or 1. The first step of `make uninstall` and §9.
+- `--unregister-helper`: asks a running GUI instance to quit (its Release runs) and waits up to 5 s, also when no helper is registered (a sudoers setup must release before its rule goes), then `unregister()` and confirms `.notRegistered` / `.notFound`; exit 0 or 1. Part of `make uninstall` and the first step of §9.
 - `launchctl bootout system/com.gdeml.Insomnia.helper` alone is **temporary**: BTM bootstraps the job again at boot while a bundle is at the path. `sfltool resetbtm` resets every app's entries.
 
 ### 2.7 Fallback: sudoers backend (ad-hoc / unsigned builds)
@@ -225,12 +225,12 @@ Unchanged from the original design, now only for builds made ad hoc on purpose (
 #<uid> ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1
 ```
 
-**Safety daemon** (boot reset + 10% backstop, every 60 s, whoever set the flag). `/Library/LaunchDaemons/com.gdeml.insomnia.safety.plist`, `root:wheel`, `0644`; `Label` `com.gdeml.insomnia.safety`, `RunAtLoad`, `StartInterval 60`, `ProgramArguments` = `/bin/sh`, `-c`, this script (it contains `&&`, so the plist builder XML-escapes it; a test round-trips it):
+**Safety daemon** (boot reset + 10% backstop, every 60 s, whoever set the flag). The first run after a boot resets **without reading the flag** (powerd may not have published `SleepDisabled` yet, and an absent key must never read as 0) and touches the boot marker only after the reset succeeded, so a failed reset is retried 60 s later. After that, only a verified `Yes` reaches the backstop. `/Library/LaunchDaemons/com.gdeml.insomnia.safety.plist`, `root:wheel`, `0644`; `Label` `com.gdeml.insomnia.safety`, `RunAtLoad`, `StartInterval 60`, `ProgramArguments` = `/bin/sh`, `-c`, this script (it contains `&&`, so the plist builder XML-escapes it; a test round-trips it):
 
 ```sh
 B=/var/run/com.gdeml.insomnia.booted
-/usr/sbin/ioreg -r -c IOPMrootDomain -d 1 | /usr/bin/grep -q '"SleepDisabled" = Yes' || { /usr/bin/touch $B; exit 0; }
-if [ ! -e $B ]; then /usr/bin/touch $B; /usr/bin/pmset -a disablesleep 0; exit 0; fi
+if [ ! -e $B ]; then /usr/bin/pmset -a disablesleep 0 && /usr/bin/touch $B; exit 0; fi
+/usr/sbin/ioreg -r -c IOPMrootDomain -d 1 | /usr/bin/grep -q '"SleepDisabled" = Yes' || exit 0
 b=$(/usr/sbin/ioreg -r -c AppleSmartBattery -d 1)
 case $b in *'"ExternalConnected" = No'*) ;; *) exit 0 ;; esac
 c=$(echo "$b" | /usr/bin/sed -n 's/^ *"CurrentCapacity" = \([0-9]*\)$/\1/p')
@@ -285,15 +285,16 @@ Why it's shaped this way: never edit `/etc/sudoers` (abort on a missing `#includ
 pipe(fds); fcntl(fds[1], F_SETFD, FD_CLOEXEC); fcntl(fds[1], F_SETNOSIGPIPE, 1)
 file actions: adddup2(fds[0] → 0); addopen(1 and 2, "/dev/null", O_WRONLY)
 attr flags:   POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT
-argv: /bin/bash -c 'r(){ /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0; sleep 6; exec /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0; }; trap r TERM HUP INT; while IFS= read -r -t 45 l; do [ "$l" = disarm ] && exit 0; done; r'
+argv: /bin/bash -c 'r(){ /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0; sleep 6; /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0 && /usr/sbin/ioreg -r -c IOPMrootDomain -d 1 | /usr/bin/grep -q '"SleepDisabled" = No' && [ -n "$M" ] && IFS=' ' read -r p _ < "$M" && [ "$p" = "$P" ] && /bin/rm -f "$M"; exit 0; }; trap r TERM HUP INT; while IFS= read -r -t 45 l; do [ "$l" = disarm ] && exit 0; done; r'
+env:  PATH=/usr/bin:/bin:/usr/sbin:/sbin  M=<lid marker path>  P=<app pid>
 parent: close(fds[0]); keep fds[1]; DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit)
 ```
 
-- `/bin/bash` explicitly (`read -t` and the trap need it). Heartbeat `"h\n"` every 10 s; EOF, 45 s of silence or TERM/HUP/INT → reset, then reset **again 6 s later**: a `sudo -n … 1` still in flight when the app died (crash or quit timeout mid-engage; the `sudo` child outlives the app) can land after the first reset but not after the second (6 s > the 5 s spawn timeout). Disarm = reset, read back 0, write `"disarm\n"`, close. `abandon()` = close **without** disarm, so the watchdog retries.
-- **Engage order:** arm the new watchdog; **disarm** (never abandon) a previous one, and `SIGKILL` any abandoned watchdog still waiting on its delayed reset (only while it hasn't been reaped, so the pid is still its own); then `sudo -n … 1`. Afterwards, if this watchdog is no longer the armed one or a heartbeat write fails (the quit timeout abandoned it meanwhile), run `sudo -n … 0` and fail the engage (`-1`). Watchdog exits while engaged → `.error(.safetyNetLost)` (or `.stuck`). `posix_spawn` fails → refuse to engage (`.commandFailed(-1)`).
+- `/bin/bash` explicitly (`read -t` and the trap need it). Heartbeat `"h\n"` every 10 s; EOF, 45 s of silence or TERM/HUP/INT → reset, then reset **again 6 s later**: a `sudo -n … 1` still in flight when the app died (crash or quit timeout mid-engage; the `sudo` child outlives the app) can land after the first reset but not after the second (6 s > the 5 s spawn timeout). Disarm = reset, read back 0, write `"disarm\n"`, close. `abandon()` = close **without** disarm, so the watchdog retries. After its second reset reads back 0, the watchdog deletes the lid marker if the marker still names the app that armed it (`$P`): a stale marker would make the next launch treat a later foreign flag as ours and clear it, and a newer instance's marker is never touched.
+- **Engage order:** arm the new watchdog; **disarm** (never abandon) a previous one, and `SIGKILL` any abandoned watchdog still waiting on its delayed reset (only while it hasn't been reaped, so the pid is still its own); then `sudo -n … 1`. Afterwards, if this watchdog is no longer the armed one or a heartbeat write fails (the quit timeout abandoned it meanwhile), run `sudo -n … 0` and fail the engage (`-1`). If `sudo -n … 1` itself timed out (`-1`; the root `pmset` child can outlive the killed `sudo`), **abandon** the new watchdog instead of leaving it for the release to disarm, so its reset / 6 s / reset covers a set that lands late. Watchdog exits while engaged → `.error(.safetyNetLost)` (or `.stuck`). `posix_spawn` fails → refuse to engage (`.commandFailed(-1)`).
 - **fd hygiene:** the pipe and every child process (watchdog, `sudo`, `pmset`, `osascript`) are created only on `LidReconciler`.
 
-**Status:** rule file present; rule **works** (only while the flag is 0: `sudo -n /usr/bin/pmset -a disablesleep 0` exits 0, a real no-op; while 1, keep the last result); daemon file present; daemon enabled (`SMAppService.statusForLegacyPlist(at:) == .enabled`, cross-checked with `launchctl print-disabled system`, §10 #6). All four → `.installed`; both present but daemon off → `.daemonDisabled` (refuse to engage); one missing or rule broken → `.partial` (Repair re-runs install); neither → `.notInstalled`.
+**Status:** rule file present; rule **works** (`sudo -n -l /usr/bin/pmset -a disablesleep 0` exits 0: list mode asks sudoers without running anything, so a status refresh can never clear a foreign flag); daemon file present; daemon enabled (`SMAppService.statusForLegacyPlist(at:) == .enabled`, cross-checked with `launchctl print-disabled system`, §10 #6). All four → `.installed`; both present but daemon off → `.daemonDisabled` (refuse to engage); one missing or rule broken → `.partial` (Repair re-runs install); neither → `.notInstalled`.
 
 **Uninstall** (one prompt; also **Remove old setup…**). `<reset>` is `1` only if our marker exists, so a foreign flag is never touched:
 
@@ -354,7 +355,7 @@ Layer 1 detail: Quit, logout and shutdown all arrive as a quit Apple Event: `app
 
 ### 4.2 Marker file
 
-- `~/Library/Application Support/Insomnia/lid-engaged`: our PID and an ISO date. Written (with `fsync`) **before** engaging; deleted after a verified release. At launch, its presence means the last run ended uncleanly → recovery banner.
+- `~/Library/Application Support/Insomnia/lid-engaged`: our PID and an ISO date. Written (with `fsync`) **before** engaging; deleted after a verified release (sudoers: also by the watchdog after its verified reset, if the marker still has the app's pid). At launch, its presence means the last run ended uncleanly → recovery banner.
 - **Foreign flag:** `SleepDisabled == true` and not ours (helper: `status().ownsFlag == false`; sudoers: no marker) means something else set it. The app **never touches it**; Diagnostics says "set by something else", and `foreign-flag` posts once per boot.
 
 ### 4.3 Sequences (all on `actor LidReconciler`, one at a time)
@@ -438,9 +439,10 @@ Guard notifications fire once per engagement per guard, always on and silent (`U
 | `.latched` | lid opens or user action | `.engaging` (if desired) |
 | `.engaged` | safety net lost / drift sees 0 | `.error(.safetyNetLost)` / `.error(.overridden)` |
 | `.error` | Retry or user action | `.engaging` |
+| `.error(.foreignFlag)` / `.error(.otherUser)` | a status refresh reads the flag 0 again | `.engaging` (if desired) |
 | any | `wantLid` false | release → `.off` |
 | any release | reset fails and flag reads 1 | `.stuck` |
-| `.stuck` | Reset with password ✓, or flag reads 0 | `.off` (the 10 s stuck check then converges again, so a lid request that is still wanted re-engages) |
+| `.stuck` | Reset with password ✓ (no prompt if the flag already reads 0), or the 10 s stuck check reads 0 | `.off`, then converge again, so a lid request that is still wanted re-engages |
 
 - `.suspended`, `.latched`, `.error` (except `.foreignFlag` / `.otherUser`): the flag is **verified 0**, normal assertions keep running, and the Mac sleeps normally on lid close. `.error(.foreignFlag)` / `.error(.otherUser)`: the flag is 1 but not ours; say so, don't promise sleep.
 - `.stuck`: the flag is 1 and we can't clear it. Never say "sleeps normally" here.
@@ -491,16 +493,18 @@ Sudoers fallback (`INSOMNIA_SIGN_IDENTITY=-` build): T1, T3, T4, T7, T10 as abov
 
 ## 9. Uninstall by hand
 
+`make uninstall` runs these steps in this order, and stops before removing anything if the app won't quit or the flag won't read 0. It resets the flag only when the lid marker exists (otherwise it isn't ours, Decision 23), and deletes the marker only after a verified 0.
+
 ```sh
 /Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper   # FIRST: quits the app (releases the flag), unregisters, confirms
-sudo pmset -a disablesleep 0
-sudo rm -rf /Applications/Insomnia.app                                     # make uninstall does both steps
+sudo pmset -a disablesleep 0                                               # if ~/Library/Application Support/Insomnia/lid-engaged exists
+sudo rm -rf /Applications/Insomnia.app
 # bootout alone is temporary (BTM re-bootstraps at boot while a bundle is at the path).
 # If the app is already gone: switch Insomnia off in Login Items (sfltool resetbtm resets ALL apps' entries)
 # sudoers fallback leftovers, if any:
 sudo launchctl bootout system/com.gdeml.insomnia.safety 2>/dev/null || true
-sudo rm -f /Library/LaunchDaemons/com.gdeml.insomnia.safety.plist /etc/sudoers.d/zz_insomnia
-rm -f ~/Library/Application\ Support/Insomnia/lid-engaged
+sudo rm -f /Library/LaunchDaemons/com.gdeml.insomnia.safety.plist /etc/sudoers.d/zz_insomnia /var/run/com.gdeml.insomnia.booted
+rm -f ~/Library/Application\ Support/Insomnia/lid-engaged                # after `ioreg -r -c IOPMrootDomain -d 1` shows "SleepDisabled" = No
 ```
 
 ## 10. Open questions (manual QA before M2 ships)

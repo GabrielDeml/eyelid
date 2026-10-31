@@ -75,7 +75,11 @@ actor LidReconciler {
 
     func flag() -> Bool? { system.sleepDisabled() }
 
-    func ownsFlag() async -> Bool { await backend?.ownsFlag() ?? false }
+    /// false when unknown (no backend, or the helper doesn't answer).
+    func ownsFlag() async -> Bool {
+        guard let backend else { return false }
+        return await backend.ownsFlag() ?? false
+    }
 
     func run(_ command: LidSystemCommand) { system.run(command) }
 
@@ -85,7 +89,7 @@ actor LidReconciler {
         guard let backend else { return .error(.helperMissing) }
         // 2. A flag that is already 1 and not ours is never taken over (Decision 34). The helper decides this itself
         //    (and tells another user's flag, `.otherUser`, from a foreign one); sudoers asks the marker.
-        if backend.kind != .helper, system.sleepDisabled() == true, await !backend.ownsFlag() {
+        if backend.kind != .helper, system.sleepDisabled() == true, await backend.ownsFlag() != true {
             return .error(.foreignFlag)
         }
         // 3. Marker before anything is set, so a crash from here on is recovered at the next launch.
@@ -183,13 +187,7 @@ actor LidReconciler {
             marker.delete()   // layer 2 (helper / watchdog) already reset it
             return .recovered
         }
-        let ours: Bool?
-        if let helper = backend as? HelperBackend {
-            ours = await helper.queryStatus()?.ownsFlag   // nil: the helper doesn't answer
-        } else {
-            ours = await backend.ownsFlag()
-        }
-        switch ours {
+        switch await backend.ownsFlag() {   // nil: the helper doesn't answer
         case .some(true):
             return await release(sleepAfter: false) == .stuck ? .stuck : .recovered
         case .some(false):

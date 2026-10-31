@@ -27,8 +27,8 @@ protocol PrivilegedBackend: Sendable {
     func abandon() async
     /// Every 10 s while engaged. nil = fine; .overridden / .safetyNetLost = lid mode is gone (CLOSED_LID.md §4.1).
     func heartbeat() async -> LidError?
-    /// Flag ours? Helper: status().ownsFlag. Sudoers: the marker file exists.
-    func ownsFlag() async -> Bool
+    /// Flag ours? Helper: status().ownsFlag, nil when the helper doesn't answer. Sudoers: the marker file exists.
+    func ownsFlag() async -> Bool?
     /// .stuck recovery, both backends: osascript admin prompt running `/usr/bin/pmset -a disablesleep 0`.
     func resetWithPassword() async throws(LidSetupError)
 }

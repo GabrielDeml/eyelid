@@ -76,7 +76,7 @@ final class HelperDaemon: @unchecked Sendable {
     /// only after a verified 0 (resetOwnedFlag).
     private func startUpReset(context: String) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard flag.read() != false else {
+        guard HelperPolicy.startUpResets(flag: flag.read()) else {
             flag.deleteOwnershipFile()
             return
         }
@@ -103,28 +103,25 @@ final class HelperDaemon: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         HelperLog.main.notice("SIGTERM (\(self.sessions.count, privacy: .public) session(s), owns flag: \(self.ownsFlag, privacy: .public))")
         dropAll(.notEngaged)
-        var clean = true
-        if ownsFlag {
-            if flag.set(false) {
-                ownsFlag = false
-                flag.deleteOwnershipFile()
-            } else {
-                clean = false
-            }
+        let wasOwned = ownsFlag
+        var cleared = false
+        if wasOwned, flag.set(false) {
+            cleared = true
+            ownsFlag = false
+            flag.deleteOwnershipFile()
         }
         // A clean stop exits 0 (never respawned). If the reset failed, exit non-zero and keep the ownership file:
         // if launchd still has the job loaded it restarts us and the restart reset tries again.
-        exit(clean ? 0 : 75)
+        exit(HelperPolicy.terminateExitCode(ownsFlag: wasOwned, resetSucceeded: cleared))
     }
 
     // MARK: XPC methods (each hops here from the connection's queue)
 
-    /// `ownsFlag` is per caller: we set the flag and either no session holds it (a reset is pending a retry: the
-    /// caller's recovery should treat it as its own and say `.stuck` if it stays) or a session of the caller's uid
-    /// does. Another user's sessions read as foreign, so that user's flag is never touched from here.
+    /// `ownsFlag` is per caller (HelperPolicy.statusOwnsFlag).
     func status(_ caller: HelperSession, _ reply: @escaping @Sendable (String, String, Bool, Bool) -> Void) {
         dispatchPrecondition(condition: .onQueue(queue))
-        let ours = ownsFlag && (sessions.isEmpty || sessions.values.contains { $0.uid == caller.uid })
+        let ours = HelperPolicy.statusOwnsFlag(ownsFlag: ownsFlag, sessionUIDs: sessions.values.map(\.uid),
+                                               callerUID: caller.uid)
         reply(HelperInfo.version, selfInfo.cdhash ?? "", flag.read() ?? false, ours)
     }
 
@@ -176,7 +173,8 @@ final class HelperDaemon: @unchecked Sendable {
         }
         remove(session, reason: .notEngaged)
         var result = HelperResult.ok
-        if sessions.isEmpty && ownsFlag && !resetOwnedFlag(context: "release") { result = .setFailed }
+        if HelperPolicy.resetsAfterDrop(remainingSessions: sessions.count, ownsFlag: ownsFlag),
+           !resetOwnedFlag(context: "release") { result = .setFailed }
         reply(result.rawValue, flag.read() ?? false)
     }
 
@@ -202,7 +200,9 @@ final class HelperDaemon: @unchecked Sendable {
         guard session.engaged else { return }
         HelperLog.xpc.notice("session lost (pid \(session.pid, privacy: .public)); dropping it")
         remove(session, reason: .notEngaged)
-        if sessions.isEmpty && ownsFlag { resetOwnedFlag(context: "connection lost") }
+        if HelperPolicy.resetsAfterDrop(remainingSessions: sessions.count, ownsFlag: ownsFlag) {
+            resetOwnedFlag(context: "connection lost")
+        }
     }
 
     // MARK: Sessions
@@ -252,7 +252,9 @@ final class HelperDaemon: @unchecked Sendable {
         HelperLog.xpc.notice("no heartbeat for \(Int(HelperInfo.heartbeatTimeout), privacy: .public) s (pid \(session.pid, privacy: .public)); dropping the session")
         remove(session, reason: .notEngaged)
         session.connection?.invalidate()
-        if sessions.isEmpty && ownsFlag { resetOwnedFlag(context: "heartbeat timeout") }
+        if HelperPolicy.resetsAfterDrop(remainingSessions: sessions.count, ownsFlag: ownsFlag) {
+            resetOwnedFlag(context: "heartbeat timeout")
+        }
     }
 
     // MARK: Flag reset
