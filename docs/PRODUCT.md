@@ -13,7 +13,7 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 | 1 | **Simple surface** | Reading the panel takes 2 seconds and starting a session takes one click. Rare actions sit behind `⋯`, ⌥-click or Settings. Nothing scrolls. |
 | 2 | **Powerful depth** | One model sits underneath everything: **holds → guards → effective state**. A hold can come from the panel, a rule, the CLI, the URL scheme, the hotkey or the Dock, and every source goes through the same path. |
 | 3 | **Funny, not annoying** | The eyes show the state and the words carry the jokes. Jokes appear only at state changes and milestones. There are no sounds, no bouncing and no looping animation in the menu bar. **Professional mode has zero jokes.** |
-| 4 | **Safe by default** | Lid mode has four independent ways of restoring sleep (normal path, crash/hang watchdog, root safety daemon, launch recovery). Its battery floor and heat guard **can't be turned off**. Closed in a bag, it always has a time cap. Plain keep-awake behaves like Caffeine and never stops on its own. Safety copy is plain in every personality. |
+| 4 | **Safe by default** | Lid mode has four independent ways of restoring sleep (normal path, the root helper's crash/hang watch, its boot reset and battery backstop, launch recovery). Its battery floor and heat guard **can't be turned off**. Closed on battery, it always has a time cap; on the power adapter a cap is optional. Plain keep-awake behaves like Caffeine and never stops on its own. Safety copy is plain in every personality. |
 | 5 | **Honest state** | State is read back from the system, never assumed. *Why awake?* also lists other apps' sleep blockers. The app never promises something it can't do (see the "Look busy" cut). |
 
 ## 2. Target users
@@ -35,8 +35,8 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 | Core | Toggle. Presets **30m · 1h · 2h · 4h · 8h · ∞**. **Until…** (a clock time; a past time means tomorrow). **Extend** +15m (key, Dock menu, notification). Clicking the open eyes also pauses active rules until each re-triggers. |
 | Core | **Keep screen on** (display assertion) as a sticky preference. |
 | Core | **While…** (babysit): hold until a chosen app, process name or PID exits, with a 5 s grace period. |
-| Closed lid | **Stay awake with lid closed** (`pmset -a disablesleep`), MacBooks only: one-time setup with one password prompt, a narrow sudoers rule, a heartbeat watchdog, a root safety daemon (boot reset + 10% battery backstop), launch recovery, IORegistry readback, display off when shut, and a **mission report** on reopen. The switch applies to every hold except fixed CLI/URL ones. |
-| Safety | Lid battery floor (always on, default 20%, min 10%), plus opt-in "Also stop keeping awake" at that floor. Heat guard (always on; pauses lid mode at `.serious`, or at `.fair` for 5 min in a bag). Low Power Mode pauses lid mode. Optional "Lid only on power adapter". Bag time cap (default 1 h). A guard that fires with the lid shut stays off until the lid opens. |
+| Closed lid | **Stay awake with lid closed** (`SleepDisabled`), MacBooks only. Signed builds: a **privileged helper** (`SMAppService.daemon`, XPC, code-signing-pinned to our bundle id + Team ID), installed root-owned in `/Applications` by `make install` and set up once with one approval in System Settings; it resets the flag on app crash or hang, at boot and at 10% battery. Builds made unsigned on purpose fall back to a narrow sudoers rule + watchdog + safety daemon (one password prompt). Both: launch recovery, IORegistry readback, display off when shut, and a **mission report** on reopen. The switch applies to every hold except fixed CLI/URL ones. |
+| Safety | Lid battery floor (always on, default 20%, min 10%), plus opt-in "Also stop keeping awake" at that floor. Heat guard (always on; pauses lid mode at `.serious`, or at `.fair` for 5 min in a bag). Low Power Mode pauses lid mode. Optional "Lid only on power adapter". Lid-closed time cap: **always on battery** (default 1 h, 15 min–8 h), **optional on power** (off by default, 1–24 h). A guard that fires with the lid shut stays off until the lid opens. |
 | Automations | **Rules**, written as sentences: *Keep awake while [app / process] is running*, *…while on power adapter*, *…while an external display is connected*. Each rule has "screen on" and "allow lid closed" options; both default to off. |
 | Insight | **Why awake?** (⌥-click on the menu bar item, plus Settings ▸ Diagnostics): our holds, guards, other processes' assertions (`IOPMCopyAssertionsByProcess`), and `SleepDisabled` / clamshell readback. |
 | Scripting | `insomnia://` URL scheme. **CLI** (`insomnia on/off/extend/status/why/run/watch`) over a local socket. One global hotkey (toggle). |
@@ -52,11 +52,10 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 | Schedule rules ("weekdays 09–18") | Useful, but needs a time-range editor. |
 | CPU > N% rule and "while a file or download grows" | Needs polling heuristics, and false positives would cost trust. |
 | "Snooze all rules for 1h" | v1 already pauses rules from the eyes until they re-trigger; a timed snooze waits for demand. |
-| Control Center control + desktop widget | Need an app extension, so an Xcode project and a Team ID. Spike alongside App Intents. |
+| Control Center control + desktop widget | Need an app extension, so an Xcode project. Spike alongside App Intents. |
 | Mouse-jiggle "Look busy" | Needs Accessibility (TCC), and an ad-hoc signature breaks the grant on every rebuild. It can also defeat the screen lock. It would ship off by default, on a timer, with a disclaimer. |
-| SMAppService privileged helper (XPC + heartbeat) | Better than sudoers, but needs a paid Team ID. `PrivilegedBackend` is the seam where it would plug in. |
 | Seasonal visuals (pumpkin glow, snowflake) | Copy-only date lines ship in v1. Visuals come after the basics feel great. |
-| Sparkle updates, notarization | Need a Developer ID. |
+| Developer ID signing, notarization, Sparkle updates | Only needed to give the app to others, **unless** macOS refuses to register the helper from an Apple Development build: the SDK header says apps with LaunchDaemons "must be notarized". One real `register()` is the first M2 task (`CLOSED_LID.md` §10 #6); if refused, the choice is Developer ID + notarization (paid membership) or the sudoers fallback as primary. |
 
 ### Non-goals (cut, with reasons)
 
@@ -66,7 +65,7 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 - **A "Custom…" duration stepper.** Until… and the CLI cover it.
 - **Things that aren't about sleep** (desktop hiding, focus dimming).
 - **A sandbox or App Store build.** Lid mode can't work in the sandbox.
-- **Editing `/etc/sudoers` directly.** We only ever add one file to `/etc/sudoers.d`.
+- **Editing `/etc/sudoers` directly.** The sudoers fallback (unsigned builds only) adds one file to `/etc/sudoers.d`, nothing else.
 
 ## 4. Voice & humour guide
 
@@ -140,9 +139,9 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 
 ## 6. Success criteria for v1
 
-- From a cold start, a first-time user keeps the Mac awake within one click, and sets up lid mode within one password prompt.
+- From a cold start, a first-time user keeps the Mac awake within one click, and sets up lid mode with one approval in System Settings (one password prompt on unsigned builds).
 - Each lid-mode release blocker in `CLOSED_LID.md` §8 passes.
-- If Insomnia is force-quit with lid mode engaged, `SleepDisabled` returns to `0` within 1 s (within 100 s if it hangs), and after a reboot it is `0` before login.
+- If Insomnia is force-quit with lid mode engaged, `SleepDisabled` returns to `0` within 1 s (within 50 s if it hangs), and after a reboot it is `0` before login.
 - The menu bar item is never wider than about 22 pt unless the user enables the timer text.
 - Idle CPU is effectively zero: no timers run while asleep and the panel is closed.
 - Every state can be told apart in monochrome, with VoiceOver, and with Reduce Motion on.

@@ -18,7 +18,7 @@ This file specifies every surface for v1. Behaviour lives in `../ARCHITECTURE.md
 | `.awake` | Two almond outlines with filled round pupils, centred | Manual hold (timed or indefinite) |
 | `.watching` | Almond outlines, pupils shifted 3 pt right, plus a 2 pt dot after the right eye | Only babysit, CLI or rule holds are active |
 | `.lid` | **Filled** almonds with knocked-out pupils ("night vision"): a solid silhouette | Lid mode engaged (flag read back as 1) |
-| `.squint` | Two flat almond slits (height 3 pt), no pupils | An alarm guard: `thermal`, `lowPowerMode`, `batteryFloor`, `awakeBatteryFloor`. (`acRequired` and `lidBatteryCap` keep the normal mood; H′ explains.) |
+| `.squint` | Two flat almond slits (height 3 pt), no pupils | An alarm guard: `thermal`, `lowPowerMode`, `batteryFloor`, `awakeBatteryFloor`. (`acRequired` and the two time caps keep the normal mood; H′ explains.) |
 | `.alarmed` | Left eye open, right eye an "×" | Lid error or stuck |
 
 When several apply, the first one wins: `alarmed > squint > lid > awake > watching > asleep` (`EyeMood(status:lid:)` in `Models.swift`). **Before M1 ends**, check all six side by side at 1x and 2x, light and dark.
@@ -313,13 +313,18 @@ Each rule is one sentence-shaped row; there's never a modal form. The `screen` a
 
 ```
 Stay awake with lid closed                                   (MacBooks only)
-  Status     ● Ready (sudoers rule ✓ · safety daemon ✓)     [Test…] [Remove…]
+  Status     ● Ready · helper allowed                        [Test…] [Remove…]
              ○ Not set up                                    [Set Up…]
-             ◐ Partly installed: safety daemon missing       [Repair…]
-             ◐ Safety daemon is off in Login Items           [Open Login Items]
+             ◐ Waiting for your OK in System Settings         [Open System Settings]
+             ◐ Helper isn't responding                       [Repair…]
+             ⚠ Install Insomnia with make install to use lid mode  ⓘ
+             ⚠ Helper missing from the app. Reinstall Insomnia.
   Turn the screen off when the lid closes                    always on ⓘ
   Only on power adapter                                      [ ]
-  Time limit closed on battery                  [ 1 hour ▾ ]  (30m, 1h, 2h, 4h, 8h)
+  Time limit with the lid closed
+    On battery                                  [ 1 hour ▾ ]   (15m, 30m, 1h, 2h, 4h, 8h)
+    On power adapter                       [ ] [ 4 hours ▾ ]   (1h, 2h, 4h, 8h, 12h, 24h; picker disabled until checked)
+    On battery there's always a limit; on power, lid mode runs until you stop it unless you set one.
 
 Guards
   Turn off lid mode at battery                  ──●────────  20%   (10–50, always on)
@@ -330,13 +335,19 @@ Guards
   ⓘ Lid mode disables macOS's own low-battery sleep, so its guards can't be switched off.
 ```
 
+- `versionMismatch` never shows: the app re-registers silently at launch (`CLOSED_LID.md` §2.6) and lands on Ready or "Waiting for your OK".
+- `.unsafeLocation` ⓘ: "The helper runs as root, so it only runs from /Applications/Insomnia.app owned by the system. `make install` puts it there." Set Up… is not offered from any other copy (e.g. `build/`).
+- `.notFound` appears only when the helper or its plist is really missing from the bundle; a never-set-up helper shows "Not set up".
+- **Unsigned builds (sudoers backend)** show the old rows instead: "● Ready (sudoers rule ✓ · safety daemon ✓)", "◐ Partly installed: safety daemon missing [Repair…]", "◐ Safety daemon is off in Login Items [Open Login Items]". If a helper from a signed build is still registered (`.leftoverHelper`), the only row is "◐ A helper from a signed build is still registered [Remove…]"; the sudoers setup isn't offered until it's gone.
+- Signed build with leftover sudoers files: an extra row "Old password-based setup found [Remove old setup…]".
+
 ### 4.4 Diagnostics
 
 ```
 Live
   SleepDisabled  No          Lid  Open          Thermal  Nominal
   Power  AC · 95% · not charging          Low Power Mode  Off
-  Helper  sudoers ✓ · safety daemon ✓ · watchdog idle
+  Helper  privileged helper 1.0.0 · team {teamID} · allowed · idle      (unsigned: sudoers ✓ · safety daemon ✓ · watchdog idle)
 Why awake?                                                   [Refresh]
   (same sections as the ⌥-click menu, as a table: Who · What · Since)
 Event log (last 200)                                         [Copy] [Clear]
@@ -357,53 +368,69 @@ The **About** sheet (from `⋯` or here) shows big panel eyes, the version, stat
 | `.off`, setting off | none | off | none |
 | `.off`, setting on, Mac asleep | "Armed · applies whenever I'm awake" | on | none |
 | `.off`, setting on, fixed CLI/URL hold without lid | "Off for this session" | on | none |
-| `.needsSetup` | "Set up needed ›" (opens §6) | off (it can't be on) | none |
-| helper `.daemonDisabled` | "Safety daemon is off · Fix ›" | off | none |
+| `.needsSetup`, helper `.notInstalled` | "Set up needed ›" (opens §6) | off (it can't be on) | none |
+| `.needsSetup`, helper `.requiresApproval` | "Allow in System Settings ›" (opens the approval step) | off | none |
+| `.needsSetup`, helper `.unreachable` / `.notFound` | "Helper isn't responding · Fix ›" (opens Lid & Safety) | off | none |
+| `.needsSetup`, helper `.unsafeLocation` | "Install in Applications to use · Why? ›" (opens Lid & Safety) | off | none |
+| `.needsSetup`, sudoers `.leftoverHelper` | "Old helper still registered · Fix ›" (opens Lid & Safety) | off | none |
+| `.needsSetup`, sudoers `.daemonDisabled` / `.partial` | "Safety daemon is off · Fix ›" | off | none |
 | `.engaging` | "Applying…" plus a spinner | on | none |
 | `.engaged(lidClosed: false)` | "Ready · close the lid anytime" | on | `.lid` |
 | `.engaged(lidClosed: true)` | "Engaged · lid closed" | on | `.lid` |
 | `.suspended(thermal / lowPowerMode / batteryFloor)` | "Paused · running hot / Low Power Mode / battery at {floor}%" (orange) | on | `.squint` |
-| `.suspended(acRequired / lidBatteryCap)` | "Waiting for power adapter" / "Paused · {cap} limit on battery" (secondary) | on | normal |
+| `.suspended(acRequired / lidBatteryCap / lidACCap)` | "Waiting for power adapter" / "Paused · {cap} limit on battery" / "Paused · {acCap} limit on power" (secondary) | on | normal |
 | `.latched` | "Paused · open the lid to resume" (secondary) | on | normal |
 | `.error(e)` | "Couldn't apply · Mac sleeps normally · Retry" / overridden: "Turned off by something else · Retry" (red) | on | `.alarmed` |
+| `.error(.foreignFlag)` | "Another app already turned sleep off · Why? ›" (secondary) | on | normal |
+| `.error(.otherUser)` | "Another user on this Mac is using lid mode" (secondary) | on | normal |
 | `.stuck` | "Stuck on · Mac won't sleep · Reset with password…" (red) | on | `.alarmed` |
 
 ---
 
 ## 6. Lid mode onboarding flow
 
+Signed builds (helper backend). Three steps, all inside one sheet (panel or Settings); never a modal alert.
+
 ```
-[Lid toggle ON, helper missing]
+[Lid toggle ON, helper .notInstalled]            ([Set Up…] in Lid & Safety starts here too; never from a copy outside
+                                                  /Applications or not root-owned: .unsafeLocation, §4.3)
         │
         ▼
-┌─ Sheet inside panel (or Settings) ───────────────────────────────────┐
+┌─ 1 · Explain ────────────────────────────────────────────────────────┐
 │  Stay awake with the lid closed                                      │
 │  • Your Mac won't sleep when you close the lid. The screen turns off. │
-│  • You'll type your password once. Insomnia adds a rule that allows   │
-│    exactly two commands (sleep off / sleep on), usable by any app     │
-│    running as you, and a tiny safety daemon that restores sleep after │
-│    a restart and at 10% battery.                                      │
-│  • macOS will say "Background Items Added". That's the safety net.    │
-│  • Keep it out of bags. Lid mode pauses when hot, in Low Power Mode,  │
-│    after {cap} closed on battery, and turns off at {floor}% battery.  │
+│  • Insomnia adds a small helper that does exactly one thing: turn     │
+│    sleep off and back on. Only this Insomnia can talk to it.          │
+│  • If Insomnia quits, crashes or freezes, the helper turns sleep back │
+│    on. It also restores sleep after a restart and at 10% battery.     │
+│  • Keep it out of bags. On battery it stops after {cap}, pauses when  │
+│    hot or in Low Power Mode, and turns off at {floor}%.               │
 │  • Apple menu ▸ Sleep is blocked while engaged. Use ⋯ ▸ Sleep Now.    │
 │                                    [Not Now]  [Set Up…]               │
 └──────────────────────────────────────────────────────────────────────┘
-        │ Set Up…
+        │ Set Up… → SMAppService register() (no password here)
+        ├── registrationFailed → inline red "Couldn't add the helper (code N)" + [Copy details]
         ▼
- macOS admin prompt: "Insomnia needs your password once to keep your Mac awake with the lid closed."
-        │
-   ┌────┴─────────────┬────────────────────┬──────────────────────────┐
- cancelled          script error         success
-   │                  │                    │
- toggle reverts,   inline red text +    verify: HelperStatus == .installed
- quip "Setup       [Copy details]       (rule probe ✓, daemon enabled ✓)
- skipped" (no      (never a modal)        │
- error tone)                            "Ready. Close the lid whenever."
-                                        + optional [Try it: close the lid for 10 s]
-                                          → on reopen: "Survived. Welcome to the
-                                            night shift." / Professional: "Verified."
+┌─ 2 · Approve (status .requiresApproval; re-checked every 1 s) ───────┐
+│  One more step: allow Insomnia in System Settings                    │
+│  General ▸ Login Items & Extensions ▸ turn on Insomnia.              │
+│  macOS asks for Touch ID or your password there.                     │
+│                         [Not Now]  [Open System Settings]            │
+└──────────────────────────────────────────────────────────────────────┘
+        │ user switches it on (app detects .enabled + XPC ✓, no relaunch)
+        ├── enabled but no answer in 2 s → inline red "The helper isn't responding." [Repair…]
+        ▼
+┌─ 3 · Done ───────────────────────────────────────────────────────────┐
+│  "Ready. Close the lid whenever."   [Try it: close the lid for 10 s] │
+│   → on reopen: "Survived. Welcome to the night shift." / Prof.: "Verified." │
+└──────────────────────────────────────────────────────────────────────┘
+        │ if the toggle (or a hold) asked for lid mode: engage now (H′ "Applying…" → "Ready · close the lid anytime")
 ```
+
+- **Not Now** (either step): the toggle reverts, quip `setup cancelled`, no error tone. A registered-but-unapproved helper stays that way; H′ and Lid & Safety then say "Allow in System Settings ›", which reopens step 2 directly.
+- macOS shows its own "Background Items Added" notification during step 2. That's expected; step 2's copy matches it.
+- **Approval switched off later** in System Settings: lid mode releases (the helper resets on stop), H′ shows "Allow in System Settings ›". No notification.
+- **Unsigned builds (sudoers backend)** keep the original two-step flow: step 1 says instead "You'll type your password once. Insomnia adds a rule that allows exactly two commands (sleep off / sleep on), **usable by any app running as you**, and a tiny safety daemon that restores sleep after a restart and at 10% battery." → macOS admin prompt ("Insomnia needs your password once to keep your Mac awake with the lid closed.") → cancelled: as Not Now; script error: inline red text + [Copy details]; success: step 3.
 
 **Runtime moments:**
 
@@ -453,7 +480,7 @@ Open Insomnia from Spotlight to see this panel.
 | rules paused by the eyes | asleep | none | Sleep allowed / Xcode rule paused until Xcode quits | none | "Sleep allowed, rules paused" |
 | any awake + lid engaged | lid | as above | (headline as above) + H′ "Engaged…" | as above, night-vision eyes | "…, lid mode on" |
 | any awake + lid paused (alarm guard) | squint | as above | headline as above, H′ orange | as above | "…, lid mode paused: running hot" |
-| any awake + lid paused (AC-only, cap, latched) | as without lid | as above | headline as above, H′ secondary | as above | "…, lid mode paused: {reason}" |
+| any awake + lid paused (AC-only, either cap, latched) or foreign flag | as without lid | as above | headline as above, H′ secondary | as above | "…, lid mode paused: {reason}" |
 | suspended (opt-in awake floor) | squint | none | Paused: battery at {floor}% / Plug in to resume | none | "Paused, battery at {floor} percent" |
 | lid error | alarmed | as above | Lid mode needs attention / Mac sleeps normally | as above + `!` badge | "Lid mode failed, sleep works normally" |
 | lid stuck | alarmed | as above | Lid mode is stuck on / Your Mac won't sleep · Reset with password… | as above + `!` badge | "Lid mode stuck on, Mac won't sleep" |
@@ -486,14 +513,14 @@ The egg is off in Professional (the toggles still work).
 | `battery-stop` | Opt-in awake floor tripped | always | "Stopped keeping awake at {floor}% battery" | plain | none |
 | `lid-heat` | Lid suspended for thermal, once per engagement | always | "Lid mode paused: Mac is hot" | e.g. "Is it in a bag?" | **Allow Sleep** |
 | `lid-lpm` | Lid suspended for Low Power Mode, once per engagement | always | "Lid mode paused: Low Power Mode" | plain | none |
-| `lid-cap` | Lid suspended for the bag time cap | always | "Lid mode paused after {cap} closed on battery" | plain | none |
-| `lid-error` | Apply/readback failed, watchdog lost, or overridden | always | "Lid mode couldn't be applied" / "Lid mode was turned off" | "Your Mac will sleep normally." | **Retry** |
+| `lid-cap` | Lid suspended for a time cap | always | "Lid mode paused after {cap} closed on battery" / "Lid mode paused after {acCap} closed" | plain | none |
+| `lid-error` | Apply/readback failed, safety net lost, or overridden (not `foreignFlag`) | always | "Lid mode couldn't be applied" / "Lid mode was turned off" | "Your Mac will sleep normally." | **Retry** |
 | `lid-stuck` | Flag is 1 and every reset failed | always | "Lid mode is stuck on" | "Your Mac won't sleep until it's reset." | **Reset…** |
 | `foreign-flag` | `SleepDisabled = 1` without our marker (once per boot) | always | "Something else turned off sleep" | "Another app or admin set it. Insomnia won't change it." | **Why Awake?** |
 | `recovered` | Launch recovery reset the flag | always | "Normal sleep restored" | `recovered` pool | none |
 | `target-exited` | Babysit target exited and the hold ended | `sessionNotifications` | "ffmpeg finished" | e.g. "Babysitting shift over." | none |
 
-- **Authorization:** requested at welcome-card "Got it", at lid setup success, and when `sessionNotifications` is switched on. Posts made before the answer are queued, so the first safety notification is never lost.
+- **Authorization:** requested at welcome-card "Got it", at lid setup success (step 3), and when `sessionNotifications` is switched on. Posts made before the answer are queued, so the first safety notification is never lost.
 - **While the app is frontmost:** `willPresent` returns `[.banner]` only.
 
 ---
@@ -525,7 +552,7 @@ Professional has one or two lines per moment; `nil` means the row is hidden.
 | **battery floor** | Lid mode turned off at {floor}% battery. | {floor}%. Lid mode's tapping out so your Mac doesn't. | Battery at {floor}%. I go down with the ship. Your Mac doesn't. |
 | **recovered** | Restored normal sleep after an unexpected quit. | I left the lights on last time. Fixed. | Crashed last time, but I tidied up. You're welcome. |
 | **setup done** | Lid mode is ready. | Ready. Close the lid whenever. | The ritual is complete. The lid holds no power over us now. |
-| **setup cancelled** | Setup skipped. | No worries. The lid wins this round. | Password declined. Respect. I'll be here. Waiting. |
+| **setup cancelled** | Setup skipped. | No worries. The lid wins this round. | Declined. Respect. I'll be here. Waiting. |
 | **poke 5** | n/a | Ow. | You've poked me 5 times. HR has been notified. |
 | **poke 10** | n/a | I'm going to need you to stop. | I'm calling my lawyer. My lawyer is also an app. |
 | **poke 20** | n/a | Now I'm cross-eyed. Happy? | I CAN SEE MY OWN NOSE AND I DON'T HAVE ONE. |
@@ -536,7 +563,7 @@ Professional has one or two lines per moment; `nil` means the row is hidden.
 | **date: Oct 31** | nil | Boo. Your Mac is too awake to be scared. | Spooky season. The call is coming from inside the menu bar. |
 | **date: New Year 00:00–00:10** | nil | You stayed up for this. So did I. | NEW YEAR. SAME EYES. |
 
-**Escalation buckets:** `.awake(hours:)` fires on entering 2, 8, 24 and 72 h of continuous awake. Each bucket fires once per hold. **Quip budget** and Professional placement: `PRODUCT.md` §4 rules 7 and 11 (Professional lines appear only in notification bodies). `{floor}`, `{cap}` and `{duration}` are filled from Settings and the hold; never hard-code them.
+**Escalation buckets:** `.awake(hours:)` fires on entering 2, 8, 24 and 72 h of continuous awake. Each bucket fires once per hold. **Quip budget** and Professional placement: `PRODUCT.md` §4 rules 7 and 11 (Professional lines appear only in notification bodies). `{floor}`, `{cap}` (battery cap), `{acCap}` and `{duration}` are filled from Settings and the hold; never hard-code them.
 
 **Date lines:** they replace an `activated` or `idle` line with 1-in-3 probability when their window matches. Never in Professional.
 

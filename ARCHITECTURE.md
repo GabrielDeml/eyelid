@@ -8,7 +8,7 @@ Read these first. They are the product and UX source of truth, and this file imp
 |---|---|
 | `docs/PRODUCT.md` | Principles, tiers, non-goals, voice, naming |
 | `docs/UX.md` | Every surface, states, copy, accessibility |
-| `docs/CLOSED_LID.md` | Privilege model, install script, watchdog, safety daemon, guards, lid state machine, release blockers |
+| `docs/CLOSED_LID.md` | Privilege model (helper + XPC, sudoers fallback), signing requirements, helper state machine, guards, lid state machine, release blockers |
 
 **The one model:** every reason to stay awake is a **Hold**. **Guards** (safety) cap what holds can do. The engine derives one **`AwakeStatus`** and one **`LidStatus`**, plus an `EyeMood`. Every surface renders from these three values: menu bar, panel, Dock, VoiceOver, CLI and notifications.
 
@@ -19,39 +19,65 @@ Read these first. They are the product and UX source of truth, and this file imp
                                 │
           ┌─────────────────────┼─────────────────────────┐
    PowerAssertions        ClosedLidController         Narrator / Notifier / Stats
-   (IOPM assertions)      (sudo -n pmset, watchdog)   (copy, notifications, milestones)
+   (IOPM assertions)      (PrivilegedBackend)         (copy, notifications, milestones)
+                                │
+              HelperBackend ── XPC ──► InsomniaHelper (root, SMAppService.daemon)   [signed builds]
+              SudoersBackend ── sudo -n pmset + bash watchdog + safety daemon        [builds made ad hoc on purpose]
 ```
 
 ## Build model
 
-- **Package:** SwiftPM, `swift-tools-version:6.0`, **Swift 6 language mode**, a single `executableTarget` named `Insomnia`, macOS 14 minimum. Built on Xcode 27 / Swift 6.4 / arm64.
+- **Package:** SwiftPM, `swift-tools-version:6.0`, **Swift 6 language mode**, macOS 14 minimum. Built on Xcode 27 / Swift 6.4 / arm64. Three targets:
+
+| Target | Kind | Ends up as | Contents |
+|---|---|---|---|
+| `Insomnia` | executable | `Contents/MacOS/Insomnia` | The app, CLI dispatch, `HelperBackend` + `SudoersBackend` |
+| `InsomniaHelper` | executable | `Contents/MacOS/InsomniaHelper` | Root launchd daemon (`CLOSED_LID.md` §2.5). Foundation + IOKit + Security only, no AppKit. |
+| `InsomniaShared` | library (static, linked into both) | n/a | `HelperProtocol` (the XPC `@objc` protocol), `HelperResult`, `HelperInfo` (label, Mach name, plist name, install path, constants, requirement builders + validator), `CodeSignature` (own Team ID + kernel cdhash, `readSelf()`), `InstallLocation` (root-owned bundle check) |
+
 - **No Xcode project, no app extensions, no third-party dependencies.**
-- **Frameworks:** AppKit, SwiftUI, IOKit, Carbon (hotkey), ServiceManagement (launch at login), UserNotifications.
-- **`scripts/build.sh`:**
-  - runs `swift build -c release`;
-  - assembles `build/Insomnia.app` (`Contents/MacOS/Insomnia`, and `Contents/Info.plist` from `Resources/Info.plist`);
-  - generates `AppIcon.icns` by running the built binary with `--export-icon <dir>.iconset`, then `iconutil -c icns`;
-  - signs ad hoc with `codesign --force --sign - --options runtime --timestamp=none`.
-- **`Makefile`:** `make` (build the app), `make run`, `make install` (copies to `/Applications`), `make clean`.
+- **Frameworks:** AppKit, SwiftUI, IOKit, Carbon (hotkey), ServiceManagement (launch at login, helper daemon), Security (code signatures), UserNotifications.
+- **`scripts/build.sh`** (the build/sign pipeline; `set -euo pipefail`):
+  1. **Identity.** `$INSOMNIA_SIGN_IDENTITY`; unset → `security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1`; none found → **exit 1** ("set `INSOMNIA_SIGN_IDENTITY=-` for an unsigned build, which uses the sudoers fallback"). Ad hoc only when `-` is given explicitly, and then refuse (exit 1) if `/Applications/Insomnia.app/Contents/MacOS/Insomnia --helper-status` exits 0 (a signed helper is registered; remove it first with `make uninstall`). Optional `INSOMNIA_SIGN_KEYCHAIN`: `security unlock-keychain` (prompts), sign with `--keychain`, `security lock-keychain` in an `EXIT` trap (`CLOSED_LID.md` §2.2).
+  2. `swift build -c release` (all three targets); `BIN=$(swift build -c release --show-bin-path)` (Xcode 27: `.build/out/Products/Release`).
+  3. **Assemble fresh** in a staging dir (`mktemp -d build/.stage.XXXXXX`): `ditto` `$BIN/Insomnia` and `$BIN/InsomniaHelper` into `Contents/MacOS/` (no `.dSYM`), `Resources/Info.plist` → `Contents/Info.plist`. Never copy onto an existing signed binary (per-vnode signature cache → SIGKILL).
+  4. Generate `AppIcon.icns` by running the built binary with `--export-icon <dir>.iconset`, then `iconutil -c icns`.
+  5. **Strip rpaths** from both binaries (`install_name_tool -delete_rpath` for every `LC_RPATH`), then require `otool -l | grep LC_RPATH` to be empty and `otool -L` to list only `/usr/lib/` and `/System/`.
+  6. Sign the helper: `codesign --force --options runtime --timestamp=none --identifier com.gdeml.Insomnia.helper --sign "$ID" …/MacOS/InsomniaHelper` (`--identifier` is required: SwiftPM's own signature says `InsomniaHelper`).
+  7. **Signed builds, once the helper is implemented (M2):** read the helper's `CDHash` and `TeamIdentifier` (`codesign -dvvv`), fill `Resources/com.gdeml.Insomnia.helper.plist.in` (`__TEAM_ID__`, `__HELPER_CDHASH_BASE64__`, `CLOSED_LID.md` §2.3), `plutil -lint`, place it at `Contents/Library/LaunchDaemons/com.gdeml.Insomnia.helper.plist`. Ad-hoc builds and the M1 stub get **no** daemon plist.
+  8. Sign the app (no `--deep`), which seals the plist: `codesign --force --options runtime --timestamp=none --sign "$ID" <stage>/Insomnia.app`. No entitlements file.
+  9. **Verify:** `codesign --verify --strict --deep`; `plutil -lint` both plists; signed builds: `TeamIdentifier` equal for both, `flags=0x10000(runtime)` on both, `codesign -v -R "=<HelperInfo.clientRequirement>"` on the app and `helperRequirement` on the helper; fail if `codesign -d --entitlements -` shows any of `get-task-allow`, `disable-library-validation`, `allow-dyld-environment-variables`, `allow-unsigned-executable-memory`, `disable-executable-page-protection`, `allow-jit`.
+  10. Rename the staging bundle over `build/Insomnia.app` (old one renamed aside, then deleted).
+  - No notarization for local use (pending `CLOSED_LID.md` §10 #6). Developer ID + notarization only for distributing to others (Later).
+- **`Makefile`:**
+  - `make` builds the app; `make run`.
+  - `make install`: requires a signed build. `sudo ditto build/Insomnia.app /Applications/.Insomnia.app.new`, `sudo chown -R root:wheel` and `sudo chmod -R go-w` it, rename any old copy aside, rename the new one to `/Applications/Insomnia.app`, delete the old one. Lid mode is set up **only** from this copy (`CLOSED_LID.md` §2.3); the next launch re-registers a changed helper silently.
+  - `make uninstall`: `/Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper`, then `sudo rm -rf /Applications/Insomnia.app`.
+  - `make clean`: `rm -rf build .build` (no registration ever points into `build/`).
 - **Identifiers:**
-  - bundle id `com.gdeml.Insomnia`
-  - URL scheme `insomnia://`
-  - safety daemon label `com.gdeml.insomnia.safety`; sudoers file `/etc/sudoers.d/zz_insomnia`
+  - bundle id `com.gdeml.Insomnia`; URL scheme `insomnia://`
+  - helper: launchd label = Mach service = codesign identifier `com.gdeml.Insomnia.helper`; plist `Contents/Library/LaunchDaemons/com.gdeml.Insomnia.helper.plist`
+  - sudoers fallback: safety daemon label `com.gdeml.insomnia.safety`; sudoers file `/etc/sudoers.d/zz_insomnia`
+  - **Team ID is never in source**: both binaries read it from their own signature (app: `CodeSignature.currentTeamID()` once, off the main thread; helper: `CodeSignature.readSelf()` once at start-up, kernel-verified).
+  - install path for lid mode: `/Applications/Insomnia.app`, root-owned (`HelperInfo.installedAppPath`).
 - **`LSUIElement = YES`.** The Dock icon is toggled at runtime with the activation policy.
-- **No SwiftPM resources.** `Bundle.module` breaks in a hand-assembled `.app`, so all copy and art lives in Swift source, and icons are drawn in code.
+- **No SwiftPM resources.** `Bundle.module` breaks in a hand-assembled `.app`, so all copy and art lives in Swift source, and icons are drawn in code. (`Resources/` holds only files `build.sh` copies: `Info.plist`, the helper plist template.)
 - **Concurrency:**
   - UI and engine code is `@MainActor`.
-  - Privileged work and **every child-process spawn** (sudo, pmset, osascript, watchdog) run on `actor LidReconciler`, so no fork can inherit the watchdog pipe. Results hop back to the main actor.
+  - Privileged work (XPC calls to the helper) and **every child-process spawn** (sudo, pmset, osascript, watchdog) run on `actor LidReconciler`, so no fork can inherit the watchdog pipe. Results hop back to the main actor.
   - `main.swift` starts with `signal(SIGPIPE, SIG_IGN)`; sockets also set `SO_NOSIGPIPE` and the watchdog pipe `F_SETNOSIGPIPE`.
   - C callbacks (IOKit, IOPS, Carbon) re-enter with `MainActor.assumeIsolated { }`. Use this **not** `Task { }`, so events stay ordered. The callbacks are registered on the main run loop.
-- **Tests (optional, encouraged):** a `Tests/InsomniaTests` target using `@testable import Insomnia` for `Policy`, `Narrator`, `URLCommand` and `ControlProtocol` parsing. These are pure, so they need no AppKit runtime.
+  - The helper keeps all state on one serial queue; XPC exported-object methods hop onto it.
+- **Tests (optional, encouraged):** a `Tests/InsomniaTests` target using `@testable import Insomnia` for `Policy`, `Narrator`, `URLCommand` and `ControlProtocol` parsing, plus `HelperInfo` requirement strings. These are pure, so they need no AppKit runtime.
 
 ## Shared files (WRITTEN; code against them, don't change signatures without updating the docs)
 
 | File | Contents |
 |---|---|
-| `Sources/Insomnia/Core/Models.swift` | `AwakeDuration` (presets 30m/1h/2h/4h/8h/∞, `nextOccurrence`), `SessionSource`, `WatchTarget`, `AwakeOptions`, `HoldOwner`, `Hold`, `RuleCondition`, `Rule`, `GuardReason`, `HelperStatus`, `LidError`, `LidSetupError`, `LidStatus`, `AwakeStatus`, `EyeMood(status:lid:)`, `DeactivationReason`, `Moment`, `Personality`, `ClickAction`, `MenuBarTimerStyle`, `SettingsTab`, `Notification.Name.insomnia*`, `AppRouter`, `TimeFormat` |
-| `Sources/Insomnia/Core/Settings.swift` | `Settings.shared`: `@Observable`, backed by UserDefaults, posts `.insomniaSettingsDidChange` with `userInfo["key"]` = the UserDefaults key. Clamps the battery floor to 10–50 and snaps the lid cap to 30/60/120/240/480 in setters (no `didSet` recursion). |
+| `Sources/Insomnia/Core/Models.swift` | `AwakeDuration` (presets 30m/1h/2h/4h/8h/∞, `nextOccurrence`), `SessionSource`, `WatchTarget`, `AwakeOptions`, `HoldOwner`, `Hold`, `RuleCondition`, `Rule`, `GuardReason`, `PrivilegeBackendKind`, `HelperStatus`, `LidError`, `LidSetupError`, `LidStatus`, `AwakeStatus`, `EyeMood(status:lid:)`, `DeactivationReason`, `Moment`, `Personality`, `ClickAction`, `MenuBarTimerStyle`, `SettingsTab`, `Notification.Name.insomnia*`, `AppRouter`, `TimeFormat` |
+| `Sources/Insomnia/Core/Settings.swift` | `Settings.shared`: `@Observable`, backed by UserDefaults, posts `.insomniaSettingsDidChange` with `userInfo["key"]` = the UserDefaults key. Clamps the battery floor to 10–50 and snaps the caps in setters (no `didSet` recursion): `lidMaxOnBatteryMinutes` to 15/30/60/120/240/480 (default 60, always on), `lidMaxOnACMinutes` to 60/120/240/480/720/1440 (default 240, used only when `lidCapOnACEnabled`, default false). Bookkeeping: `helperRegisteredCDHash` (bundled helper cdhash at the last `register()`). |
+| `Sources/InsomniaShared/HelperProtocol.swift` | `@objc(INSHelperProtocol) HelperProtocol` (`status`, `engage`, `release`, `heartbeat`), `HelperResult` (incl. `.otherUser`) |
+| `Sources/InsomniaShared/HelperInfo.swift` | `HelperInfo` (label, Mach service, plist name, `installedAppPath`, bundled paths, `version`, `sleepDisabledKey`, heartbeat 10 s / timeout 45 s, backstop 10% / poll ≤ 15% every 60 s, `clientRequirement(teamID:)`, `helperRequirement(teamID:)`, `isValidRequirement(_:)`), `CodeSignature` (`readSelf()` → Team ID + kernel cdhash + `matchesDisk`, `currentTeamID()`, `cdhash(ofFileAt:)`), `InstallLocation.check(bundle:)` |
 
 Everything is `@MainActor` unless noted. SwiftUI observes `@Observable` objects directly. AppKit controllers observe the `Notification.Name` events.
 
@@ -115,51 +141,82 @@ There is no `declareUserActivity`; "Look busy" is cut (see the Decisions log). W
 
 Post `.insomniaPowerDidChange` only when a value actually changes.
 
-### `Core/Privileged/PrivilegedBackend.swift`, `SudoersBackend.swift`, `Watchdog.swift`
+### `Core/Privileged/PrivilegedBackend.swift`, `HelperBackend.swift`, `SudoersBackend.swift`, `Watchdog.swift`
 ```swift
 protocol PrivilegedBackend: Sendable {
-    func status() async -> HelperStatus
-    func install() async throws(LidSetupError)                 // one admin prompt (docs/CLOSED_LID.md §2.3)
-    func uninstall(resetFlag: Bool) async throws(LidSetupError) // one admin prompt (§2.5); resetFlag = marker exists
-    /// Runs `sudo -n /usr/bin/pmset -a disablesleep 0|1` (5 s timeout). Returns exit status.
-    func setSleepDisabled(_ on: Bool) async -> Int32
-    /// .stuck recovery: osascript admin prompt running `pmset -a disablesleep 0`.
+    var kind: PrivilegeBackendKind { get }
+    func status() async -> HelperStatus                              // CLOSED_LID.md §2.6 (helper) / §2.7 (sudoers)
+    /// Helper: refuses (.unsafeLocation) unless InstallLocation.check passes; SMAppService register() (unregister first on
+    /// .versionMismatch / .unreachable); saves Settings.helperRegisteredCDHash; usually returns .requiresApproval.
+    /// Sudoers: inline install script, one admin prompt. Returns the status afterwards.
+    func install() async throws(LidSetupError) -> HelperStatus
+    /// Caller has already released. Helper: unregister(), then require .notRegistered/.notFound (else .unregisterIncomplete;
+    /// resetFlag ignored, the helper knows ownership). Sudoers: §2.7 script; on .leftoverHelper: unregister the old helper.
+    func uninstall(resetFlag: Bool) async throws(LidSetupError)
+    /// Arm the safety net, then set SleepDisabled = 1 (5 s timeout). 0 = ok, else a HelperResult raw value / sudo exit status / -1.
+    /// `onLost` fires once if the safety net dies while engaged (XPC interruption/invalidation, watchdog exit).
+    func engage(onLost: @escaping @Sendable () -> Void) async -> Int32
+    /// Set SleepDisabled = 0, then disarm. On failure the safety net stays armed. Helper reply .notEngaged + readback 0 = success.
+    func release() async -> Int32
+    /// Drop the safety net WITHOUT disarming so it resets the flag itself (helper: invalidate connection; sudoers: close pipe).
+    func abandon() async
+    /// Every 10 s while engaged. nil = fine; .overridden / .safetyNetLost = lid mode is gone (CLOSED_LID.md §4.1).
+    func heartbeat() async -> LidError?
+    /// Flag ours? Helper: status().ownsFlag. Sudoers: marker file exists.
+    func ownsFlag() async -> Bool
+    /// .stuck recovery, both backends: osascript admin prompt running `/usr/bin/pmset -a disablesleep 0`.
     func resetWithPassword() async throws(LidSetupError)
 }
-struct SudoersBackend: PrivilegedBackend { init(userName: String = NSUserName()) }   // validates ^[A-Za-z0-9._][A-Za-z0-9._-]*$
+enum PrivilegedBackends {
+    /// HelperBackend(teamID:) if CodeSignature.currentTeamID() != nil, else SudoersBackend(). Runs off the main thread
+    /// (certificate reads; called from LidReconciler), once per launch; the result is cached.
+    static func makeDefault() async -> PrivilegedBackend
+}
+final class HelperBackend: PrivilegedBackend { init(teamID: String) }   // SMAppService.daemon(plistName: HelperInfo.plistName) + NSXPCConnection
+struct SudoersBackend: PrivilegedBackend { init(userName: String = NSUserName()) }   // validates ^[A-Za-z0-9._][A-Za-z0-9._-]*$; owns the Watchdog
 
-/// Watchdog (docs/CLOSED_LID.md §4.1): /bin/bash, pipe EOF + 90 s heartbeat timeout + TERM/HUP/INT trap. Owned by LidReconciler.
+/// Sudoers only (CLOSED_LID.md §2.7): /bin/bash, pipe EOF + 45 s heartbeat timeout + TERM/HUP/INT trap.
 final class Watchdog {
-    /// posix_spawn with POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT; stdin = pipe; F_SETNOSIGPIPE on the write end.
-    /// `onExit` fires (via DispatchSource process source) if the child exits without a disarm.
-    static func arm(onExit: @escaping @Sendable () -> Void) throws -> Watchdog
-    func heartbeat() -> Bool   // write "h\n"; false on EPIPE (watchdog gone)
-    func disarm()              // write "disarm\n" (EPIPE = already gone), close, reap
-    func abandon()             // close WITHOUT disarm → watchdog resets the flag (retry path)
+    static func arm(onExit: @escaping @Sendable () -> Void) throws -> Watchdog   // posix_spawn SETSID | CLOEXEC_DEFAULT
+    func heartbeat() -> Bool   // write "h\n"; false on EPIPE
+    func disarm()              // write "disarm\n", close, reap
+    func abandon()             // close WITHOUT disarm → watchdog resets the flag
 }
 ```
-- The install, uninstall and reset scripts are **inline strings passed to `/usr/bin/osascript -e`**, escaped as an AppleScript literal (`\` → `\\`, then `"` → `\"`, then newline → `\n`).
-- **Result mapping:** osascript exits 1 for every failure; parse the trailing `(N)` from stderr (`CLOSED_LID.md` §2.3).
-- **`status()`:** rule-file + real no-op probe + daemon file + `SMAppService.statusForLegacyPlist(at:)` (§2.4).
+- **`HelperBackend`:** XPC client per `CLOSED_LID.md` §2.4 (`.privileged` Mach connection, `setCodeSigningRequirement(HelperInfo.helperRequirement(teamID:))` once before `resume()` after `isValidRequirement`, 2 s / 5 s timeouts, one connection per engagement). `status()` per §2.6: reads `SMAppService.Status` **once**, checks the bundled plist + helper exist (`.notFound` vs `.notInstalled`, since a never-registered daemon reports `.notFound`), `InstallLocation.check(Bundle.main.bundleURL)`, XPC `status()`, and compares cdhashes (running vs bundled vs `Settings.helperRegisteredCDHash`). All of it on `LidReconciler`, including the 1 s approval poll. Approval: `SMAppService.openSystemSettingsLoginItems()`.
+- **`SudoersBackend`:** install/uninstall/reset scripts are **inline strings passed to `/usr/bin/osascript -e`**, escaped as an AppleScript literal; osascript exits 1 for every failure, so parse the trailing `(N)` from stderr. `status()`: first `SMAppService.daemon(plistName:).status` (`.enabled` / `.requiresApproval` → `.leftoverHelper`; install refused), then rule file + real no-op probe + daemon file + `SMAppService.statusForLegacyPlist(at:)`.
+
+### `InsomniaHelper` target (`Sources/InsomniaHelper/`)
+- `main.swift`: ignore `SIGPIPE`, install the `SIGTERM` source, `let me = CodeSignature.readSelf()` (`!matchesDisk` → log, `exit(75)`), run the boot reset (marker holds `kern.bootsessionuuid`) and restart reset, register the IOPS notification, then `InstallLocation.check` + `isValidRequirement` + `me.teamID != nil`: all pass → `listener.setConnectionCodeSigningRequirement(HelperInfo.clientRequirement(teamID:))` **before** `listener.resume()`; any fail → reset-only mode (listener never resumed). `RunLoop.main.run()`. Never `exit` on a failed check (no respawn loop); the plist has `KeepAlive {SuccessfulExit: false}`.
+- `HelperListener` (`NSXPCListenerDelegate`): `exportedInterface = NSXPCInterface(with: HelperProtocol.self)`, a per-connection `Session` exported object (records `effectiveUserIdentifier`; one-shot 45 s `DispatchSourceTimer` deadline re-armed per heartbeat), `invalidationHandler` → drop session.
+- `FlagController`: `posix_spawn /usr/bin/pmset -a disablesleep 0|1` (empty env, 5 s timeout) + readback of IORegistry and `IOPMCopySystemPowerSettings()` (`dlsym`, read-only), ownership file. No `@_silgen_name`: any private symbol is resolved with `dlsym` so a missing one can't stop the helper loading. `Backstop`: IOPS → reset + `IOPMSleepSystem`; a 60 s timer only on battery ≤ 15%.
+- Behaviour, constants and state machine: `CLOSED_LID.md` §2.5. No AppKit, no UserDefaults, no user-supplied strings.
 
 ### `Core/ClosedLidController.swift`
 ```swift
 @MainActor @Observable final class ClosedLidController {
     static let shared: ClosedLidController
-    init(backend: PrivilegedBackend = SudoersBackend())
+    init()
+    /// Resolves the backend off the main thread (PrivilegedBackends.makeDefault). Called first by AwakeEngine.start().
+    func start() async
+    private(set) var backendKind: PrivilegeBackendKind?   // nil until start() resolves it; drives setup copy (UX.md §6) and Diagnostics
     private(set) var helper: HelperStatus
     private(set) var status: LidStatus             // .off / .engaging / .engaged / .error / .stuck (guards, latch, needsSetup applied by the engine)
-    private(set) var foreignSleepDisabled: Bool     // SleepDisabled==1 at launch without our marker
+    private(set) var foreignSleepDisabled: Bool     // SleepDisabled==1 and !backend.ownsFlag()
     private(set) var reopenReport: ReopenReport?    // set on lid open after ≥5 min engaged-closed; engine consumes it
 
-    func refreshHelper() async
-    func install() async throws(LidSetupError)
-    func uninstall() async throws(LidSetupError)    // Release → disarm → script → delete marker → Settings.closedLidMode = false
+    func refreshHelper() async                      // also performs the silent upgrade on .versionMismatch (not while engaged)
+    func install() async throws(LidSetupError)      // helper: ends in .requiresApproval → UI shows the approval step
+    func openApprovalSettings()                     // SMAppService.openSystemSettingsLoginItems()
+    /// While the approval step is visible: re-check helper status every 1 s; stops itself on .installed.
+    func watchApproval(_ on: Bool)
+    func uninstall() async throws(LidSetupError)    // Release → backend.uninstall → delete marker → Settings.closedLidMode = false
+    func removeLegacySudoers() async throws(LidSetupError)   // signed builds with old sudoers artefacts (CLOSED_LID.md §2.1)
     /// Engine publishes the desired flag; reconciler converges (serial, coalescing). Idempotent.
     func setDesired(_ engaged: Bool)
     func retry()                                    // from .error
     func resetWithPassword() async                  // from .stuck
-    /// Launch: marker present && SleepDisabled==true → reset, delete marker, return true (engine shows "recovered").
+    /// Launch: marker present → (flag 1 and ours → reset), delete marker, return true (engine shows "recovered").
     func recoverIfNeeded() async -> Bool
     /// applicationShouldTerminate (.terminateLater): cancel pending desired state, run Release; on timeout abandon().
     func releaseForQuit(timeout: Duration) async
@@ -169,7 +226,7 @@ final class Watchdog {
 struct ReopenReport: Equatable { var closedFor: TimeInterval; var batteryStart: Int?; var batteryEnd: Int?; var worstThermal: ProcessInfo.ThermalState }
 ```
 
-**Internal `actor LidReconciler`.** It owns the `Watchdog` and runs the **Engage**, **Release**, **Drift** and **Quit** sequences from `docs/CLOSED_LID.md` §4.3. The marker file is `~/Library/Application Support/Insomnia/lid-engaged`. While engaged: a 20 s main-actor heartbeat timer and `ProcessInfo.beginActivity(.userInitiatedAllowingIdleSystemSleep)` (no App Nap).
+**Internal `actor LidReconciler`.** It owns the backend session and runs the **Engage**, **Release**, **Drift**, **Quit** and **Launch recovery** sequences from `docs/CLOSED_LID.md` §4.3, plus every `SMAppService` and signature read. The marker file is `~/Library/Application Support/Insomnia/lid-engaged`. While engaged: a 10 s main-actor heartbeat timer (`backend.heartbeat()`, added with `RunLoop.main.add(_:forMode: .common)`, tolerance 1 s) and `ProcessInfo.beginActivity(.userInitiatedAllowingIdleSystemSleep)` (no App Nap).
 
 **On lid events while engaged:**
 
@@ -223,7 +280,8 @@ struct PolicyInput: Equatable {
     var thermal: ProcessInfo.ThermalState; var lowPowerMode: Bool
     var batteryFloor: Int; var awakeBatteryFloorEnabled: Bool; var lidRequiresAC: Bool
     var isBag: Bool                                // lid closed && no ext. display && !isOnAC
-    var lidBagSeconds: TimeInterval; var lidCapMinutes: Int
+    var lidBagSeconds: TimeInterval; var lidBatteryCapMinutes: Int        // always applies
+    var lidClosedACSeconds: TimeInterval; var lidACCapMinutes: Int?       // nil when !lidCapOnACEnabled
     var previousGuards: Set<GuardReason>          // for hysteresis
     var thermalBagFairSince: Date?                 // ≥ .fair while isBag, since
     var thermalClearSince: Date?; var now: Date
@@ -260,7 +318,7 @@ enum Policy { static func evaluate(_ input: PolicyInput) -> PolicyOutput }
     var remaining: TimeInterval? { get }           // manual timed only
     var progress: Double? { get }                  // 0…1 elapsed of manual timed
 
-    func start() async                             // recoverIfNeeded → refreshHelper → activateOnLaunch
+    func start() async                             // ClosedLidController.start → recoverIfNeeded → refreshHelper → activateOnLaunch
     /// Replaces the manual hold. options == nil → followsSettings; non-nil (CLI flags, URL) → fixed. Never writes Settings.
     func activate(_ d: AwakeDuration, source: SessionSource, options: AwakeOptions? = nil)
     func deactivate(_ r: DeactivationReason)       // ends manual + babysit holds (rules/clients unaffected)
@@ -303,7 +361,7 @@ enum Banner: Equatable {
      - otherwise the controller's status.
   8. Compute `mood = EyeMood(status:lid:)`.
   9. Diff against the previous state. Fire the `Moment`s through `Narrator`, set `quip`/`banner`, call `Notifier` and `Stats`, then post `.insomniaStateDidChange`.
-- **Lid bag counter:** one engine-scoped `lidBagSeconds`, accumulated while engaged and `isBag`, for any hold type. Resets **only** on a clamshell-open event (not on AC, not on a new hold).
+- **Lid-closed counters:** engine-scoped `lidBagSeconds` (engaged, closed, no ext. display, on battery) and `lidClosedACSeconds` (same, on AC), for any hold type. Both reset **only** on a clamshell-open event (not on a power change, not on a new hold). `CLOSED_LID.md` §5.
 - **Lid switch turned on** (settings key `closedLidMode` false → true) while `!isAwake` and helper installed → `activate(defaultDuration, source: .panel)`.
 - **Timers.** No timer runs while asleep and the panel is closed.
   - **1 Hz** while the panel is visible, or while a timed hold has ≤ 60 s left.
@@ -523,7 +581,7 @@ struct HotKeyRecorder: View        // click to record; next key whose modifiers 
 - **Window:** a toolbar `TabView` of four tabs, 540 wide, using `Form(.grouped)`. Wireframes are in `UX.md` §4. Without a lid the third tab is "Safety"; with no lid and no battery it's hidden.
 - **Launch at login:** `SMAppService.mainApp`. Reflect `.status`, and show the error text if it fails.
 - **Automations tab:** rules as sentence rows. The CLI install/remove creates a symlink `~/.local/bin/insomnia` pointing to `Bundle.main.executableURL` and shows a PATH hint if needed. The tab also lists URL recipes with copy buttons.
-- **Lid & Safety tab:** helper status with Set Up / Test / Repair / Open Login Items / Remove, a lid cap picker, an "Only on power adapter" toggle, the floor slider (10–50) and "Also stop keeping awake at that level".
+- **Lid & Safety tab:** helper status per `UX.md` §4.3 (Set Up / Open System Settings / Test / Repair / Remove; "Install with make install" for `.unsafeLocation`; sudoers rows on unsigned builds, incl. the leftover-helper row; Remove old setup), the two cap rows (battery picker; AC checkbox + picker) with the one-line explanation, an "Only on power adapter" toggle, the floor slider (10–50) and "Also stop keeping awake at that level".
 - **Diagnostics tab:** live readouts, the Why-awake table, and the `EventLog` with Copy/Clear.
 - **About:** a sheet (`AboutView`) with eyes, version, stats, milestones, Reset Stats and the GitHub link https://github.com/GabrielDeml/insomnia.
 
@@ -540,7 +598,7 @@ An in-memory ring of 200 entries, also mirrored to `os.Logger(subsystem: "com.gd
 ### `App/main.swift`
 0. `signal(SIGPIPE, SIG_IGN)`.
 1. If `CommandLine.arguments` contains `--export-icon <dir>`, render `EyesRenderer.appIcon` at the standard `.iconset` sizes and names (16…1024, @1x and @2x), then `exit(0)`. No run loop.
-2. If `arguments[1]` is a CLI command (`on off toggle extend status why run watch help --why --version`), run `CLI.main(args)` and `exit(code)`. **No NSApplication.** Any other argument except `--gui` → usage, exit 2.
+2. If `arguments[1]` is a CLI command (`on off toggle extend status why run watch help --why --version`), run `CLI.main(args)` and `exit(code)`. **No NSApplication.** Helper maintenance (`CLOSED_LID.md` §2.6): `--helper-status` (exit 0 if the helper is registered, 1 if not) and `--unregister-helper` (quit a running GUI instance, wait ≤ 5 s, `unregister()`, confirm; exit 0/1). Any other argument except `--gui` → usage, exit 2.
 3. No arguments and `getppid() != 1` (not launched by LaunchServices, e.g. typed in a terminal) → print help, exit 2.
 4. Otherwise (LaunchServices or `--gui`): `let app = NSApplication.shared; let delegate = AppDelegate(); app.delegate = delegate; app.run()`, keeping a strong reference to the delegate.
 
@@ -617,7 +675,7 @@ struct URLCommand: Equatable { /* parsed, pure */ static func parse(_ url: URL) 
 | `NSHumanReadableCopyright` | "© 2026 Gabriel Deml. Sleep is for the weak (and for Macs, eventually)." |
 
 ### Docs
-- **`README.md`:** hero line, feature list, screenshots placeholder, install/build (`make install`), how closed-lid mode works (link `docs/CLOSED_LID.md`, the exact sudoers line, manual uninstall), the safety guards, URL scheme and CLI references, hotkey, FAQ (Why not just `caffeinate`? Does it fake input? No. Why the password once?), MIT license.
+- **`README.md`:** hero line, feature list, screenshots placeholder, install/build (`make install` puts a root-owned copy in `/Applications`, required for lid mode; `INSOMNIA_SIGN_IDENTITY`, `=-` for an unsigned build that uses the sudoers fallback; `make uninstall`), how closed-lid mode works (link `docs/CLOSED_LID.md`: the helper, the approval step, manual uninstall; the exact sudoers line for unsigned builds), the safety guards, URL scheme and CLI references, hotkey, FAQ (Why not just `caffeinate`? Does it fake input? No. Why does macOS say "Background Items Added"?), MIT license.
 - **`LICENSE`:** MIT, 2026, Gabriel Deml.
 - **`.gitignore`:** `.build/`, `build/`, `.swiftpm/`, `*.xcodeproj/xcuserdata`, `.DS_Store`.
 - **Design docs** live in `docs/` (index: `docs/README.md`).
@@ -626,7 +684,7 @@ struct URLCommand: Equatable { /* parsed, pure */ static func parse(_ url: URL) 
 | # | Milestone | Modules |
 |---|---|---|
 | M1 | Awake core | Models/Settings, PowerAssertions, PowerMonitor, Policy, AwakeEngine (manual holds), Theme, EyesRenderer, StatusItemController, PanelHost, PanelView (A–G, J), main/AppDelegate, build.sh/Makefile/Info.plist |
-| M2 | Lid mode | RootDomain, Privileged/*, ClosedLidController, LidSetupView, guards + latch in Policy/engine, lid rows H/H′, Lid & Safety tab. **Ships only when `CLOSED_LID.md` §8 T1–T10 pass.** |
+| M2 | Lid mode | **First: one real `register()` of the spike (`CLOSED_LID.md` §10 #6).** RootDomain, InsomniaShared, **InsomniaHelper**, Privileged/* (HelperBackend first, SudoersBackend second), signing in build.sh, ClosedLidController, LidSetupView (3-step), guards + caps + latch in Policy/engine, lid rows H/H′, Lid & Safety tab. **Ships only when every `CLOSED_LID.md` §8 test passes for both backends.** |
 | M3 | Automations & insight | WatchMonitor, While… / babysit, rules UI, AssertionInspector, WhyAwakeMenu, Diagnostics tab, EventLog |
 | M4 | Personality & polish | Narrator + Copy pools, Notifier, DockController, Stats/About, poke and milestones, epic moments, onboarding/hidden cards, HotKeyManager, URLCommandHandler |
 | M5 | CLI | ControlProtocol/Server, CLI.swift, CLI install in Automations, README |
@@ -650,12 +708,12 @@ struct URLCommand: Equatable { /* parsed, pure */ static func parse(_ url: URL) 
 | 1 | **Holds → guards → derived status** is the single model (`Policy.evaluate` is pure) | Draft: one manual session plus `[String]` triggers. P3: `SessionKind` | Every source (panel, rule, CLI, babysit) goes through one path, guards always win, and every surface renders one value so they can't drift apart. Testable. |
 | 2 | **The eyes are the toggle** (72 pt), and the mascot is the main control | Draft and P3: a separate 120 pt ring button | Removes a redundant element. The ring around the eyes shows progress. |
 | 3 | **Lid mode is a sticky setting applied to every settings-following hold** (manual, babysit, rules). Turning it on while asleep starts a hold. CLI flags and URL holds carry fixed per-hold options and never write Settings; URL holds never get lid. "Keep screen on" stays manual/babysit only. | Manual + babysit only (draft); per-hold "level" (P2) | The user asked for "a setting", and a switch that silently does nothing under a rule reads as broken. Screen-on stays off rules, because an "on power adapter" rule would keep displays lit all day. The "forgot it was armed" risk is handled by the solid `.lid` glyph, the bag time cap, the latch and the mandatory guards. |
-| 4 | **Sudoers rule (2 commands, `#uid`, `zz_` file) + bash watchdog (EOF, 90 s heartbeat, signal trap) + root safety daemon (boot reset, 10% backstop) + marker recovery; `.stuck` when all fail** | SMAppService + XPC (needs a Team ID), osascript per toggle, `kill -0` polling, a pure boot-reset daemon | Works ad-hoc signed with one password prompt. Crashes, hangs, signals, reboots and foreign setters each hit a different layer, and the one floor that matters most is enforced by root, not by our process. `PrivilegedBackend` keeps the SMAppService path open. |
+| 4 | *(Superseded by 30 for signed builds.)* **Sudoers rule (2 commands, `#uid`, `zz_` file) + bash watchdog (EOF, 45 s heartbeat, signal trap) + root safety daemon (boot reset, 10% backstop) + marker recovery; `.stuck` when all fail.** Now the fallback for ad-hoc builds only. | osascript per toggle, `kill -0` polling, a pure boot-reset daemon | Works ad-hoc signed with one password prompt; keeps the app buildable without an Apple account. |
 | 5 | **Inline root install script**: temp files with dotted names inside root-owned directories, `visudo -cf` + `visudo -c`, atomic `mv`, `#includedir` check | Draft: script in a user `mkdtemp` directory | Fixes a TOCTOU bug that let same-user code grant itself `ALL`. Never edits `/etc/sudoers`. |
 | 6 | **Read state from IORegistry** (`SleepDisabled`, `AppleClamshellState`) with clamshell interest notifications | Parsing `pmset -g`, a 2 s lid poll | Structured, cheaper and event-driven. `pmset` text is undocumented and can change. |
 | 7 | **`displaysleepnow` on lid close only without an external display. `sleepnow` after a release while the lid is closed.** | Do nothing | The Apple Silicon panel can stay lit when shut. With an external display it would blank the display the user is looking at. |
 | 8 | **Cut "Look busy"** | `DeclareUserActivity` (draft), jiggle via Accessibility | Assertions don't reset HID idle, so the feature would be a false promise. Jiggle loses its TCC grant on every ad-hoc rebuild and defeats the screen lock. Moved to Later. |
-| 9 | **Lid guards (battery floor, heat, LPM) can't be disabled; the bag cap (default 1 h) has no "unlimited"; a guard that fires with the lid shut latches until the lid opens. Plain keep-awake has only an opt-in floor.** | Toggles for each (draft); one floor that ended every session | `disablesleep` turns off macOS's own low-battery sleep; plain assertions don't, so stopping a Caffeine-style session at 20% would be a regression. The latch stops DarkWakes re-arming a Mac in a bag. |
+| 9 | **Lid guards (battery floor, heat, LPM) can't be disabled; the battery cap (default 1 h) has no "unlimited" (see 32 for AC); a guard that fires with the lid shut latches until the lid opens. Plain keep-awake has only an opt-in floor.** | Toggles for each (draft); one floor that ended every session | `disablesleep` turns off macOS's own low-battery sleep; plain assertions don't, so stopping a Caffeine-style session at 20% would be a regression. The latch stops DarkWakes re-arming a Mac in a bag. |
 | 10 | **The URL scheme can't turn lid mode on** | Allow it with confirmation | Any web page can open `insomnia://`. Scripted lid mode goes through the CLI, which is local and same-user. |
 | 11 | **CLI in v1** (the app binary dispatches on argv, JSON Lines over a 0600 socket, holds scoped to the connection) | URL-only scripting. P1 put the CLI in v1.1 | `insomnia run -- make` is the agent-era feature, and connection-scoped holds can't leak. |
 | 12 | **App Intents → Later** | Ship them in v1 | SwiftPM doesn't run `appintentsmetadataprocessor`. URL and shell actions cover Shortcuts for now. Spike in a build script later. |
@@ -674,5 +732,20 @@ struct URLCommand: Equatable { /* parsed, pure */ static func parse(_ url: URL) 
 | 25 | **Clicking the open eyes pauses satisfied rules until they re-trigger; client holds can't be released from the eyes** | Eyes only end manual holds (draft); a timed "snooze rules" | Open eyes promise "click to let it sleep". A CLI hold belongs to a running command. |
 | 26 | **Panel: no extend chips, no holds list, fixed regions ≤ 340 pt** | 21 targets, ~490 pt, size jumps | "Clean, simple, elegant". Chips double as extend; the subline names the primary hold with Stop. |
 | 27 | **Quip budget (1 per 4 h) + four epic moments** | A quip on every toggle; only micro-motion | Funny a few times a day stays funny; "Make it epic!" needs moments worth a screenshot. |
-| 28 | **Desktop Macs get no lid UI** (`hasLid`), no battery UI without a battery | Show and grey out | A sudoers rule that does nothing is clutter and needless privilege. |
+| 28 | **Desktop Macs get no lid UI** (`hasLid`), no battery UI without a battery | Show and grey out | A privileged helper that does nothing is clutter and needless privilege. |
 | 29 | **Single instance; GUI only from LaunchServices or `--gui`** | Allow duplicates | Two `LidReconciler`s would fight over the flag and marker. |
+| 30 | **Primary privilege backend = `SMAppService.daemon` root helper over XPC**, code-signing-pinned both ways to bundle id + Team ID. The helper owns setting/clearing the flag, the crash watch (connection invalidation), the hang watch (10 s heartbeat, 45 s timeout), the boot reset, the 10% backstop and status. Replaces the bash watchdog and safety daemon on signed builds. Sudoers stays as the fallback behind the same `PrivilegedBackend`, chosen at launch by whether our signature has a Team ID. | Sudoers only (4); helper only | The user has an Apple Development identity. The helper narrows "any same-user code can silently disable sleep" to "code that can use the team's signing key" (every same-user process while that key is unlocked; see 41), needs no password, and moves every reset into one root process. The fallback keeps explicitly ad-hoc builds working. |
+| 31 | **Team ID read from our own signature at runtime**, never compiled in or written to Info.plist. The helper reads it **once at start-up from the kernel-verified code** (`csops` cdhash must match the file) and keeps it for life; the app reads it once, off the main thread. | Hard-coded team; an Info.plist key injected by build.sh; re-reading per connection | Can't drift from the real signature, needs no build step, and anyone can build with their own team. Re-reading from disk would let a swapped file change whom a running root helper trusts. No Team ID = ad hoc = sudoers. |
+| 32 | **Two lid caps: battery (always on, 15 min–8 h, default 1 h) and AC (opt-in, 1–24 h, default 4 h when on).** Separate counters, both reset only on lid open. | One cap for both; no cap on AC at all | User decision: the cap "depends on if it is on power or not". A bag on battery is the danger; on a desk on AC an unlimited run is the point, but some want a limit. |
+| 33 | **Helper upgrades are detected by cdhash** (the running helper's kernel cdhash vs. the bundled binary; if the helper doesn't answer, the bundled cdhash vs. the one saved at `register()`) and handled by unregister + register | A hand-bumped version string | Every code change changes the cdhash (a re-sign of identical code doesn't, verified), so a stale helper can't survive an update, and a helper macOS refuses to start after a rebuild is upgraded silently instead of showing "Repair". |
+| 34 | **Engage refuses a foreign `SleepDisabled = 1`** (`LidError.foreignFlag`, informational, not alarmed) | Take it over (and later clear it) | Taking it over would clear another app's flag on release, contradicting 23. |
+| 35 | **Helper is resident (`KeepAlive {SuccessfulExit: false}`) and event-driven** | Launch-on-demand, exit when idle; `KeepAlive true` | The backstop must cover foreign setters even when the app isn't running, and a crashed helper must restart to run its restart reset. A clean exit (SIGTERM, stub) is never respawned in a loop. Idle cost: no timers (a 60 s check only on battery ≤ 15%). |
+| 36 | **The helper runs only from a root-owned `/Applications/Insomnia.app`** (`make install`); setup refuses any other copy; the helper itself goes reset-only from an unsafe location; build.sh pins a `SpawnConstraint` (team + identifier + cdhash) | Register from wherever the app is (incl. `build/`) | launchd runs `BundleProgram` as root from the bundle: a user-writable bundle is a same-user → root swap. Also avoids two copies with one Label and registrations dangling into a deleted `build/`. Residual: group-writable `/Applications` (`CLOSED_LID.md` §3). |
+| 37 | **The helper sets the flag by spawning `/usr/bin/pmset -a disablesleep 0/1`** and reads back IORegistry + the saved setting | `IOPMSetSystemPowerSetting` via `dlsym` | No header, and `pmset` holds private entitlements for the same job, so a non-Apple root process may be refused or only half-apply it. `pmset` is Apple-signed, SIP-protected, fixed argv, ~50 ms. |
+| 38 | **No silent ad-hoc fallback**: build.sh fails without a usable identity unless `INSOMNIA_SIGN_IDENTITY=-`; a registered signed helper blocks ad-hoc builds and the sudoers install | Fall back to ad hoc automatically | A locked keychain or expired cert would otherwise strand a registered root helper and quietly switch to the weaker backend. |
+| 39 | **One uid owns the engaged set** (`.otherUser` for others) | Console-user tracking; ignore uids | Stops one user's session keeping the flag at 1 under another, without dropping a background user's running session on a switch. |
+| 40 | **Headless `--helper-status` / `--unregister-helper`; Remove must end in `.notRegistered`/`.notFound`** | `launchctl bootout` | `bootout` is undone at the next boot while a bundle is at the path; a leftover BTM record would run the next bundle placed there without a new approval. |
+| 41 | **Signing key: login keychain by default; optional dedicated locked keychain** (`INSOMNIA_SIGN_KEYCHAIN`) | Always locked; ignore | With an unlocked key every same-user process can sign a client or a helper the requirement accepts. Locking costs a password per build: **user decision pending** (`CLOSED_LID.md` §10 #12). |
+| 42 | **User-confirmed (2026-10-31): do one real `register()`/`unregister()` from a root-owned `/Applications` copy during M2 verification. If macOS refuses an Apple Development–signed helper, STOP and get a Developer ID certificate + notarization (user will obtain it)** — do not silently promote the sudoers fallback | Promote sudoers to primary; skip the test | User preference: wants the signed helper, not the sudoers rule, as the real backend. |
+| 43 | **User-confirmed: signing key stays in the login keychain** (no per-build prompt); residual risk stays documented in CLOSED_LID threat model | Dedicated locked keychain by default | Matches how Xcode already uses the key on this Mac; convenience for a local tool. |
+| 44 | **User-confirmed: lid mode requires `make install` (sudo) into a root-owned `/Applications/Insomnia.app`**; drag-installed copies can't set up lid mode | Allow user-owned locations | Prevents same-user code from swapping the binary a root daemon runs. |

@@ -90,7 +90,7 @@ enum WatchTarget: Hashable, Codable, Sendable {
 struct AwakeOptions: Hashable, Codable, Sendable {
     /// Also hold PreventUserIdleDisplaySleep ("Keep screen on").
     var screen: Bool
-    /// Also request closed-lid mode (pmset disablesleep 1). Subject to guards + helper.
+    /// Also request closed-lid mode (SleepDisabled = 1). Subject to guards + privileged backend.
     var lid: Bool
 
     static let systemOnly = AwakeOptions(screen: false, lid: false)
@@ -175,49 +175,102 @@ enum GuardReason: String, Hashable, Codable, CaseIterable, Sendable {
     case lowPowerMode
     /// "Only on power adapter" set and on battery. Lid only.
     case acRequired
-    /// Engine counter of bag-condition seconds ≥ Settings.lidMaxOnBatteryMinutes. Resets only when the lid opens. Lid only.
+    /// Engine counter of bag-condition seconds (lid closed, no ext. display, on battery) ≥ Settings.lidMaxOnBatteryMinutes.
+    /// Always on. Resets only when the lid opens. Lid only.
     case lidBatteryCap
+    /// Settings.lidCapOnACEnabled and engine counter of lid-closed-on-AC seconds (no ext. display) ≥ Settings.lidMaxOnACMinutes.
+    /// Off by default. Resets only when the lid opens. Lid only.
+    case lidACCap
 
     var affectsAllHolds: Bool { self == .awakeBatteryFloor }
-    /// Alarm-type guards show `.squint`; user-chosen limits (acRequired, lidBatteryCap) keep the normal mood.
-    var squints: Bool { self != .acRequired && self != .lidBatteryCap }
+    /// Alarm-type guards show `.squint`; user-chosen limits (acRequired, both caps) keep the normal mood.
+    var squints: Bool { self != .acRequired && self != .lidBatteryCap && self != .lidACCap }
 }
 
 // MARK: Closed-lid status
 
+/// Which privileged backend this build uses, chosen once at launch, off the main thread (docs/CLOSED_LID.md §2.1):
+/// `.helper` when our own code signature carries a Team ID, `.sudoers` for builds explicitly made ad hoc.
+enum PrivilegeBackendKind: String, Sendable {
+    case helper, sudoers
+}
+
+/// Readiness of the privileged backend. Only `.installed` may engage. Mapping: docs/CLOSED_LID.md §2.6.
 enum HelperStatus: Equatable, Sendable {
+    /// Nothing set up; offer "Set Up…". Helper: SMAppService `.notRegistered` **or `.notFound`** (a never-registered
+    /// daemon reports `.notFound` on macOS 27) while the bundle has the plist + helper and sits at a safe location.
+    /// Sudoers: neither piece present.
     case notInstalled
-    /// Exactly one of sudoers rule / safety daemon present → offer Repair.
+    /// Helper registered but not allowed (first setup, or switched off later) in System Settings ▸ General ▸
+    /// Login Items & Extensions. Offer "Open System Settings"; re-check until `.enabled`.
+    case requiresApproval
+    /// Helper enabled, but the running helper's cdhash differs from the bundled one (app updated or rebuilt), or the
+    /// helper doesn't answer and the bundled cdhash differs from the one saved at register(). Upgrade silently
+    /// (only while not engaged): unregister, register.
+    case versionMismatch(running: String, bundled: String)
+    /// Helper: the launchd plist or the helper binary is really missing from the bundle. "Reinstall Insomnia."
+    case notFound
+    /// Helper: this copy isn't `/Applications/Insomnia.app` owned by root and not group/other-writable
+    /// (`InstallLocation.check`). Setup is refused; "Install with make install". CLOSED_LID.md §2.3.
+    case unsafeLocation
+    /// Helper enabled, but the XPC call fails, times out (2 s) or fails code-signing validation. Offer "Repair…".
+    case unreachable
+    /// Sudoers backend (ad-hoc build) while a helper from a signed build is still registered (SMAppService status
+    /// `.enabled` / `.requiresApproval`). Never offer the sudoers install; offer "Remove…" (unregister).
+    case leftoverHelper
+    /// Sudoers fallback: exactly one of sudoers rule / safety daemon present → offer Repair.
     case partial(sudoers: Bool, safetyDaemon: Bool)
-    /// Both present but the daemon is disabled in Login Items → refuse to engage; "Enable Insomnia in Login Items".
+    /// Sudoers fallback: both present but the daemon is disabled in Login Items → refuse to engage.
     case daemonDisabled
+    /// Ready. Helper: enabled, reachable, current. Sudoers: rule works and daemon enabled.
     case installed
 }
 
 enum LidError: Equatable, Sendable {
     case helperMissing
-    /// sudo/pmset exited non-zero (or spawn/watchdog failure → -1).
+    /// Privileged call failed: sudo/pmset exit status, or a HelperResult raw value; -1 = spawn/XPC failure or timeout.
     case commandFailed(Int32)
     /// IORegistry SleepDisabled did not match what we set.
     case readbackMismatch
-    /// The watchdog exited while engaged (it resets the flag on any exit except "disarm").
-    case watchdogLost
+    /// The safety net died while engaged: helper connection interrupted/invalidated or heartbeat answered "not engaged"
+    /// (helper backend), or the watchdog exited (sudoers backend). Either way the flag has been reset.
+    case safetyNetLost
     /// Something else set SleepDisabled = 0 while engaged. Respected; never re-applied without a user action.
     case overridden
+    /// SleepDisabled was already 1, set by something else. Not taken over (Decision 23). The Mac stays awake anyway.
+    case foreignFlag
+    /// Helper refused engage (`HelperResult.otherUser`): another user on this Mac (fast user switching) holds lid mode.
+    /// Informational, like `.foreignFlag`.
+    case otherUser
+
+    /// `.foreignFlag` / `.otherUser` are informational (the Mac is awake, just not by us); the rest show `.alarmed`.
+    var alarms: Bool { self != .foreignFlag && self != .otherUser }
 }
 
-/// Errors from the one-time install/uninstall (docs/CLOSED_LID.md §2.3).
+/// Errors from the one-time setup/removal (docs/CLOSED_LID.md §2.6 helper, §2.7 sudoers).
 enum LidSetupError: Error, Equatable, Sendable {
+    /// The user cancelled an admin password prompt (sudoers install/uninstall, Reset with password…).
     case cancelled
+    /// Sudoers: user name failed validation.
     case invalidUser
+    /// Sudoers: /etc/sudoers lacks the stock #includedir.
     case includedirMissing
+    /// Sudoers: the root script exited non-zero.
     case scriptFailed(code: Int32, detail: String)
+    /// Helper: SMAppService register()/unregister() threw something other than "needs approval".
+    case registrationFailed(code: Int, detail: String)
+    /// Helper: enabled, but no valid XPC answer within 2 s after setup.
+    case helperUnreachable
+    /// Helper: register() refused because the bundle isn't root-owned at /Applications/Insomnia.app (InstallLocation).
+    case unsafeLocation
+    /// Helper: after unregister() the status is not `.notRegistered` / `.notFound`.
+    case unregisterIncomplete
 }
 
 enum LidStatus: Equatable, Sendable {
     /// Not requested (setting off, or nothing awake wants lid).
     case off
-    /// Requested but helper not installed.
+    /// Requested but HelperStatus != .installed (the sublabel says which step is missing).
     case needsSetup
     /// Privileged call in flight.
     case engaging
@@ -230,7 +283,7 @@ enum LidStatus: Equatable, Sendable {
     case latched
     /// Apply/readback failed; flag verified 0. Mac sleeps normally. Offers Retry.
     case error(LidError)
-    /// Flag is 1 and every reset failed (e.g. sudoers rule removed). Red, persistent; "Reset with password…".
+    /// Flag is 1 and every reset failed (helper unreachable, sudoers rule removed). Red, persistent; "Reset with password…".
     case stuck
 }
 
@@ -260,7 +313,8 @@ enum EyeMood: Equatable, Sendable {
 
     init(status: AwakeStatus, lid: LidStatus) {
         switch lid {
-        case .error, .stuck: self = .alarmed; return
+        case .stuck: self = .alarmed; return
+        case .error(let e) where e.alarms: self = .alarmed; return
         case .suspended(let g) where g.squints: self = .squint; return
         default: break
         }
