@@ -370,7 +370,7 @@ struct ControlServerTests {
         let link = dir.appendingPathComponent("link")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
         let server = ControlServer(socketURL: link.appendingPathComponent("control.sock"), responder: RecordingResponder())
-        #expect(throws: ControlServer.StartError.self) { try server.start() }
+        #expect(throws: ControlServer.StartError.unsafeDirectory("not a directory (or a symlink)")) { try server.start() }
     }
 
     private func waitUntil(_ condition: @MainActor () -> Bool) async throws {

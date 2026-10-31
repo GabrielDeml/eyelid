@@ -475,19 +475,31 @@ enum CLI {
         return nil
     }
 
-    /// Opens the app this binary belongs to (so a symlinked CLI starts its own copy), else whatever copy
+    /// Set in the environment of an app the CLI launched: that app skips "Start keeping awake at launch", which would
+    /// otherwise invert `toggle` and leave a forever hold behind `run` (AppDelegate).
+    static let launchedByCLIKey = "INSOMNIA_LAUNCHED_BY_CLI"
+
+    static func wasLaunchedByCLI(_ environment: [String: String]) -> Bool { environment[launchedByCLIKey] == "1" }
+
+    /// `open` arguments: the app this binary belongs to (so a symlinked CLI starts its own copy), else whatever copy
     /// LaunchServices knows by bundle id. `-g`: don't steal focus.
+    static func launchArguments(ownApp: URL?) -> [String] {
+        ["-g", "--env", "\(launchedByCLIKey)=1"] + (ownApp.map { ["-a", $0.path] } ?? ["-b", bundleID])
+    }
+
+    /// The `.app` whose executable this is, following symlinks (`~/.local/bin/insomnia`): `Bundle.main` doesn't
+    /// resolve them, so through the symlink it has no bundle id. nil when the executable isn't inside our bundle.
+    static func ownAppBundle(executable: URL?) -> URL? {
+        guard let exe = executable?.resolvingSymlinksInPath() else { return nil }
+        let app = exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()   // MacOS, Contents
+        guard app.pathExtension == "app", Bundle(url: app)?.bundleIdentifier == bundleID else { return nil }
+        return app
+    }
+
     private static func launchApp() -> Bool {
-        let bundle = Bundle.main
-        var arguments = ["-g"]
-        if bundle.bundleIdentifier == bundleID, bundle.bundleURL.pathExtension == "app" {
-            arguments += ["-a", bundle.bundleURL.path]
-        } else {
-            arguments += ["-b", bundleID]
-        }
         let open = Process()
         open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        open.arguments = arguments
+        open.arguments = launchArguments(ownApp: ownAppBundle(executable: Bundle.main.executableURL))
         open.standardOutput = FileHandle.nullDevice
         open.standardError = FileHandle.nullDevice
         do { try open.run() } catch { return false }
@@ -542,18 +554,55 @@ enum CLI {
     ]
 }
 
+// MARK: - Signals that were ignored when the process started
+
+/// `nohup` starts its command with SIGHUP ignored, and a non-interactive shell starts background jobs with SIGINT and
+/// SIGQUIT ignored. `run` leaves such a signal alone: it doesn't forward it, and the command inherits SIG_IGN instead
+/// of having it reset to the default (so `nohup insomnia run -- job &` survives the terminal closing, like `nohup job &`).
+enum InheritedSignals {
+    /// Read on first use, which is the first statement of main.swift (before it ignores SIGPIPE).
+    static let ignored: Set<Int32> = ignoredNow([SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE])
+
+    static func ignoredNow(_ signals: [Int32]) -> Set<Int32> {
+        Set(signals.filter { sig in
+            var action = sigaction()
+            guard sigaction(sig, nil, &action) == 0 else { return false }
+            return unsafeBitCast(action.__sigaction_u.__sa_handler, to: Int.self) == unsafeBitCast(SIG_IGN, to: Int.self)
+        })
+    }
+}
+
 // MARK: - run / watch: a client hold for exactly a process's lifetime
 
 @MainActor
 enum CLIRunner {
-    /// Signals `run` forwards to the command. While we are the terminal's foreground job, ^C and ^\ already reach
-    /// the command (same process group), so those two are forwarded only when they didn't come from the terminal.
-    private static let forwarded: [Int32] = [SIGINT, SIGTERM, SIGHUP, SIGQUIT]
+    /// Signals `run` forwards to the command, minus those ignored at start (InheritedSignals). While we are the
+    /// terminal's foreground job, ^C and ^\ already reach the command (same process group), so those two are forwarded
+    /// only when they didn't come from the terminal.
+    static let forwardable: [Int32] = [SIGINT, SIGTERM, SIGHUP, SIGQUIT]
 
-    static func run(_ command: [String], options: AwakeOptions) -> Int32 {
+    static func forwarded(inheritedIgnored: Set<Int32>) -> [Int32] {
+        forwardable.filter { !inheritedIgnored.contains($0) }
+    }
+
+    /// How `run` and `watch` reach the app. The first hold may launch it; after losing it they only reconnect, every
+    /// `retryMilliseconds`, and never launch it (a quit is the user's call).
+    struct Connector {
+        var connect: @MainActor () -> Result<ControlClient, CLI.ConnectFailure>
+        var reconnect: @MainActor () -> ControlClient?
+        var retryMilliseconds = 2000
+
+        static var live: Connector {
+            Connector(connect: { CLI.connect(launchIfNeeded: true) },
+                      reconnect: { ControlClient.connect(path: ControlPaths.socket.path) })
+        }
+    }
+
+    static func run(_ command: [String], options: AwakeOptions, connector: Connector = .live,
+                    inheritedIgnored: Set<Int32> = InheritedSignals.ignored) -> Int32 {
         let label = URL(fileURLWithPath: command[0]).lastPathComponent
         let client: ControlClient
-        switch beginHold(label: label, options: options) {
+        switch beginHold(label: label, options: options, connector: connector) {
         case .success(let c): client = c
         case .failure(let code): return code.value
         }
@@ -566,12 +615,13 @@ enum CLIRunner {
         defer { Darwin.close(kq) }
 
         // Watch the signals first, then ignore their default action: kqueue still reports ignored signals.
+        let forwarded = forwarded(inheritedIgnored: inheritedIgnored)
         for sig in forwarded { addEvent(kq, ident: UInt(sig), filter: EVFILT_SIGNAL) }
         for sig in forwarded { signal(sig, SIG_IGN) }
 
-        let spawned = spawn(command)
+        let spawned = spawn(command, inheritedIgnored: inheritedIgnored)
         guard case .success(let pid) = spawned else {
-            restoreSignals()
+            restoreSignals(forwarded)
             client.close()
             if case .failure(let e) = spawned {
                 let notFound = e.code == ENOENT
@@ -582,9 +632,9 @@ enum CLIRunner {
         }
 
         let watching = addEvent(kq, ident: UInt(pid), filter: EVFILT_PROC, fflags: UInt32(NOTE_EXIT))
-        addEvent(kq, ident: UInt(client.fd), filter: EVFILT_READ)
+        let hold = HeldConnection(client: client, kq: kq, label: label, options: options, connector: connector)
 
-        // Only events from here on: no polling, no timers.
+        // Only events from here on: no polling (the reconnect timer runs only after losing the app).
         while watching {
             var event = Darwin.kevent()
             let n = kevent(kq, nil, 0, &event, 1, nil)
@@ -598,10 +648,8 @@ enum CLIRunner {
                 if (sig == SIGINT || sig == SIGQUIT) && inTerminalForeground() { continue }
                 kill(pid, sig)
                 continue
-            case EVFILT_READ:
-                connectionEvent(event, kq: kq, client: client, label: label)
-                continue
             default:
+                hold.handle(event)
                 continue
             }
             break   // the command exited
@@ -609,8 +657,8 @@ enum CLIRunner {
 
         var status: Int32 = 0
         while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
-        client.close()   // releases the hold
-        restoreSignals()
+        hold.close()   // releases the hold
+        restoreSignals(forwarded)
         switch WaitStatus(status) {
         case .exited(let code):
             return code
@@ -619,7 +667,7 @@ enum CLIRunner {
         }
     }
 
-    static func watch(pid: Int32, options: AwakeOptions) -> Int32 {
+    static func watch(pid: Int32, options: AwakeOptions, connector: Connector = .live) -> Int32 {
         guard kill(pid, 0) == 0 || errno == EPERM else {
             CLI.printError("insomnia: no process with pid \(pid)")
             return CLIExit.usage
@@ -636,28 +684,26 @@ enum CLIRunner {
         if !exitWatched && errno == ESRCH { return CLIExit.ok }   // already gone
 
         let client: ControlClient
-        switch beginHold(label: name, options: options) {
+        switch beginHold(label: name, options: options, connector: connector) {
         case .success(let c): client = c
         case .failure(let code): return code.value
         }
-        addEvent(kq, ident: UInt(client.fd), filter: EVFILT_READ)
+        let hold = HeldConnection(client: client, kq: kq, label: name, options: options, connector: connector)
         if isatty(STDERR_FILENO) != 0 {
             CLI.printError("Awake while \(name) (\(pid)) runs. ^C to stop.")
         }
-        // If kqueue can't watch that pid, fall back to checking every 2 s.
+        // If kqueue can't watch that pid, fall back to checking every 2 s (and on every other wake-up).
         var poll = timespec(tv_sec: 2, tv_nsec: 0)
         while true {
             var event = Darwin.kevent()
             let n = exitWatched ? kevent(kq, nil, 0, &event, 1, nil) : kevent(kq, nil, 0, &event, 1, &poll)
             if n < 0 { if errno == EINTR { continue } else { break } }
-            if n == 0 {
-                if kill(pid, 0) != 0 && errno == ESRCH { break }
-                continue
-            }
+            if !exitWatched, kill(pid, 0) != 0 && errno == ESRCH { break }
+            if n == 0 { continue }
             if Int32(event.filter) == EVFILT_PROC { break }
-            if Int32(event.filter) == EVFILT_READ { connectionEvent(event, kq: kq, client: client, label: name) }
+            hold.handle(event)
         }
-        client.close()
+        hold.close()
         return CLIExit.ok
     }
 
@@ -666,9 +712,10 @@ enum CLIRunner {
     private struct ExitCode: Error { let value: Int32 }
 
     /// Connects (launching the app if needed) and takes the hold, or prints why not and returns the exit code.
-    private static func beginHold(label: String, options: AwakeOptions) -> Result<ControlClient, ExitCode> {
+    private static func beginHold(label: String, options: AwakeOptions,
+                                  connector: Connector) -> Result<ControlClient, ExitCode> {
         let client: ControlClient
-        switch CLI.connect(launchIfNeeded: true) {
+        switch connector.connect() {
         case .success(let c): client = c
         case .failure(let f):
             CLI.printError("insomnia: \(f.message)")
@@ -688,19 +735,71 @@ enum CLIRunner {
         }
     }
 
-    /// The app closed our connection (it quit): say so once; the command keeps running.
-    private static func connectionEvent(_ event: Darwin.kevent, kq: Int32, client: ControlClient, label: String) {
-        var scratch = [UInt8](repeating: 0, count: 512)
-        let n = scratch.withUnsafeMutableBytes { read(client.fd, $0.baseAddress, $0.count) }
-        if n > 0 { return }   // nothing is expected after the hold's answer; ignore it
-        addEvent(kq, ident: UInt(client.fd), filter: EVFILT_READ, flags: UInt16(EV_DELETE))
-        CLI.printError("insomnia: lost touch with Insomnia (did it quit?). Your Mac may sleep while \(label) runs.")
+    /// The hold's connection. When the app closes it (it quit or crashed), say so once and keep the command running;
+    /// then retry on a kqueue timer, without launching the app, and take the hold again once it answers.
+    @MainActor
+    private final class HeldConnection {
+        private var client: ControlClient
+        private let kq: Int32
+        private let label: String
+        private let options: AwakeOptions
+        private let connector: Connector
+        private static let retryTimer: UInt = 1
+
+        init(client: ControlClient, kq: Int32, label: String, options: AwakeOptions, connector: Connector) {
+            self.client = client
+            self.kq = kq
+            self.label = label
+            self.options = options
+            self.connector = connector
+            addEvent(kq, ident: UInt(client.fd), filter: EVFILT_READ)
+        }
+
+        /// EVFILT_READ on the connection, or the retry timer.
+        func handle(_ event: Darwin.kevent) {
+            switch Int32(event.filter) {
+            case EVFILT_READ: connectionEvent()
+            case EVFILT_TIMER: retry()
+            default: break
+            }
+        }
+
+        func close() { client.close() }
+
+        private func connectionEvent() {
+            var scratch = [UInt8](repeating: 0, count: 512)
+            let n = scratch.withUnsafeMutableBytes { read(client.fd, $0.baseAddress, $0.count) }
+            if n > 0 { return }   // nothing is expected after the hold's answer; ignore it
+            addEvent(kq, ident: UInt(client.fd), filter: EVFILT_READ, flags: UInt16(EV_DELETE))
+            client.close()
+            CLI.printError("insomnia: lost touch with Insomnia (did it quit?). Your Mac may sleep while \(label) runs; "
+                           + "the hold comes back if Insomnia does.")
+            addEvent(kq, ident: Self.retryTimer, filter: EVFILT_TIMER, data: connector.retryMilliseconds)
+        }
+
+        private func retry() {
+            guard let fresh = connector.reconnect() else { return }
+            switch fresh.request(.hold(label: label, screen: options.screen, lid: options.lid), timeout: 3) {
+            case .success(let r) where r.ok:
+                addEvent(kq, ident: Self.retryTimer, filter: EVFILT_TIMER, flags: UInt16(EV_DELETE))
+                client = fresh
+                addEvent(kq, ident: UInt(fresh.fd), filter: EVFILT_READ)
+                CLI.printError("insomnia: back in touch with Insomnia; awake again while \(label) runs.")
+            case .success(let r):
+                addEvent(kq, ident: Self.retryTimer, filter: EVFILT_TIMER, flags: UInt16(EV_DELETE))
+                fresh.close()
+                CLI.printError("insomnia: Insomnia is back but refused the hold (\(r.error ?? "refused")). "
+                               + "Your Mac may sleep while \(label) runs.")
+            case .failure:
+                fresh.close()   // still starting up: try again on the next tick
+            }
+        }
     }
 
     @discardableResult
     private static func addEvent(_ kq: Int32, ident: UInt, filter: Int32, fflags: UInt32 = 0,
-                                 flags: UInt16 = UInt16(EV_ADD)) -> Bool {
-        var change = Darwin.kevent(ident: ident, filter: Int16(filter), flags: flags, fflags: fflags, data: 0, udata: nil)
+                                 flags: UInt16 = UInt16(EV_ADD), data: Int = 0) -> Bool {
+        var change = Darwin.kevent(ident: ident, filter: Int16(filter), flags: flags, fflags: fflags, data: data, udata: nil)
         return kevent(kq, &change, 1, nil, 0, nil) == 0
     }
 
@@ -713,13 +812,15 @@ enum CLIRunner {
         return tcgetpgrp(tty) == getpgrp()
     }
 
-    private static func restoreSignals() {
+    /// Back to the dispositions we started with: the ones we ignored for forwarding were at their default.
+    private static func restoreSignals(_ forwarded: [Int32]) {
         for sig in forwarded { signal(sig, SIG_DFL) }
     }
 
     /// posix_spawnp with the terminal's stdio and nothing else (CLOEXEC_DEFAULT keeps the socket out), default
-    /// signal dispositions (we ignore SIGPIPE and the forwarded ones) and an empty signal mask.
-    static func spawn(_ argv: [String]) -> Result<pid_t, SpawnError> {
+    /// signal dispositions (we ignore SIGPIPE and the forwarded ones) and an empty signal mask. A signal that was
+    /// already ignored when we started (`inheritedIgnored`, e.g. SIGHUP under nohup) stays ignored in the command.
+    static func spawn(_ argv: [String], inheritedIgnored: Set<Int32> = InheritedSignals.ignored) -> Result<pid_t, SpawnError> {
         var attr: posix_spawnattr_t?
         guard posix_spawnattr_init(&attr) == 0 else { return .failure(SpawnError(code: errno)) }
         defer { posix_spawnattr_destroy(&attr) }
@@ -729,7 +830,7 @@ enum CLIRunner {
         for fd: Int32 in 0...2 { posix_spawn_file_actions_addinherit_np(&actions, fd) }
 
         var defaults = sigset_t(0)
-        for sig in forwarded + [SIGPIPE] { defaults |= sigset_t(1) << sigset_t(sig - 1) }
+        for sig in forwardable + [SIGPIPE] where !inheritedIgnored.contains(sig) { defaults |= sigset_t(1) << sigset_t(sig - 1) }
         var mask = sigset_t(0)
         posix_spawnattr_setsigdefault(&attr, &defaults)
         posix_spawnattr_setsigmask(&attr, &mask)

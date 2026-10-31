@@ -10,13 +10,14 @@ import os
 /// | `on`       | `for=45m|2h|90|1h30m|forever`, `until=HH:mm` (next occurrence), `screen=0|1` |
 /// | `off`      | none                                                                        |
 /// | `extend`   | `by=15m` (default 15 minutes)                                               |
-/// | `sleep`    | none                                                                        |
+/// | `sleep`    | none (asks first)                                                           |
 /// | `panel`    | none                                                                        |
 /// | `settings` | `tab=general|automations|lid|diagnostics`                                   |
 ///
 /// Any web page can open `insomnia://`, so URL holds **never** get lid mode (Decision 10): `lid=` is ignored and logged,
-/// and every `on` hold carries fixed options with `lid: false`. The URL scheme never writes Settings. Unknown hosts and
-/// parameters are ignored and logged.
+/// and every `on` hold carries fixed options with `lid: false`. `sleep` asks for confirmation before it sleeps the Mac.
+/// The URL scheme never writes Settings. Unknown hosts and parameters are ignored and logged (sanitised: the names are
+/// the page's choice too).
 struct URLCommand: Equatable, Sendable {
     enum When: Equatable, Sendable {
         /// `on` without `for`/`until`: Settings' default duration.
@@ -199,18 +200,21 @@ struct URLCommand: Equatable, Sendable {
 enum URLCommandHandler {
     private static let log = Logger(subsystem: "com.gdeml.Insomnia", category: "url")
 
-    static func handle(_ url: URL) {
+    static func handle(_ url: URL, settings: Settings = .shared, engine: AwakeEngine = .shared,
+                       confirmSleep: @MainActor () -> Bool = askToSleep) {
         guard let command = URLCommand.parse(url) else {
-            record("ignored \(redacted(url))")
+            record("ignored \(redacted(url))", engine)
             return
         }
         if !command.ignored.isEmpty {
-            record("\(url.host ?? "?"): ignored \(command.ignored.joined(separator: ", "))")
+            record("\(LogText.oneLine(url.host ?? "?", limit: 40)): ignored \(names(command.ignored, separator: ", "))", engine)
         }
-        perform(command, settings: .shared, engine: .shared)
+        perform(command, settings: settings, engine: engine, confirmSleep: confirmSleep)
     }
 
-    static func perform(_ command: URLCommand, settings: Settings, engine: AwakeEngine, now: Date = Date()) {
+    /// `confirmSleep`: any web page can open `insomnia://sleep`, so it asks before sleeping (tests answer for it).
+    static func perform(_ command: URLCommand, settings: Settings, engine: AwakeEngine, now: Date = Date(),
+                        confirmSleep: @MainActor () -> Bool = askToSleep) {
         // Fixed options for a hold a URL starts; unset fields come from Settings now. Never lid (Decision 10).
         let noLid = AwakeOptions(screen: settings.keepScreenOn, lid: false)
         switch command.action {
@@ -235,6 +239,10 @@ enum URLCommandHandler {
             engine.extend(minutes: minutes, source: .urlScheme, options: noLid)
             record("extend +\(minutes)m", engine)
         case .sleep:
+            guard confirmSleep() else {
+                record("sleep now: declined", engine)
+                return
+            }
             record("sleep now", engine)
             Task { await engine.sleepNow() }
         case .panel:
@@ -244,15 +252,38 @@ enum URLCommandHandler {
         }
     }
 
-    private static func record(_ message: String, _ engine: AwakeEngine = .shared) {
-        log.info("\(message, privacy: .public)")
-        engine.eventLog?.log("url", message)
+    /// The confirmation for `insomnia://sleep`.
+    static func askToSleep() -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Put your Mac to sleep now?"
+        alert.informativeText = "A link (insomnia://sleep) asked for it. Your Mac sleeps even if something is keeping it awake."
+        alert.addButton(withTitle: "Sleep")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
-    /// Host + parameter names only: query values could be anything a web page put there.
-    private static func redacted(_ url: URL) -> String {
+    private static func record(_ message: String, _ engine: AwakeEngine) {
+        let line = LogText.oneLine(message, limit: 300)   // belt and braces: never more than one log line
+        log.info("\(line, privacy: .public)")
+        engine.eventLog?.log("url", line)
+    }
+
+    /// Host + parameter names only: query values could be anything a web page put there. So could the names and the
+    /// host, so they are made one short line each.
+    static func redacted(_ url: URL) -> String {
         let names = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.map(\.name) ?? []
-        return "\(url.scheme ?? "?")://\(url.host ?? "")" + (names.isEmpty ? "" : "?" + names.joined(separator: "&"))
+        return "\(LogText.oneLine(url.scheme ?? "?", limit: 40))://\(LogText.oneLine(url.host ?? "", limit: 40))"
+            + (names.isEmpty ? "" : "?" + Self.names(names, separator: "&"))
+    }
+
+    /// Untrusted parameter names for the log: at most 5, each one line of at most 40 characters, then "+N more".
+    static func names(_ names: [String], separator: String) -> String {
+        let shown = names.prefix(5).map { name -> String in
+            let clean = LogText.oneLine(name, limit: 40)
+            return clean.isEmpty ? "\"\"" : clean
+        }
+        return shown.joined(separator: separator) + (names.count > 5 ? " +\(names.count - 5) more" : "")
     }
 }
 

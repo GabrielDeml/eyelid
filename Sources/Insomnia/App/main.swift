@@ -4,6 +4,8 @@ import InsomniaShared
 
 // Entry point (ARCHITECTURE.md "App/main.swift").
 
+// Before changing any disposition: what was already ignored (nohup), so `insomnia run` can leave it that way.
+_ = InheritedSignals.ignored
 signal(SIGPIPE, SIG_IGN)
 
 let arguments = CommandLine.arguments.filter { !$0.hasPrefix("-psn_") }   // old LaunchServices process serial number
@@ -73,7 +75,7 @@ case .usage:
 
 // 4. The app (LaunchServices or --gui).
 MainActor.assumeIsolated {
-    let app = NSApplication.shared
+    let app = InsomniaApplication.shared   // the subclass, so a second quit can't cut the first one short
     let delegate = AppDelegate()
     app.delegate = delegate
     app.run()

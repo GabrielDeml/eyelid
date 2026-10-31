@@ -271,7 +271,7 @@ Settings…
 ```
 Startup
   Launch at login                                    [✓]
-  Start keeping awake at launch                      [ ]
+  Start keeping awake at launch                      [ ]   (not when the command line or a link starts Insomnia)
 Behaviour
   Default duration                        [Until I stop ▾]   (30m…8h, Until I stop)
   Clicking the eyes in the menu bar      (•) Opens panel   ( ) Toggles
@@ -310,7 +310,7 @@ URL scheme (works from Shortcuts → "Open URLs" or Terminal → open "…"; lin
   insomnia://on?until=17:30&screen=1  [⧉]
   insomnia://off                   [⧉]
   insomnia://extend?by=15m         [⧉]
-  insomnia://toggle  · insomnia://panel  · insomnia://sleep        [⧉]
+  insomnia://toggle  · insomnia://panel  · insomnia://sleep        [⧉]   (sleep asks first)
 ```
 
 Each rule is one sentence-shaped row; there's never a modal form. The `screen` and `lid` checkboxes are per rule and default to off.

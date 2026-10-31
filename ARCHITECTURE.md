@@ -336,7 +336,7 @@ struct LidCloseCounters { advance(to:mode:), lidOpened(at:), capDeadline(…), b
     var remaining: TimeInterval? { get }           // manual timed only
     var progress: Double? { get }                  // 0…1 elapsed of manual timed
 
-    func start() async                             // ClosedLidController.start → recoverIfNeeded → refreshHelper → activateOnLaunch
+    func start(activateOnLaunch: Bool = true) async   // ClosedLidController.start → recoverIfNeeded → refreshHelper → activateOnLaunch (false: launched by the CLI or a URL)
     /// Replaces the manual hold. options == nil → followsSettings; non-nil (CLI flags, URL) → fixed. Never writes Settings.
     func activate(_ d: AwakeDuration, source: SessionSource, options: AwakeOptions? = nil)
     func deactivate(_ r: DeactivationReason)       // ends manual + babysit holds (rules/clients unaffected)
@@ -651,11 +651,11 @@ An in-memory ring of 200 entries, also mirrored to `os.Logger(subsystem: "com.gd
 ## App shell
 
 ### `App/main.swift`
-0. `signal(SIGPIPE, SIG_IGN)`.
+0. Record which signals were already ignored at start (`InheritedSignals`: `nohup`'s SIGHUP, a background job's SIGINT/SIGQUIT), then `signal(SIGPIPE, SIG_IGN)`.
 1. If `CommandLine.arguments` contains `--export-icon <dir>`, render `EyesRenderer.appIcon` at the standard `.iconset` sizes and names (16…1024, @1x and @2x), then `exit(0)`. No run loop.
 2. If `arguments[1]` is a CLI command (`on off toggle extend status why run watch help --why --version`), run `CLI.main(args)` and `exit(code)`. **No NSApplication.** Helper maintenance (`CLOSED_LID.md` §2.6): `--helper-status` (exit 0 if the helper is registered, 1 if not) and `--unregister-helper` (quit a running GUI instance, wait ≤ 5 s, `unregister()`, confirm; exit 0/1). Any other argument except `--gui` → usage, exit 2.
 3. No arguments and `getppid() != 1` (not launched by LaunchServices, e.g. typed in a terminal) → print help, exit 2.
-4. Otherwise (LaunchServices or `--gui`): `let app = NSApplication.shared; let delegate = AppDelegate(); app.delegate = delegate; app.run()`, keeping a strong reference to the delegate.
+4. Otherwise (LaunchServices or `--gui`): `let app = InsomniaApplication.shared; let delegate = AppDelegate(); app.delegate = delegate; app.run()`, keeping a strong reference to the delegate. `InsomniaApplication` ignores `terminate(_:)` while a quit is pending, so a second ⌘Q, Dock Quit, SIGTERM or quit Apple Event can't skip the lid release.
 
 ### `App/CLI.swift`
 ```
@@ -667,9 +667,9 @@ insomnia run [--screen] [--lid] -- <cmd…>   # client hold for exactly the comm
 insomnia watch --pid N [--screen] [--lid]   # client hold until PID exits (DispatchSource proc exit)
 insomnia --why                    # an existential answer, personality-aware
 ```
-- **Connecting:** connect to `ControlPaths.socket`. If no `NSRunningApplication` has the bundle id, run `/usr/bin/open -g -a <the bundle this binary lives in>` (else `-b com.gdeml.Insomnia`) and wait up to 5 s for the socket. Only `on`, `toggle`, `extend`, `run` and `watch` launch the app; `off`, `status` and `why` answer "Insomnia isn't running" instead. If the app runs but the socket doesn't answer within 3 s (it may be starting), exit 3 (never `open` a running app: that's a reopen).
+- **Connecting:** connect to `ControlPaths.socket`. If no `NSRunningApplication` has the bundle id, run `/usr/bin/open -g --env INSOMNIA_LAUNCHED_BY_CLI=1 -a <the bundle this binary lives in>` (found from the executable with symlinks resolved, so `~/.local/bin/insomnia` starts its own copy; else `-b com.gdeml.Insomnia`) and wait up to 5 s for the socket. An app launched this way skips "Start keeping awake at launch". Only `on`, `toggle`, `extend`, `run` and `watch` launch the app; `off`, `status` and `why` answer "Insomnia isn't running" instead. If the app runs but the socket doesn't answer within 3 s (it may be starting), exit 3 (never `open` a running app: that's a reopen).
 - **Output:** plain text by default; `--json` prints the `StatusPayload` (`why`: the `[WhyRow]`), and on failure `{"ok":false,"error":…}` plus the message on stderr.
-- **`run` / `watch`:** send `hold` and keep the connection open. For `run`, spawn the child with `posix_spawn` (inheriting stdio only, default signal dispositions), forward SIGINT/SIGTERM (and SIGHUP/SIGQUIT) to it (not ^C/^\ the terminal already delivered to the foreground job), close the socket after it exits, and exit with its status or die of its signal. `watch` closes the socket when the PID exits.
+- **`run` / `watch`:** send `hold` and keep the connection open. For `run`, spawn the child with `posix_spawn` (inheriting stdio only, default signal dispositions), forward SIGINT/SIGTERM (and SIGHUP/SIGQUIT) to it (not ^C/^\ the terminal already delivered to the foreground job), close the socket after it exits, and exit with its status or die of its signal. A signal that was already ignored when `insomnia` started (`nohup`) is neither forwarded nor reset: the child inherits SIG_IGN. `watch` closes the socket when the PID exits. If the app closes the connection (it quit), both print one line and keep going, retrying every 2 s without launching the app; when it answers again they re-send `hold` (3 s timeout) and say so. A refusal stops the retries.
 - **Exit codes:**
   - 0: ok
   - 1: asleep (`status` only)
@@ -678,7 +678,7 @@ insomnia --why                    # an existential answer, personality-aware
   - 4: request refused (e.g. lid mode not set up)
 
 ### `App/AppDelegate.swift`
-- **`applicationWillFinishLaunching`:** if another `NSRunningApplication` has our bundle id and a different pid, open `insomnia://panel` and `exit(0)` before touching the lid, socket or status item. Set the `NotificationDelegate`. Build `NSApp.mainMenu` (App: About, Settings… ⌘,, Quit ⌘Q; Edit: standard selectors).
+- **`applicationWillFinishLaunching`:** register the `kAEGetURL` Apple Event first (a URL that launches the app arrives before didFinishLaunching). If another `NSRunningApplication` has our bundle id and a different pid, hand over: forward the launch URL (else `insomnia://panel`) to that copy with `NSWorkspace.open(_:withApplicationAt:)` and exit from didFinishLaunching, before touching the lid, socket or status item. Set the `NotificationDelegate`. Build `NSApp.mainMenu` (App: About, Settings… ⌘,, Quit ⌘Q; Edit: standard selectors).
 - **`applicationDidFinishLaunching`:**
   1. `Notifier.setUp()`
   2. `PowerMonitor.shared.start()`
@@ -688,9 +688,9 @@ insomnia --why                    # an existential answer, personality-aware
   6. Wire the `AppRouter` handlers.
   7. Register the hotkey, and re-register it when the `hotKey*` settings change.
   8. `ControlServer.shared.start()`
-  9. `Task { await AwakeEngine.shared.start(); ControlServer.shared.setReady() }`
-  10. Register the `kAEGetURL` Apple Event, routed to `URLCommandHandler.handle`.
-- **`applicationShouldTerminate`:** if the lid marker exists or `lid != .off`, return `.terminateLater`, then `Task { await AwakeEngine.shared.prepareForQuit(); NSApp.reply(toApplicationShouldTerminate: true) }`. Logout, restart and shutdown arrive here too (quit Apple Event); there is no separate `willPowerOff` path.
+  9. `Task { await AwakeEngine.shared.start(activateOnLaunch:); ControlServer.shared.setReady() }`. `activateOnLaunch` is false when the CLI (`INSOMNIA_LAUNCHED_BY_CLI`) or a URL launched the app: the command decides.
+  10. Run the URLs queued while launching; from here on `kAEGetURL` goes straight to `URLCommandHandler.handle`. The scheme is matched case-insensitively by `URLCommand.parse`.
+- **`applicationShouldTerminate`:** sets `InsomniaApplication.terminationPending` (further quits are ignored until the reply). If the lid marker exists or `lid != .off`, return `.terminateLater`, then `Task { await AwakeEngine.shared.prepareForQuit(); NSApp.reply(toApplicationShouldTerminate: true) }`. Logout, restart and shutdown arrive here too (quit Apple Event); there is no separate `willPowerOff` path.
 - **`applicationWillTerminate`:** `ControlServer.shared.stop()`.
 - **`applicationDockMenu`:** returns `DockController.shared.makeDockMenu()`.
 - **`applicationShouldHandleReopen`:** if the current Apple Event's `keySenderPIDAttr` equals the Dock's pid (`NSRunningApplication` `com.apple.dock`) and `showInDock` → `handleDockClick()`; otherwise `AppRouter.showPanel()` (floating if the item is hidden). Return false.
@@ -707,12 +707,12 @@ struct URLCommand: Equatable { /* parsed, pure */ static func parse(_ url: URL) 
 | `on` | `for=45m\|2h\|90\|forever`, `until=HH:mm` (next occurrence), `screen=0\|1`. Always fixed options with `lid: false`. |
 | `off` | none |
 | `extend` | `by=15m` |
-| `sleep` | none |
+| `sleep` | none. Asks first ("Put your Mac to sleep now?"): any web page can open a link. |
 | `panel` | none |
 | `settings` | `tab=` |
 
 - **`lid` is ignored and logged.** URL holds always carry `lid: false` (`CLOSED_LID.md` §3, §5). The URL scheme never writes Settings.
-- **Unknown hosts or parameters:** ignored and logged.
+- **Unknown hosts or parameters:** ignored and logged. A page chooses the names too, so the log gets at most 5, each one line of at most 40 characters.
 
 ### `Resources/Info.plist`
 

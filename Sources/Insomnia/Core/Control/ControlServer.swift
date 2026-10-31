@@ -675,13 +675,8 @@ final class EngineControlResponder: ControlResponding {
 
     /// Labels come from another process: one line, no control characters, at most 40 characters.
     static func sanitizedLabel(_ raw: String) -> String {
-        let cleaned = raw.unicodeScalars
-            .map { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) ? " " : String($0) }
-            .joined()
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-        guard !cleaned.isEmpty else { return "a command" }
-        return cleaned.count > 40 ? String(cleaned.prefix(39)) + "…" : cleaned
+        let cleaned = LogText.oneLine(raw, limit: 40)
+        return cleaned.isEmpty ? "a command" : cleaned
     }
 
     static func describe(_ request: ControlRequest) -> String {
@@ -703,5 +698,18 @@ final class EngineControlResponder: ControlResponding {
     private func log(_ message: String) {
         logger.info("\(message, privacy: .public)")
         engine.eventLog?.log("cli", message)
+    }
+}
+
+/// Text another process or a web page chose, made safe for one event-log line: control and newline characters become
+/// spaces, whitespace runs collapse, and past `limit` characters it is cut with "…" (so it can't forge log lines).
+enum LogText {
+    static func oneLine(_ raw: String, limit: Int) -> String {
+        let cleaned = raw.unicodeScalars
+            .map { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) ? " " : String($0) }
+            .joined()
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        return cleaned.count > limit ? String(cleaned.prefix(max(0, limit - 1))) + "…" : cleaned
     }
 }
