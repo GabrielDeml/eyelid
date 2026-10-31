@@ -67,6 +67,8 @@ final class StatusItemController: NSObject {
             guard let self else { return }
             self.statusItem?.button?.highlight(false)
             if #available(macOS 27, *) { self.statusItem?.expandedInterfaceSession?.cancel() }
+            // A hidden-item card held back while the panel was up (R95).
+            HiddenItemCardController.shared.panelDidClose(itemStillHidden: self.isHidden)
         }
 
         let nc = NotificationCenter.default
@@ -88,6 +90,11 @@ final class StatusItemController: NSObject {
         observers.append(nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.scheduleHiddenCheck() }
         })
+        // Never leave the panel open across sleep (R96): it would still be up, and the engine ticking, on wake.
+        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.closePanel() }
+            })
         Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.scheduleHiddenCheck() }
         }
@@ -101,8 +108,9 @@ final class StatusItemController: NSObject {
 
     // MARK: Panel
 
-    func showPanel() {
-        guard let button = statusItem?.button, isItemVisible else {
+    /// `floating`: the top-centre panel (UX §2.6) even when the menu bar item is visible (Dock menu "Open Panel", "Until…").
+    func showPanel(floating: Bool = false) {
+        guard !floating, let button = statusItem?.button, isItemVisible else {
             panel.show(anchor: .floating)
             return
         }
@@ -129,6 +137,19 @@ final class StatusItemController: NSObject {
         lastSecondaryClick = Date()
         if NSApp.currentEvent?.modifierFlags.contains(.option) == true { showWhyAwakeMenu(); return }
         perform(secondaryAction)
+    }
+
+    /// What a macOS 27 expanded-interface session does when it begins.
+    enum SessionResponse: Equatable { case whyAwake, secondary, toggleAwake, closePanel, showPanel }
+
+    /// ⌥: Why awake. Right/⌃: the secondary action. A click with "click toggles": toggle. A click while the panel is
+    /// already open without a session (Dock, Spotlight, URL) closes it, like the 14–26 toggle (R92). Else the panel.
+    static func sessionResponse(option: Bool, secondary: Bool, primaryToggles: Bool, keyboard: Bool,
+                                panelOpen: Bool) -> SessionResponse {
+        if option { return .whyAwake }
+        if secondary { return .secondary }
+        if primaryToggles && !keyboard { return .toggleAwake }
+        return panelOpen ? .closePanel : .showPanel
     }
 
     private var primaryAction: ClickAction { Settings.shared.leftClickAction }
@@ -296,7 +317,8 @@ final class StatusItemController: NSObject {
                 guard let self, !self.isItemVisible, !self.isHidden else { return }
                 self.isHidden = true
                 self.log.notice("status item appears hidden by macOS")
-                HiddenItemCardController.shared.showIfNeeded()
+                // The card takes key focus, which would close an open panel (the first-run welcome, R95): it waits.
+                HiddenItemCardController.shared.showIfNeeded(panelOpen: self.panel.isVisible)
             }
         }
         RunLoop.main.add(t, forMode: .common)
@@ -312,23 +334,31 @@ extension StatusItemController: @preconcurrency NSStatusItemExpandedInterfaceDel
         let event = NSApp.currentEvent
         let flags = event?.modifierFlags ?? []
         let isRight = event?.type == .rightMouseDown || event?.type == .rightMouseUp || flags.contains(.control)
-        if flags.contains(.option) {
+        switch Self.sessionResponse(option: flags.contains(.option), secondary: isRight,
+                                    primaryToggles: primaryAction == .toggle, keyboard: event?.type == .keyDown,
+                                    panelOpen: panel.isVisible) {
+        case .whyAwake:
             session.cancel()
             lastSecondaryClick = Date()
             showWhyAwakeMenu()
-        } else if isRight {
+        case .secondary:
             session.cancel()
             lastSecondaryClick = Date()
             perform(secondaryAction)
-        } else if primaryAction == .toggle && event?.type != .keyDown {
+        case .toggleAwake:
             session.cancel()
             toggleAwake()
-        } else if let button = statusItem.button {
-            panel.show(anchor: .statusItem(button))
+        case .closePanel:
+            session.cancel()
+            panel.close()
+        case .showPanel:
+            if let button = statusItem.button { panel.show(anchor: .statusItem(button)) }
         }
     }
 
     func statusItemDidEndExpandedInterfaceSession(_ statusItem: NSStatusItem, animated: Bool) {
+        // Our own Dock presence switch deactivates the app for a moment (R33): keep the panel through it.
+        guard !DockController.shared.isSwitchingPresence else { return }
         panel.close()
     }
 }

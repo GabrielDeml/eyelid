@@ -56,10 +56,10 @@ struct PersonalityPolishTests {
     }
 
     @Test func dockHeaderDropsPanelLinks() {
-        #expect(DockController.dockHeader(headline: "Awake for ffmpeg", subline: "While ffmpeg (4411) runs · Stop",
-                                          status: .watching(.process(name: "ffmpeg"))) == "Awake for ffmpeg · While ffmpeg (4411) runs")
-        #expect(DockController.dockHeader(headline: "Sleep allowed", subline: "Click the eyes to stay awake", status: .asleep)
-                == "Sleep allowed")
+        var watching = PanelState()
+        watching.status = .watching(.pid(4411, name: "ffmpeg"))
+        #expect(DockController.dockHeader(watching) == "Awake for ffmpeg · While ffmpeg (4411) runs")
+        #expect(DockController.dockHeader(PanelState()) == "Sleep allowed")
     }
 
     // MARK: EpicMoments

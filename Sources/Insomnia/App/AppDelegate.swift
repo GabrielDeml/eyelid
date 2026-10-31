@@ -62,9 +62,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         // 5. Dock: presence, live tile and menu (DockController owns showInDock), then the epic moments.
         DockController.shared.untilHandler = { [weak item] in
-            item?.showPanel()
+            item?.showPanel(floating: true)
             item?.panel.model.showUntil = true
         }
+        DockController.shared.openPanelHandler = { [weak item] in item?.showPanel(floating: true) }
         DockController.shared.start()
         EpicMoments.shared.start()
 
@@ -183,6 +184,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         appMenu.addItem(withTitle: "Quit Insomnia", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         main.addItem(appItem)
+
+        // ⌘W for every titled window (Settings, About, Lid Mode setup); the panel handles it in its key monitor.
+        let fileItem = NSMenuItem()
+        let file = NSMenu(title: "File")
+        file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileItem.submenu = file
+        main.addItem(fileItem)
 
         let editItem = NSMenuItem()
         let edit = NSMenu(title: "Edit")

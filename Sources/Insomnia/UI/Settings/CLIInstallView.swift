@@ -252,15 +252,30 @@ final class CLIInstallModel {
     private(set) var path: ShellPATH.Status?
     private(set) var errorText: String?
     private(set) var copied = false
+    /// A login-shell PATH check is running ("Check Again" is disabled meanwhile).
+    private(set) var isCheckingPath = false
+
+    typealias PathChecker = @Sendable (URL, URL?) async -> ShellPATH.Status?
+
+    /// A warning is re-checked on activation at most this often (the login shell can take seconds).
+    static let pathRecheckInterval: TimeInterval = 20
 
     @ObservationIgnored private let installer: CLIInstaller
-    @ObservationIgnored private var pathChecked = false
+    @ObservationIgnored private let checkPath: PathChecker
+    @ObservationIgnored private let clock: () -> Date
+    /// Snapshots and previews pass a fixed `path`: never ask the shell.
+    @ObservationIgnored private let pathFixed: Bool
+    @ObservationIgnored private var lastPathCheck: Date?
 
     /// `path` non-nil skips the login-shell check (snapshots, previews).
-    init(installer: CLIInstaller = .standard, path: ShellPATH.Status? = nil) {
+    init(installer: CLIInstaller = .standard, path: ShellPATH.Status? = nil,
+         checkPath: @escaping PathChecker = { await ShellPATH.check(directory: $0, target: $1) },
+         clock: @escaping () -> Date = Date.init) {
         self.installer = installer
         self.path = path
-        pathChecked = path != nil
+        self.checkPath = checkPath
+        self.clock = clock
+        pathFixed = path != nil
         state = installer.state()
     }
 
@@ -268,12 +283,27 @@ final class CLIInstallModel {
     var displayDirectory: String { installer.displayDirectory }
     var canInstall: Bool { installer.target != nil && state != .occupied }
 
-    /// Re-reads the link; asks the login shell about PATH once per app run, only once a link exists.
-    func refresh() async {
+    /// Re-reads the link and, once a link exists, asks the login shell about PATH: the first time, then again while
+    /// the answer is a warning (the user may have fixed their profile; R97), at most every `pathRecheckInterval`.
+    /// `force` ("Check Again") skips the wait.
+    func refresh(force: Bool = false) async {
         state = installer.state()
-        guard state == .installed, !pathChecked else { return }
-        pathChecked = true
-        path = await ShellPATH.check(directory: installer.directory, target: installer.target)
+        guard state == .installed, !pathFixed, !isCheckingPath else { return }
+        if !force, let last = lastPathCheck {
+            guard path != .onPath, clock().timeIntervalSince(last) >= Self.pathRecheckInterval else { return }
+        }
+        isCheckingPath = true
+        lastPathCheck = clock()
+        let result = await checkPath(installer.directory, installer.target)
+        isCheckingPath = false
+        path = result
+    }
+
+    /// Forget the PATH answer: a new or removed link gets a fresh check.
+    private func resetPathCheck() {
+        guard !pathFixed else { return }
+        path = nil
+        lastPathCheck = nil
     }
 
     func install() {
@@ -283,6 +313,7 @@ final class CLIInstallModel {
         } catch {
             errorText = error.message
         }
+        resetPathCheck()
         Task { await refresh() }
     }
 
@@ -293,6 +324,7 @@ final class CLIInstallModel {
         } catch {
             errorText = error.message
         }
+        resetPathCheck()
         state = installer.state()
     }
 
@@ -405,6 +437,14 @@ struct CLIInstallView: View {
         }
     }
 
+    /// Asks the login shell again now (after editing a shell profile).
+    private var checkAgain: some View {
+        Button("Check Again") { Task { await model.refresh(force: true) } }
+            .controlSize(.small)
+            .disabled(model.isCheckingPath)
+            .accessibilityLabel("Check PATH again")
+    }
+
     private func caption(_ text: String) -> some View {
         Text(text)
             .font(.callout)
@@ -431,15 +471,19 @@ struct CLIInstallView: View {
                     Button(model.copied ? "Copied" : "Copy") { model.copyPathLine() }
                         .controlSize(.small)
                         .accessibilityLabel("Copy PATH line")
+                    checkAgain
                 }
             }
             .font(.callout)
         case .shadowed(let other):
-            Label {
-                Text("Another insomnia comes first on your PATH: \(other)")
-                    .fixedSize(horizontal: false, vertical: true)
-            } icon: {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label {
+                    Text("Another insomnia comes first on your PATH: \(other)")
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
+                }
+                checkAgain
             }
             .font(.callout)
         case .onPath:

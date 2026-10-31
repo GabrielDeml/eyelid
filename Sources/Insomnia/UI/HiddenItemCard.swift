@@ -59,13 +59,43 @@ final class HiddenItemCardController: NSObject, NSWindowDelegate {
 
     private var window: PanelWindow?
     private var keyMonitor: Any?
+    /// The item went hidden while the panel was open; the card waits for the panel to close (R95).
+    private var pending = false
+
+    enum Decision: Equatable { case skip, waitForPanel, show }
+
+    /// Once ever; never over an open panel, whose focus loss would close it (the first-run welcome panel).
+    static func decide(alreadyShown: Bool, force: Bool, panelOpen: Bool) -> Decision {
+        if force { return .show }
+        if alreadyShown { return .skip }
+        return panelOpen ? .waitForPanel : .show
+    }
 
     /// Shows the card once ever (`Settings.hiddenItemCardShown`). `force` ignores the flag (debug / snapshots).
-    func showIfNeeded(force: Bool = false) {
+    /// With the panel open it is held back, unmarked, until `panelDidClose`.
+    func showIfNeeded(force: Bool = false, panelOpen: Bool = false) {
         let settings = Settings.shared
-        guard force || !settings.hiddenItemCardShown else { return }
-        settings.hiddenItemCardShown = true
-        show()
+        switch Self.decide(alreadyShown: settings.hiddenItemCardShown, force: force, panelOpen: panelOpen) {
+        case .skip:
+            return
+        case .waitForPanel:
+            pending = true
+        case .show:
+            pending = false
+            settings.hiddenItemCardShown = true
+            show()
+        }
+    }
+
+    /// The panel closed: show a held-back card if the item is still hidden. On the next turn, so the card doesn't take
+    /// focus in the middle of the panel's own close.
+    func panelDidClose(itemStillHidden: Bool) {
+        guard pending else { return }
+        pending = false
+        guard itemStillHidden else { return }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.showIfNeeded() }
+        }
     }
 
     private func show() {
