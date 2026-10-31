@@ -10,8 +10,10 @@ public enum HelperPaths {
 }
 
 /// The helper's decisions as pure functions, so the safety-critical branches are unit-tested without root, XPC or
-/// IOKit (Tests/InsomniaTests/HelperPolicyTests.swift). The daemon (Sources/InsomniaHelper) only gathers the inputs
-/// and carries out the result. docs/CLOSED_LID.md §2.5 state machine.
+/// IOKit (Tests/InsomniaTests/HelperPolicyTests.swift): engage, heartbeat, status ownership, the reset after a session
+/// is dropped (release, crash, hang), SIGTERM, and the start-up reset. The daemon (Sources/InsomniaHelper) gathers
+/// the inputs and carries out the result; its timers, XPC plumbing and pmset calls are covered by the device tests
+/// (docs/CLOSED_LID.md §8: T1–T3, T10, T17). docs/CLOSED_LID.md §2.5 state machine.
 public enum HelperPolicy {
     public enum EngageDecision: Equatable, Sendable {
         /// This connection is already in the engaged set: re-arm its deadline, reply `.ok`.
@@ -73,6 +75,29 @@ public enum HelperPolicy {
         guard onBattery, let p = batteryPercent else { return false }
         return p <= HelperInfo.backstopPollPercent
     }
+
+    /// status(): is the flag the caller's? We set it and either no session holds it (a reset is pending a retry: the
+    /// caller's recovery should treat it as its own and say `.stuck` if it stays) or a session of the caller's uid
+    /// does. Another user's sessions read as foreign, so that user's flag is never touched from the caller's side.
+    public static func statusOwnsFlag(ownsFlag: Bool, sessionUIDs: [UInt32], callerUID: UInt32) -> Bool {
+        ownsFlag && (sessionUIDs.isEmpty || sessionUIDs.contains(callerUID))
+    }
+
+    /// A session left the engaged set (release, connection lost = crash / Force Quit, heartbeat deadline = hang):
+    /// reset the flag once the last one is gone, if we set it. Another session of the same user keeps it.
+    public static func resetsAfterDrop(remainingSessions: Int, ownsFlag: Bool) -> Bool {
+        remainingSessions == 0 && ownsFlag
+    }
+
+    /// SIGTERM (unregister, Login Items switched off, shutdown): exit 0 (launchd leaves us down) unless we own the flag
+    /// and couldn't clear it; then 75, keeping the ownership file, so a restart retries the reset.
+    public static func terminateExitCode(ownsFlag: Bool, resetSucceeded: Bool) -> Int32 {
+        !ownsFlag || resetSucceeded ? 0 : 75
+    }
+
+    /// Boot / restart reset: anything but a verified 0 (1, or unreadable) is reset; `pmset -a disablesleep 0` is always
+    /// safe. A verified 0 only drops a stale ownership file.
+    public static func startUpResets(flag: Bool?) -> Bool { flag != false }
 
     public enum StartReset: Equatable, Sendable {
         /// First start since a boot: write the marker; if SleepDisabled == 1 reset it whoever set it (the setting

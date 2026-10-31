@@ -7,14 +7,18 @@ import SwiftUI
 //   2 · Approve  → System Settings ▸ General ▸ Login Items & Extensions (helper only; re-checked every 1 s)
 //   3 · Done     → "Ready. Close the lid whenever." + a 10 s test drive
 //
-// One sheet, never a modal alert. Not Now (or Esc, or the close button) at any step leaves things as they are:
-// a registered-but-unapproved helper stays that way, and H′ / Lid & Safety reopen step 2 directly.
+// One sheet, never a modal alert. Not Now (or Esc, or the close button) at any step leaves the setup as it is: a
+// registered-but-unapproved helper stays that way, and H′ / Lid & Safety reopen step 2 directly. The lid switch
+// reverts (UX §6), so it can be turned off again while the helper isn't ready.
 
 struct LidSetupView: View {
     enum Step: Equatable { case explain, approve, done }
 
-    /// The lid switch (or a hold) asked for lid mode: switch the setting on once setup completes.
+    /// The lid switch asked for lid mode: switch the setting on once setup completes. Every other entry point
+    /// (welcome card, Dock, Lid & Safety) only sets up: finishing never starts a session the user didn't ask for.
     let requestedLid: Bool
+    /// This view's token for ClosedLidController.watchApproval (one per window or sheet).
+    let approvalWatcher: UUID
     let onClose: () -> Void
 
     @State private var step: Step
@@ -22,29 +26,53 @@ struct LidSetupView: View {
     @State private var problem: SetupProblem?
     @State private var drive: TestDrive = .idle
     @State private var closedAt: Date?
+    /// The test drive's own short hold, if it started one (ended when the drive ends).
+    @State private var driveHold: UUID?
 
     private var lid: ClosedLidController { ClosedLidController.shared }
     private var settings: Settings { Settings.shared }
     private var power: PowerMonitor { PowerMonitor.shared }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(requestedLid: Bool, startAt: Step? = nil, onClose: @escaping () -> Void) {
+    init(requestedLid: Bool, startAt: Step? = nil, approvalWatcher: UUID = UUID(), onClose: @escaping () -> Void) {
         self.requestedLid = requestedLid
+        self.approvalWatcher = approvalWatcher
         self.onClose = onClose
         _step = State(initialValue: startAt ?? Self.initialStep(ClosedLidController.shared.helper))
     }
 
     static func initialStep(_ helper: HelperStatus) -> Step {
         switch helper {
-        case .requiresApproval: return .approve
+        case .requiresApproval, .daemonDisabled: return .approve
         case .installed: return .done
         default: return .explain
         }
     }
 
+    /// Where Set Up… / Repair… lead, by the status they ended in (pure, unit-tested).
+    enum Advance: Equatable {
+        case finish
+        case approve(SetupProblem?)
+        case problem(SetupProblem)
+    }
+
+    static func advance(after helper: HelperStatus) -> Advance {
+        switch helper {
+        case .installed: return .finish
+        // Sudoers: the safety daemon is off in Login Items: the same System Settings step, re-checked every second.
+        case .requiresApproval, .daemonDisabled: return .approve(nil)
+        case .unreachable, .versionMismatch:
+            return .approve(SetupProblem(message: "The helper isn't responding.", canRepair: true))
+        case .partial:
+            return .problem(SetupProblem(message: "Setup didn't finish: part of it is missing or not working.", canRepair: true))
+        case .notInstalled, .notFound, .unsafeLocation, .leftoverHelper:
+            return .problem(SetupProblem(message: "Setup didn't finish. Check Settings ▸ Lid & Safety.", canRepair: true))
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            StepIndicator(step: step, showsApproval: lid.backendKind != .sudoers)
+            StepIndicator(step: step, showsApproval: lid.backendKind != .sudoers || step == .approve)
             Group {
                 switch step {
                 case .explain: explain
@@ -76,7 +104,7 @@ struct LidSetupView: View {
             if let blocker {
                 ProblemText(problem: blocker)
             } else if let problem {
-                ProblemText(problem: problem)
+                ProblemText(problem: problem, repair: { Task { await repair() } })
             }
             HStack {
                 Spacer()
@@ -135,7 +163,9 @@ struct LidSetupView: View {
                 .font(.title3.weight(.semibold))
                 .accessibilityAddTraits(.isHeader)
             VStack(alignment: .leading, spacing: 6) {
-                Text("General ▸ Login Items & Extensions ▸ turn on Insomnia.")
+                Text(lid.backendKind == .sudoers
+                     ? "General ▸ Login Items & Extensions ▸ turn on Insomnia's safety daemon (com.gdeml.insomnia.safety)."
+                     : "General ▸ Login Items & Extensions ▸ turn on Insomnia.")
                 Text("macOS asks for Touch ID or your password there.")
                     .foregroundStyle(.secondary)
             }
@@ -154,8 +184,8 @@ struct LidSetupView: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .onAppear { lid.watchApproval(true) }
-        .onDisappear { lid.watchApproval(false) }
+        .onAppear { lid.watchApproval(true, by: approvalWatcher) }
+        .onDisappear { lid.watchApproval(false, by: approvalWatcher) }
     }
 
     // MARK: 3 · Done
@@ -170,10 +200,14 @@ struct LidSetupView: View {
                 Button(drive == .waiting ? "Waiting for the lid…" : "Try it: close the lid for 10 s", action: startDrive)
                     .disabled(drive == .waiting || !power.hasLid)
                 Spacer()
-                Button("Done", action: onClose)
-                    .keyboardShortcut(.defaultAction)
+                Button("Done") {
+                    endDrive()
+                    onClose()
+                }
+                .keyboardShortcut(.defaultAction)
             }
         }
+        .onDisappear { endDrive() }
     }
 
     @ViewBuilder private var driveText: some View {
@@ -222,13 +256,12 @@ struct LidSetupView: View {
     }
 
     private func advance(for helper: HelperStatus) {
-        switch helper {
-        case .installed: finish()
-        case .requiresApproval: step = .approve
-        case .unreachable, .versionMismatch:
+        switch Self.advance(after: helper) {
+        case .finish: finish()
+        case .approve(let p):
             step = .approve
-            problem = SetupProblem(message: "The helper isn't responding.", canRepair: true)
-        default: break
+            problem = p
+        case .problem(let p): problem = p
         }
     }
 
@@ -247,11 +280,12 @@ struct LidSetupView: View {
         step = .done
         Notifier.requestAuthorization()   // UX §10: asked at setup success, so the first safety notification lands
         AwakeEngine.shared.narrate(.setupDone)
-        if requestedLid && !settings.closedLidMode { settings.closedLidMode = true }   // engages if something's awake
+        LidSetupActions.finish(requestedLid: requestedLid, settings: settings)
     }
 
     private func notNow() {
-        lid.watchApproval(false)
+        lid.watchApproval(false, by: approvalWatcher)
+        LidSetupActions.revertSwitchIfUnfinished(helper: lid.helper, settings: settings)
         AwakeEngine.shared.narrate(.setupCancelled)   // UX §6: a quip, no error tone
         onClose()
     }
@@ -259,22 +293,30 @@ struct LidSetupView: View {
     private func startDrive() {
         drive = .waiting
         closedAt = nil
-        if !settings.closedLidMode {
-            settings.closedLidMode = true   // the engine starts a default hold if nothing is awake
-        } else if !AwakeEngine.shared.isAwake {
-            AwakeEngine.shared.activate(settings.defaultDuration, source: .panel)
-        }
+        endDrive()
+        driveHold = LidSetupActions.beginTestDrive(engine: AwakeEngine.shared, settings: settings)
+    }
+
+    private func endDrive() {
+        LidSetupActions.endTestDrive(driveHold, engine: AwakeEngine.shared)
+        driveHold = nil
     }
 
     private func lidMoved(closed: Bool) {
         guard drive == .waiting || closedAt != nil else { return }
         if closed {
-            if case .engaged = AwakeEngine.shared.lid { closedAt = Date() } else { drive = .notEngaged }
+            if case .engaged = AwakeEngine.shared.lid {
+                closedAt = Date()
+            } else {
+                drive = .notEngaged
+                endDrive()
+            }
             return
         }
         guard let start = closedAt else { return }
         closedAt = nil
         drive = Date().timeIntervalSince(start) >= 10 ? .survived : .tooShort
+        endDrive()
     }
 
     private func announce(_ step: Step) {
@@ -372,6 +414,41 @@ struct ProblemText: View {
     }
 }
 
+/// What setup does to Settings and the engine, kept out of the view so it is unit-tested. Setup never writes the lid
+/// switch except when the switch itself asked (`requestedLid`), and never starts an open-ended session.
+@MainActor
+enum LidSetupActions {
+    /// Long enough to close the lid for 10 s and open it again; ends by itself if the sheet goes away mid-drive.
+    static let testDriveDuration = AwakeDuration.minutes(2)
+
+    /// Setup finished. Only the lid switch's own request turns lid mode on (with nothing awake, the engine then starts
+    /// its usual hold, UX §2.2 H); the welcome card, the Dock and Lid & Safety leave the switch alone.
+    static func finish(requestedLid: Bool, settings: Settings) {
+        if requestedLid && !settings.closedLidMode { settings.closedLidMode = true }
+    }
+
+    /// Not Now, a cancelled prompt, or the window closed before Done: the switch reverts while the helper isn't ready,
+    /// so it can't be left on with no way to turn it off (UX §6).
+    static func revertSwitchIfUnfinished(helper: HelperStatus, settings: Settings) {
+        if helper != .installed && settings.closedLidMode { settings.closedLidMode = false }
+    }
+
+    /// "Try it": a short manual hold with lid mode, never the lid switch. Never replaces the user's own manual hold
+    /// (then the drive only works if that hold already has lid mode). Returns the hold to end afterwards, or nil.
+    static func beginTestDrive(engine: AwakeEngine, settings: Settings) -> UUID? {
+        guard engine.manualHold == nil else { return nil }
+        engine.activate(testDriveDuration, source: .panel, options: AwakeOptions(screen: settings.keepScreenOn, lid: true))
+        return engine.manualHold?.id
+    }
+
+    /// Ends the drive's hold if it is still the drive's own (the user may have replaced it meanwhile). With a While…
+    /// hold running it's left to expire, since ending the manual hold would end that one too.
+    static func endTestDrive(_ hold: UUID?, engine: AwakeEngine) {
+        guard let hold, engine.manualHold?.id == hold, engine.babysitHold == nil else { return }
+        engine.deactivate(.replaced)
+    }
+}
+
 /// Plain copy shared by the setup sheet and Lid & Safety. No jokes in errors.
 enum LidSetupCopy {
     static let unsafeLocationInfo = "The helper runs as root, so it only runs from /Applications/Insomnia.app owned by the system. make install puts it there."
@@ -408,8 +485,9 @@ enum LidSetupCopy {
 enum LidSetupWindow {
     private static var window: NSWindow?
     private static var delegate: CloseObserver?
+    private static var watcher = UUID()
 
-    /// `AppRouter.shared.startLidSetupHandler = { LidSetupWindow.show(requestedLid: true) }`.
+    /// `AppRouter.shared.startLidSetupHandler = { LidSetupWindow.show(requestedLid: $0) }`.
     static func show(requestedLid: Bool, startAt: LidSetupView.Step? = nil) {
         AppRouter.shared.closePanel()
         if let window {
@@ -417,7 +495,10 @@ enum LidSetupWindow {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let view = LidSetupView(requestedLid: requestedLid, startAt: startAt) { LidSetupWindow.close() }
+        watcher = UUID()
+        let view = LidSetupView(requestedLid: requestedLid, startAt: startAt, approvalWatcher: watcher) {
+            LidSetupWindow.close()
+        }
         let hosting = NSHostingController(rootView: view)
         let w = NSWindow(contentViewController: hosting)
         w.title = "Lid Mode"
@@ -438,7 +519,8 @@ enum LidSetupWindow {
     }
 
     fileprivate static func didClose() {
-        ClosedLidController.shared.watchApproval(false)
+        ClosedLidController.shared.watchApproval(false, by: watcher)
+        LidSetupActions.revertSwitchIfUnfinished(helper: ClosedLidController.shared.helper, settings: Settings.shared)
         window?.delegate = nil
         window = nil
         delegate = nil

@@ -34,9 +34,19 @@ final class LidFakeBackend: PrivilegedBackend, @unchecked Sendable {
         var releaseResult: Int32 = 0
         var releaseClearsFlag = true
         var abandonClearsFlag = true
+        /// abandon() clears the flag only after this delay (a safety net that takes a while), when set.
+        var abandonClearsFlagAfter: Duration?
         var heartbeatResult: LidError?
         var owns = false
+        /// ownsFlag() answers nil (the helper doesn't answer status()).
+        var ownsUnknown = false
+        var uninstallError: LidSetupError?
+        var resetError: LidSetupError?
+        /// engage() / release() wait while these are set (tests open them).
+        var engageBlocked = false
+        var releaseBlocked = false
         var calls: [String] = []
+        var statusCalls = 0
         var onLost: (@Sendable () -> Void)?
     }
 
@@ -47,6 +57,8 @@ final class LidFakeBackend: PrivilegedBackend, @unchecked Sendable {
 
     func configure(_ change: (inout State) -> Void) { lock.withLock { change(&state) } }
     var calls: [String] { lock.withLock { state.calls } }
+    /// status() calls (kept out of `calls`: every refresh reads it).
+    var statusCalls: Int { lock.withLock { state.statusCalls } }
     private func record(_ c: String) { lock.withLock { state.calls.append(c) } }
 
     func fireLost() {
@@ -54,12 +66,21 @@ final class LidFakeBackend: PrivilegedBackend, @unchecked Sendable {
         cb?()
     }
 
-    func status() async -> HelperStatus { lock.withLock { state.status } }
+    func status() async -> HelperStatus {
+        lock.withLock {
+            state.statusCalls += 1
+            return state.status
+        }
+    }
     func install() async throws(LidSetupError) -> HelperStatus { record("install"); return lock.withLock { state.status } }
-    func uninstall(resetFlag: Bool) async throws(LidSetupError) { record("uninstall") }
+    func uninstall(resetFlag: Bool) async throws(LidSetupError) {
+        record("uninstall")
+        if let error = lock.withLock({ state.uninstallError }) { throw error }
+    }
 
     func engage(onLost: @escaping @Sendable () -> Void) async -> Int32 {
         record("engage")
+        while lock.withLock({ state.engageBlocked }) { try? await Task.sleep(for: .milliseconds(5)) }
         // Like the real helper: a flag that is already 1 and not ours is refused and left alone.
         if kind == .helper, system.flag == true, !(lock.withLock { state.owns }) {
             return HelperResult.foreignFlag.rawValue
@@ -75,6 +96,7 @@ final class LidFakeBackend: PrivilegedBackend, @unchecked Sendable {
 
     func release() async -> Int32 {
         record("release")
+        while lock.withLock({ state.releaseBlocked }) { try? await Task.sleep(for: .milliseconds(5)) }
         let s = lock.withLock { state }
         if s.releaseResult == 0 && s.releaseClearsFlag {
             system.flag = false
@@ -85,28 +107,46 @@ final class LidFakeBackend: PrivilegedBackend, @unchecked Sendable {
 
     func abandon() async {
         record("abandon")
-        let clears = lock.withLock { () -> Bool in state.onLost = nil; return state.abandonClearsFlag }
-        if clears { system.flag = false; lock.withLock { state.owns = false } }
+        let (clears, after) = lock.withLock { () -> (Bool, Duration?) in
+            state.onLost = nil
+            return (state.abandonClearsFlag, state.abandonClearsFlagAfter)
+        }
+        guard clears else { return }
+        if let after {
+            let system = self.system
+            Task.detached {
+                try? await Task.sleep(for: after)
+                system.flag = false
+            }
+        } else {
+            system.flag = false
+            lock.withLock { state.owns = false }
+        }
     }
 
     func heartbeat() async -> LidError? { record("heartbeat"); return lock.withLock { state.heartbeatResult } }
-    func ownsFlag() async -> Bool { lock.withLock { state.owns } }
-    func resetWithPassword() async throws(LidSetupError) { record("resetWithPassword"); system.flag = false }
+    func ownsFlag() async -> Bool? { lock.withLock { state.ownsUnknown ? nil : state.owns } }
+    func resetWithPassword() async throws(LidSetupError) {
+        record("resetWithPassword")
+        if let error = lock.withLock({ state.resetError }) { throw error }
+        system.flag = false
+    }
 }
 
 @MainActor
 @Suite("ClosedLidController", .serialized)
-struct ClosedLidControllerTests {
+final class ClosedLidControllerTests {
     let system = LidFakeSystem()
     let backend: LidFakeBackend
     let power = FakePower()
+    let dir: URL
     let marker: LidMarker
     let clock = TestClock()
     let controller: ClosedLidController
 
     init() async {
         backend = LidFakeBackend(system: system)
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("insomnia-lid-\(UUID().uuidString)")
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("insomnia-lid-\(UUID().uuidString)")
         marker = LidMarker(url: dir.appendingPathComponent("lid-engaged"))
         let b = backend
         let reconciler = LidReconciler(makeBackend: { b }, system: system, marker: marker,
@@ -116,6 +156,10 @@ struct ClosedLidControllerTests {
                                          clock: { clock.now })
         await controller.start()
         await controller.refreshHelper()
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: dir)
     }
 
     private func engage() async {
@@ -272,12 +316,14 @@ struct ClosedLidControllerTests {
         controller.setDesired(true)
         await controller.idle()
         #expect(controller.status == .stuck)
-        await controller.resetWithPassword()
-        #expect(controller.status == .off)
-        #expect(!marker.exists)
+        #expect(await controller.resetWithPassword() == nil)
+        // Lid mode is still wanted, so the reset re-converges and engages again (R88).
+        #expect(controller.status == .engaged(lidClosed: false))
+        #expect(marker.exists)
+        #expect(backend.calls.filter { $0 == "engage" }.count == 2)
     }
 
-    @Test func heartbeatHelperNotEngagedIsNotAFailure() async {
+    @Test func releaseAnsweredNotEngagedIsNotAFailure() async {
         backend.configure {
             $0.releaseResult = HelperResult.notEngaged.rawValue
             $0.releaseClearsFlag = false
@@ -334,16 +380,16 @@ struct ClosedLidControllerTests {
     @Test func lidCloseWhileEngagedBlanksTheScreenOnlyWithoutExternalDisplay() async {
         await engage()
         power.externalDisplayCount = 1
-        controller.powerChanged()
+        await controller.powerChanged()?.value
         power.isLidClosed = true
-        controller.powerChanged()
+        let blank = controller.powerChanged()
         #expect(controller.status == .engaged(lidClosed: true))
-        await Task.yield()
+        #expect(blank == nil)   // R68: no task at all, so the check below can't race one
+        await blank?.value
         #expect(!system.commands.contains(.displaySleepNow))
         // Unplugging the last external display with the lid shut blanks the panel.
         power.externalDisplayCount = 0
-        controller.powerChanged()
-        for _ in 0..<10 where !system.commands.contains(.displaySleepNow) { await Task.yield() }
+        await controller.powerChanged()?.value
         #expect(system.commands.contains(.displaySleepNow))
     }
 
@@ -394,6 +440,7 @@ struct ClosedLidControllerSudoersTests {
         let backend = LidFakeBackend(kind: .sudoers, system: system)
         let marker = LidMarker(url: FileManager.default.temporaryDirectory
             .appendingPathComponent("insomnia-lid-\(UUID().uuidString)/lid-engaged"))
+        defer { try? FileManager.default.removeItem(at: marker.url.deletingLastPathComponent()) }
         #expect(marker.write())
         system.flag = true
         backend.configure { $0.owns = true }
@@ -414,6 +461,7 @@ struct ClosedLidControllerSudoersTests {
         backend.configure { $0.engageResult = 1 }
         let marker = LidMarker(url: FileManager.default.temporaryDirectory
             .appendingPathComponent("insomnia-lid-\(UUID().uuidString)/lid-engaged"))
+        defer { try? FileManager.default.removeItem(at: marker.url.deletingLastPathComponent()) }
         let reconciler = LidReconciler(makeBackend: { backend }, system: system, marker: marker,
                                        readbackInterval: .zero, abandonWait: .zero, lostWait: .zero)
         let controller = ClosedLidController(power: FakePower(), refreshLid: {}, reconciler: reconciler, liveSystem: false)

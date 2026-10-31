@@ -132,7 +132,7 @@ final class PanelModel {
             if state.helper != .installed {
                 // UX §2.2 H: with the helper missing, turning the switch on opens setup instead of writing the setting.
                 // Without a setup flow (bare snapshots) the sublabel says "Setup needed ›".
-                if AppRouter.shared.startLidSetupHandler != nil { AppRouter.shared.startLidSetup() } else { lidSetupNudge = true }
+                if AppRouter.shared.startLidSetupHandler != nil { AppRouter.shared.startLidSetup(requestedLid: true) } else { lidSetupNudge = true }
                 return
             }
         case .setLid(false):

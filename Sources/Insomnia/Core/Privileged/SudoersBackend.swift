@@ -10,6 +10,9 @@ struct SudoersBackend: PrivilegedBackend {
     let userName: String
     private let marker: LidMarker
     private let shared: Shared
+    /// `sudo -n <args>` → exit status (-1 = timed out or not spawned). Injected by tests; never prompts.
+    private let runSudo: @Sendable ([String]) -> Int32
+    private let watchdogScript: String
 
     static let sudoersFile = "/etc/sudoers.d/zz_insomnia"
     static let daemonLabel = "com.gdeml.insomnia.safety"
@@ -18,20 +21,27 @@ struct SudoersBackend: PrivilegedBackend {
     static let installPrompt = "Insomnia needs your password once to keep your Mac awake with the lid closed."
     static let uninstallPrompt = "Insomnia needs your password to remove its lid-mode setup."
 
-    /// Mutable bits shared by copies of this struct: the armed watchdog and the last "rule works" probe result.
+    /// Mutable bits shared by copies of this struct: the armed watchdog and the abandoned ones.
     private final class Shared: @unchecked Sendable {
         let lock = NSLock()
         var watchdog: Watchdog?
         /// Abandoned watchdogs (release failure, Reset with password…) that may still run their delayed reset.
         var abandoned: [Watchdog] = []
-        var ruleWorks: Bool?
     }
 
-    init(userName: String = NSUserName(), marker: LidMarker = .standard) {
+    init(userName: String = NSUserName(), marker: LidMarker = .standard,
+         runSudo: @escaping @Sendable ([String]) -> Int32 = { SudoersBackend.sudo($0).status },
+         watchdogScript: String = Watchdog.script) {
         self.userName = userName
         self.marker = marker
         self.shared = Shared()
+        self.runSudo = runSudo
+        self.watchdogScript = watchdogScript
     }
+
+    /// The "rule works" probe: list mode asks sudoers whether the rule allows the command without running it, so a
+    /// status refresh can never clear a flag that something else set meanwhile (Decision 23).
+    static let ruleProbe = ["-l", "/usr/bin/pmset", "-a", "disablesleep", "0"]
 
     /// `^[A-Za-z0-9._][A-Za-z0-9._-]*$` (sudoers- and shell-safe; the script also requires a numeric uid).
     static func isValidUserName(_ name: String) -> Bool {
@@ -53,16 +63,7 @@ struct SudoersBackend: PrivilegedBackend {
         let fm = FileManager.default
         let rulePresent = fm.fileExists(atPath: Self.sudoersFile)
         let daemonPresent = fm.fileExists(atPath: Self.daemonPlist)
-        var ruleWorks = false
-        if rulePresent {
-            if RootDomain.sleepDisabled() == false {
-                // A real no-op: the flag is already 0. Only probed while 0, so it can never clear a foreign flag.
-                ruleWorks = Self.sudo(["/usr/bin/pmset", "-a", "disablesleep", "0"]).status == 0
-                shared.lock.withLock { shared.ruleWorks = ruleWorks }
-            } else {
-                ruleWorks = shared.lock.withLock { shared.ruleWorks } ?? true
-            }
-        }
+        let ruleWorks = rulePresent && runSudo(Self.ruleProbe) == 0
         let daemonEnabled = daemonPresent && Self.daemonEnabled()
         return Self.mapStatus(rulePresent: rulePresent, ruleWorks: ruleWorks, daemonPresent: daemonPresent,
                               daemonEnabled: daemonEnabled)
@@ -114,7 +115,6 @@ struct SudoersBackend: PrivilegedBackend {
         case 11: throw .includedirMissing
         default: throw .scriptFailed(code: r.code, detail: r.detail)
         }
-        shared.lock.withLock { shared.ruleWorks = nil }
         return await status()
     }
 
@@ -145,7 +145,8 @@ struct SudoersBackend: PrivilegedBackend {
         // Watchdog first: if we die between here and the readback, it resets.
         let dog: Watchdog
         do {
-            dog = try Watchdog.arm(onExit: onLost)
+            dog = try Watchdog.arm(script: watchdogScript, environment: ["M": marker.url.path, "P": "\(getpid())"],
+                                   onExit: onLost)
         } catch {
             return -1
         }
@@ -160,19 +161,24 @@ struct SudoersBackend: PrivilegedBackend {
         // reset: either would clear the flag right after (or 6 s after) the set below.
         old?.disarm()
         for a in abandoned { a.stopSuperseded() }
-        let status = Self.sudo(["/usr/bin/pmset", "-a", "disablesleep", "1"]).status
+        let status = runSudo(["/usr/bin/pmset", "-a", "disablesleep", "1"])
         // The quit timeout (or anything else) may have abandoned this watchdog while `sudo` ran, and its reset may
         // have landed before our set. Never leave a 1 behind without a live watchdog.
         let stillArmed = shared.lock.withLock { shared.watchdog === dog } && dog.isArmed
         guard stillArmed else {
-            _ = Self.sudo(["/usr/bin/pmset", "-a", "disablesleep", "0"])
+            _ = runSudo(["/usr/bin/pmset", "-a", "disablesleep", "0"])
             return -1
+        }
+        if status == -1 {
+            // Timed out: Spawn SIGKILLs `sudo`, but its root `pmset … 1` can outlive it and land after the release that
+            // follows has disarmed everything. Hand the session to this watchdog's reset / sleep / reset instead.
+            await abandon()
         }
         return status
     }
 
     func release() async -> Int32 {
-        let status = Self.sudo(["/usr/bin/pmset", "-a", "disablesleep", "0"]).status
+        let status = runSudo(["/usr/bin/pmset", "-a", "disablesleep", "0"])
         guard status == 0 else { return status }   // the watchdog stays armed
         // Disarm only after the flag reads back 0 (3 × 200 ms).
         for attempt in 0...3 {
@@ -205,24 +211,26 @@ struct SudoersBackend: PrivilegedBackend {
         return dog.heartbeat() ? nil : .safetyNetLost
     }
 
-    func ownsFlag() async -> Bool { marker.exists }
+    func ownsFlag() async -> Bool? { marker.exists }
 
     func resetWithPassword() async throws(LidSetupError) {
         try AdminScript.resetFlag()
     }
 
     /// `sudo -n <args>`: never prompts.
-    private static func sudo(_ args: [String]) -> Spawn.Result {
+    static func sudo(_ args: [String]) -> Spawn.Result {
         Spawn.run("/usr/bin/sudo", ["-n"] + args, environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"], timeout: 5)
     }
 
     // MARK: Scripts (CLOSED_LID.md §2.7, verbatim apart from substitutions)
 
-    /// Safety daemon: boot reset + 10% backstop every 60 s, whoever set the flag. No `<` or `&`.
+    /// Safety daemon: boot reset + 10% backstop every 60 s, whoever set the flag. No `<` or `&`. The first run after a
+    /// boot resets without reading the flag first (at boot it may not be published yet, and absent must never read as
+    /// 0) and marks the boot done only once the reset succeeded, so a failure retries 60 s later.
     static let safetyScript = """
         B=\(bootMarker)
-        /usr/sbin/ioreg -r -c IOPMrootDomain -d 1 | /usr/bin/grep -q '"SleepDisabled" = Yes' || { /usr/bin/touch $B; exit 0; }
-        if [ ! -e $B ]; then /usr/bin/touch $B; /usr/bin/pmset -a disablesleep 0; exit 0; fi
+        if [ ! -e $B ]; then /usr/bin/pmset -a disablesleep 0 && /usr/bin/touch $B; exit 0; fi
+        /usr/sbin/ioreg -r -c IOPMrootDomain -d 1 | /usr/bin/grep -q '"SleepDisabled" = Yes' || exit 0
         b=$(/usr/sbin/ioreg -r -c AppleSmartBattery -d 1)
         case $b in *'"ExternalConnected" = No'*) ;; *) exit 0 ;; esac
         c=$(echo "$b" | /usr/bin/sed -n 's/^ *"CurrentCapacity" = \\([0-9]*\\)$/\\1/p')

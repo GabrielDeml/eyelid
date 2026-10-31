@@ -343,6 +343,8 @@ Guards
 - `.notFound` appears only when the helper or its plist is really missing from the bundle; a never-set-up helper shows "Not set up".
 - **Unsigned builds (sudoers backend)** show the old rows instead: "● Ready (sudoers rule ✓ · safety daemon ✓)", "◐ Partly installed: safety daemon missing [Repair…]", "◐ Safety daemon is off in Login Items [Open Login Items]". If a helper from a signed build is still registered (`.leftoverHelper`), the only row is "◐ A helper from a signed build is still registered [Remove…]"; the sudoers setup isn't offered until it's gone.
 - Signed build with leftover sudoers files: an extra row "Old password-based setup found [Remove old setup…]".
+- The battery-floor slider moves in whole percents and saves when you let go (keyboard and VoiceOver changes save at once), so dragging past the current level can't end a session mid-drag.
+- **Reset with password…** (when stuck) shows a failed reset inline like the other actions; a cancelled prompt says nothing. A cancelled or failed Remove… leaves lid mode as it was (it re-engages if it's wanted).
 
 ### 4.4 Diagnostics
 
@@ -427,13 +429,15 @@ Signed builds (helper backend). Three steps, all inside one sheet (panel or Sett
 │  "Ready. Close the lid whenever."   [Try it: close the lid for 10 s] │
 │   → on reopen: "Survived. Welcome to the night shift." / Prof.: "Verified." │
 └──────────────────────────────────────────────────────────────────────┘
-        │ if the toggle (or a hold) asked for lid mode: engage now (H′ "Applying…" → "Ready · close the lid anytime")
+        │ if the lid switch asked for lid mode: switch it on and engage now (H′ "Applying…" → "Ready · close the lid
+        │ anytime"). From the welcome card, the Dock or Lid & Safety, setup only sets up: the switch stays as it was.
 ```
 
-- **Not Now** (either step): the toggle reverts, quip `setup cancelled`, no error tone. A registered-but-unapproved helper stays that way; H′ and Lid & Safety then say "Allow in System Settings ›", which reopens step 2 directly.
+- **Try it** runs on its own 2-minute hold with lid mode (never the lid switch), ended when the drive ends or the sheet closes. It never replaces a session you started; with one running, the drive works only if that session already has lid mode.
+- **Not Now** (either step, also the close button or a cancelled password prompt): the toggle reverts (the lid setting is switched off while the helper isn't ready), quip `setup cancelled`, no error tone. A registered-but-unapproved helper stays that way; H′ and Lid & Safety then say "Allow in System Settings ›", which reopens step 2 directly.
 - macOS shows its own "Background Items Added" notification during step 2. That's expected; step 2's copy matches it.
 - **Approval switched off later** in System Settings: lid mode releases (the helper resets on stop), H′ shows "Allow in System Settings ›". No notification.
-- **Unsigned builds (sudoers backend)** keep the original two-step flow: step 1 says instead "You'll type your password once. Insomnia adds a rule that allows exactly two commands (sleep off / sleep on), **usable by any app running as you**, and a tiny safety daemon that restores sleep after a restart and at 10% battery." → macOS admin prompt ("Insomnia needs your password once to keep your Mac awake with the lid closed.") → cancelled: as Not Now; script error: inline red text + [Copy details]; success: step 3.
+- **Unsigned builds (sudoers backend)** keep the original two-step flow: step 1 says instead "You'll type your password once. Insomnia adds a rule that allows exactly two commands (sleep off / sleep on), **usable by any app running as you**, and a tiny safety daemon that restores sleep after a restart and at 10% battery." → macOS admin prompt ("Insomnia needs your password once to keep your Mac awake with the lid closed.") → cancelled: as Not Now; script error: inline red text + [Copy details]; success: step 3. Safety daemon off in Login Items (`.daemonDisabled`): step 2, worded for the daemon and re-checked every 1 s. Partly installed (`.partial`): inline "Setup didn't finish" + [Repair…].
 
 **Runtime moments:**
 

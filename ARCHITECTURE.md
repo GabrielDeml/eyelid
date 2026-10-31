@@ -51,8 +51,8 @@ Read these first. They are the product and UX source of truth, and this file imp
   - No notarization for local use (pending `CLOSED_LID.md` §10 #6). Developer ID + notarization only for distributing to others (Later).
 - **`Makefile`:**
   - `make` builds the app; `make run`.
-  - `make install`: requires a signed build. `sudo mktemp -d /Applications/.insomnia.XXXXXX` (root-owned, `0755`, same volume), `sudo ditto build/Insomnia.app` into it, `sudo chown -R root:wheel` and `sudo chmod -R go-w` it, then **verify the staged copy** (`scripts/lid-verify.sh --staged`: seal, both code requirements, the pinned helper cdhash, `RunAtLoad`, root ownership); only then rename any old copy into the staging dir, rename the new one to `/Applications/Insomnia.app`, and delete the staging dir. Lid mode is set up **only** from this copy (`CLOSED_LID.md` §2.3); the next launch re-registers a changed helper silently.
-  - `make uninstall`: `/Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper`, removes sudoers-fallback leftovers if present (`CLOSED_LID.md` §9: bootout the safety daemon, its plist, the sudoers rule, the lid marker), then `sudo rm -rf /Applications/Insomnia.app`.
+  - `make install`: requires a signed build. `sudo mktemp -d /Applications/.insomnia.XXXXXX` (root-owned, `0755`, same volume), `sudo ditto build/Insomnia.app` into it, `sudo chown -R root:wheel` and `sudo chmod -R go-w` it, then **verify the staged copy** (`scripts/lid-verify.sh --staged`: seal, both code requirements, the pinned helper cdhash, `RunAtLoad`, root ownership); only then quit a running Insomnia (`scripts/quit-running.sh`: one quit Apple Event, so its lid release runs; abort the swap if it doesn't quit), rename any old copy into the staging dir, rename the new one to `/Applications/Insomnia.app`, delete the staging dir, and reopen the app if it was running. Lid mode is set up **only** from this copy (`CLOSED_LID.md` §2.3); the next launch re-registers a changed helper silently.
+  - `make uninstall` (`CLOSED_LID.md` §9, in this order): quit every running copy (`scripts/quit-running.sh`; abort if it won't), `/Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper`, then if the lid marker exists `sudo pmset -a disablesleep 0` and delete the marker only once the flag reads 0 (abort otherwise), then remove sudoers-fallback leftovers if present (bootout the safety daemon, its plist, the sudoers rule, staging files, the boot marker), then `sudo rm -rf /Applications/Insomnia.app`.
   - `make snapshot`: debug build, `Insomnia --snapshot build/snapshots` (the snapshot renderer is compiled into debug builds only).
   - `make clean`: `rm -rf build .build` (no registration ever points into `build/`).
 - **Identifiers:**
@@ -166,8 +166,8 @@ protocol PrivilegedBackend: Sendable {
     func abandon() async
     /// Every 10 s while engaged. nil = fine; .overridden / .safetyNetLost = lid mode is gone (CLOSED_LID.md §4.1).
     func heartbeat() async -> LidError?
-    /// Flag ours? Helper: status().ownsFlag. Sudoers: marker file exists.
-    func ownsFlag() async -> Bool
+    /// Flag ours? Helper: status().ownsFlag, nil if it doesn't answer. Sudoers: marker file exists.
+    func ownsFlag() async -> Bool?
     /// .stuck recovery, both backends: osascript admin prompt running `/usr/bin/pmset -a disablesleep 0`.
     func resetWithPassword() async throws(LidSetupError)
 }
@@ -212,14 +212,15 @@ final class Watchdog {
     func refreshHelper() async                      // also performs the silent upgrade on .versionMismatch (not while engaged)
     func install() async throws(LidSetupError)      // helper: ends in .requiresApproval → UI shows the approval step
     func openApprovalSettings()                     // SMAppService.openSystemSettingsLoginItems()
-    /// While the approval step is visible: re-check helper status every 1 s; stops itself on .installed.
-    func watchApproval(_ on: Bool)
+    /// While an approval step is visible: re-check helper status every 1 s; stops itself on .installed. One token per
+    /// visible view, so closing one of two setup views keeps the other's poll.
+    func watchApproval(_ on: Bool, by watcher: UUID)
     func uninstall() async throws(LidSetupError)    // Release → backend.uninstall → delete marker → Settings.closedLidMode = false
     func removeLegacySudoers() async throws(LidSetupError)   // signed builds with old sudoers artefacts (CLOSED_LID.md §2.1)
     /// Engine publishes the desired flag; reconciler converges (serial, coalescing). Idempotent.
     func setDesired(_ engaged: Bool)
     func retry()                                    // from .error
-    func resetWithPassword() async                  // from .stuck
+    func resetWithPassword() async -> LidSetupError?   // from .stuck; no prompt if the flag reads 0; re-converges
     /// Launch: marker present → (flag 1 and ours → reset), delete marker, return true (engine shows "recovered").
     func recoverIfNeeded() async -> Bool
     /// applicationShouldTerminate (.terminateLater): cancel pending desired state, run Release; on timeout abandon().

@@ -65,7 +65,7 @@ struct LidSafetyTab: View {
             .accessibilityElement(children: .contain)
             if engine.lid == .stuck {
                 LabeledContent {
-                    Button("Reset with password…") { Task { await lid.resetWithPassword() } }
+                    Button("Reset with password…") { run(.reset) }.disabled(busy)
                 } label: {
                     Label("Stuck on · your Mac won't sleep", systemImage: "exclamationmark.octagon.fill")
                         .foregroundStyle(Theme.dangerText)
@@ -198,24 +198,13 @@ struct LidSafetyTab: View {
 
     private func floorSlider(label: String) -> some View {
         LabeledContent(label) {
-            HStack(spacing: 10) {
-                Slider(value: Binding(get: { Double(settings.batteryFloorPercent) },
-                                      set: { settings.batteryFloorPercent = Int($0.rounded()) }),
-                       in: 10...50)
-                    .frame(width: 180)
-                    .accessibilityLabel(label)
-                    .accessibilityValue("\(settings.batteryFloorPercent) percent")
-                Text("\(settings.batteryFloorPercent)%")
-                    .font(.body.monospacedDigit())
-                    .frame(width: 38, alignment: .trailing)
-                    .accessibilityHidden(true)
-            }
+            FloorSlider(label: label, settings: settings)
         }
     }
 
     // MARK: Helpers
 
-    private enum Operation { case install, remove, removeLegacy }
+    private enum Operation { case install, remove, removeLegacy, reset }
 
     private func run(_ op: Operation) {
         busy = true
@@ -227,9 +216,10 @@ struct LidSafetyTab: View {
                 case .install: try await lid.install()
                 case .remove: try await lid.uninstall()
                 case .removeLegacy: try await lid.removeLegacySudoers()
+                case .reset: if let error = await lid.resetWithPassword() { throw error }
                 }
             } catch .cancelled {
-                // A cancelled password prompt changes nothing and says nothing.
+                // A cancelled password prompt says nothing; lid mode goes back to what it was (it re-engages if wanted).
             } catch {
                 problem = LidSetupCopy.problem(for: error)
             }
@@ -249,6 +239,47 @@ struct LidSafetyTab: View {
 }
 
 // MARK: - Small pieces
+
+/// The battery floor (10–50 %, whole percents). Dragging moves a draft only; the setting is written once, on release
+/// (or at once for keyboard / VoiceOver changes), so passing the current battery level mid-drag can't trip the floor
+/// and end the session.
+private struct FloorSlider: View {
+    let label: String
+    let settings: Settings
+    @State private var draft: Double?
+    @State private var editing = false
+
+    private var shown: Int { draft.map { Int($0.rounded()) } ?? settings.batteryFloorPercent }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Slider(value: Binding(get: { draft ?? Double(settings.batteryFloorPercent) },
+                                  set: { value in
+                                      draft = value
+                                      if !editing { commit() }
+                                  }),
+                   in: 10...50, step: 1,
+                   onEditingChanged: { active in
+                       editing = active
+                       if !active { commit() }
+                   })
+                .frame(width: 180)
+                .accessibilityLabel(label)
+                .accessibilityValue("\(shown) percent")
+            Text("\(shown)%")
+                .font(.body.monospacedDigit())
+                .frame(width: 38, alignment: .trailing)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func commit() {
+        guard let draft else { return }
+        self.draft = nil
+        let value = Int(draft.rounded())
+        if value != settings.batteryFloorPercent { settings.batteryFloorPercent = value }
+    }
+}
 
 private struct StatusDot: View {
     enum Kind { case ready, off, pending, warning }
