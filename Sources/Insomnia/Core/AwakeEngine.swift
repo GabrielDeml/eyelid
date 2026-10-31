@@ -181,7 +181,8 @@ final class AwakeEngine {
     // MARK: - Lifecycle
 
     /// ClosedLidController.start → recoverIfNeeded → refreshHelper → activateOnLaunch. Idempotent.
-    func start() async {
+    /// `activateOnLaunch: false` when the app was launched to serve a command (CLI or URL), which decides instead.
+    func start(activateOnLaunch: Bool = true) async {
         guard !started else { return }
         started = true
         lastLidClosed = power.isLidClosed
@@ -200,7 +201,7 @@ final class AwakeEngine {
             }
             await lidController.refreshHelper()
         }
-        if settings.activateOnLaunch && manual == nil {
+        if activateOnLaunch && settings.activateOnLaunch && manual == nil {
             activate(settings.defaultDuration, source: .launch)
         }
         reevaluate()

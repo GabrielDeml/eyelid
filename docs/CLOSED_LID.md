@@ -323,7 +323,7 @@ L=com.gdeml.insomnia.safety
 | Spoofed helper on the Mach name | Only root can register in the system domain; the app checks the helper's signature too. | None known |
 | Helper killed or disabled while engaged | `SIGTERM` → reset. Crash or `SIGKILL` → `KeepAlive` restart → restart reset (§2.5). Login Items switch off → launchd stops it (`SIGTERM`); app sees `.requiresApproval`. | Between a `SIGKILL` and the restart (≈ launchd throttle, ≤ 10 s) the flag stays 1. |
 | Foreign setter (Amphetamine, admin, MDM) | Never taken over at engage (`.foreignFlag`) or cleared, except by the boot reset and the 10% backstop. | None (by design, Decision 23). |
-| A web page opens an `insomnia://` link | **URL holds never get lid** (`lid` param ignored and logged). | A page can keep the Mac awake with the lid open. Low impact. |
+| A web page opens an `insomnia://` link | **URL holds never get lid** (`lid` param ignored and logged). `insomnia://sleep` asks before sleeping. | A page can keep the Mac awake with the lid open. Low impact. |
 | App deleted without Remove | `make uninstall` / `--unregister-helper` first (§2.6, §9). | The BTM record stays and points at `/Applications/Insomnia.app`; the next bundle placed there with our team and identifier runs at boot without a new approval. A flag left at 1 at that moment gets no boot reset: `sudo pmset -a disablesleep 0` (§9). |
 | Ad-hoc rebuild strands a registered helper | build.sh refuses; the sudoers backend shows `.leftoverHelper` and never installs over it (§2.1). | None known. |
 

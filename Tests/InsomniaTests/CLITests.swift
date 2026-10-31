@@ -152,7 +152,7 @@ struct CLIFormatTests {
 @MainActor
 struct CLIRunTests {
     private func runAndWait(_ argv: [String]) -> WaitStatus? {
-        guard case .success(let pid) = CLIRunner.spawn(argv) else { return nil }
+        guard case .success(let pid) = CLIRunner.spawn(argv, inheritedIgnored: []) else { return nil }
         var status: Int32 = 0
         while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
         return WaitStatus(status)
