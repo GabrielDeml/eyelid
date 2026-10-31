@@ -13,9 +13,14 @@ struct EyesCues: Equatable, Sendable {
     var firstWake = 0
 }
 
-/// The panel eyes: a 72 pt face with a progress ring. Animates with `TimelineView(.animation)` **only while
-/// `isLive`** (the panel is visible) and Reduce Motion is off; otherwise it renders a static pose and swaps with a
-/// ≤ 150 ms crossfade. Decorative: hidden from VoiceOver (the headline carries the meaning).
+/// The panel eyes: a 72 pt face with a progress ring. Animates **only while `isLive`** (the panel is visible) and
+/// Reduce Motion is off; otherwise it renders a static pose and swaps with a ≤ 150 ms crossfade. Decorative: hidden
+/// from VoiceOver (the headline carries the meaning).
+///
+/// The live face is an AppKit leaf (`LiveEyesNSView`) driven by its own display link: per-frame motion never touches
+/// the SwiftUI graph, so the rest of the panel is not re-evaluated or re-laid-out while the eyes blink and drift
+/// (a `TimelineView` here made the hosting view re-run layout and constraints for the whole panel every frame).
+/// The static pose (snapshots, Reduce Motion, closed panel) stays a plain `Canvas`.
 struct EyesView: View {
     var mood: EyeMood
     /// 0…1 elapsed of a timed hold; nil hides the ring.
@@ -31,55 +36,54 @@ struct EyesView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
-    @State private var motion = EyesMotion()
 
     var body: some View {
         let animating = isLive && !reduceMotion
-        let appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua) ?? NSAppearance.currentDrawing()
-        let palette = EyePalette.panel(appearance: appearance)
-        let faceAsleep = Theme.faceAsleepNS.resolvedCGColor(for: appearance)
-        let faceTop = Theme.faceTopNS.resolvedCGColor(for: appearance)
-        let faceBottom = Theme.faceBottomNS.resolvedCGColor(for: appearance)
-        let sleepTone = Theme.sleepToneNS.resolvedCGColor(for: appearance)
-        let ringTrack = NSColor.labelColor.withAlphaComponent(colorScheme == .dark ? 0.14 : 0.09).resolvedCGColor(for: appearance)
-        let ringColour = palette.iris
-        let ringWidth: CGFloat = contrast == .increased ? 4 : 3
-        let zColour = Color(nsColor: Theme.sleepToneNS)
-
-        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !animating)) { context in
-            let frame = animating
-                ? motion.frame(at: context.date, mood: mood, heavyLids: heavyLids, bags: bags, progress: progress)
-                : EyesMotion.staticFrame(mood: mood, heavyLids: heavyLids, bags: bags, progress: progress)
-            Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: false) { gc, canvasSize in
-                let s = min(canvasSize.width, canvasSize.height)
-                let bounds = CGRect(x: (canvasSize.width - s) / 2, y: (canvasSize.height - s) / 2, width: s, height: s)
-                var eyePalette = palette
-                eyePalette.closedStroke = EyesView.blend(sleepTone, palette.sclera, frame.lights)
-                gc.withCGContext { ctx in
-                    EyesView.drawFace(ctx, bounds: bounds, frame: frame, palette: eyePalette,
-                                      faceAsleep: faceAsleep, faceTop: faceTop, faceBottom: faceBottom,
-                                      ringTrack: ringTrack, ringColour: ringColour, ringWidth: ringWidth)
-                }
-                if frame.zAlpha > 0.01 {
-                    let zSize = s * 0.2
-                    gc.opacity = frame.zAlpha
-                    gc.draw(Text("z").font(.system(size: zSize, weight: .heavy, design: .rounded)).foregroundStyle(zColour),
-                            at: CGPoint(x: bounds.minX + s * frame.zPosition.x, y: bounds.minY + s * frame.zPosition.y))
+        let dark = colorScheme == .dark
+        let increasedContrast = contrast == .increased
+        Group {
+            if animating {
+                LiveEyes(mood: mood, progress: progress, heavyLids: heavyLids, bags: bags, cues: cues,
+                         dark: dark, increasedContrast: increasedContrast)
+            } else {
+                let colours = EyesColours.resolve(dark: dark, increasedContrast: increasedContrast)
+                let frame = EyesMotion.staticFrame(mood: mood, heavyLids: heavyLids, bags: bags, progress: progress)
+                Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: false) { gc, canvasSize in
+                    gc.withCGContext { ctx in EyesView.draw(ctx, size: canvasSize, frame: frame, colours: colours) }
                 }
             }
         }
         .frame(width: size, height: size)
-        .background(ScreenAnchor(motion: motion))
         .id(animating ? AnyHashable("live") : AnyHashable(mood))      // static: crossfade between moods
         .transition(.opacity)
         .animation(animating ? nil : .easeInOut(duration: 0.15), value: mood)
-        .onChange(of: mood) { old, new in motion.moodChanged(from: old, to: new, animate: animating) }
-        .onChange(of: cues.extend) { _, _ in if animating { motion.start(.doubleTake) } }
-        .onChange(of: cues.nightVision) { _, _ in if animating { motion.start(.sweep) } }
-        .onChange(of: cues.crossEyes) { _, _ in if animating { motion.start(.cross) } }
-        .onChange(of: cues.firstWake) { _, _ in if animating { motion.start(.firstWake) } }
-        .onChange(of: isLive) { _, live in if live { motion.reset(mood: mood) } }
         .accessibilityHidden(true)
+    }
+
+    /// One whole frame (face, ring, eyes, the "z") centred in `size`, y-down.
+    nonisolated static func draw(_ ctx: CGContext, size canvasSize: CGSize, frame: EyesFrame, colours: EyesColours) {
+        let s = min(canvasSize.width, canvasSize.height)
+        let bounds = CGRect(x: (canvasSize.width - s) / 2, y: (canvasSize.height - s) / 2, width: s, height: s)
+        var eyePalette = colours.palette
+        eyePalette.closedStroke = blend(colours.sleepTone, colours.palette.sclera, frame.lights)
+        drawFace(ctx, bounds: bounds, frame: frame, palette: eyePalette,
+                 faceAsleep: colours.faceAsleep, faceTop: colours.faceTop, faceBottom: colours.faceBottom,
+                 ringTrack: colours.ringTrack, ringColour: colours.palette.iris, ringWidth: colours.ringWidth)
+        if frame.zAlpha > 0.01 {
+            let text = NSAttributedString(string: "z", attributes: [
+                .font: NSFont.systemFont(ofSize: s * 0.2, weight: .heavy).rounded,
+                .foregroundColor: NSColor(cgColor: colours.sleepTone) ?? .secondaryLabelColor,
+            ])
+            let centre = CGPoint(x: bounds.minX + s * frame.zPosition.x, y: bounds.minY + s * frame.zPosition.y)
+            let ts = text.size()
+            ctx.saveGState()
+            ctx.setAlpha(frame.zAlpha)
+            let previous = NSGraphicsContext.current
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+            text.draw(at: NSPoint(x: centre.x - ts.width / 2, y: centre.y - ts.height / 2))
+            NSGraphicsContext.current = previous
+            ctx.restoreGState()
+        }
     }
 
     /// Face disc, ring and eyes, y-down.
@@ -401,13 +405,151 @@ final class EyesMotion {
     }
 }
 
-/// Zero-size AppKit view that hands EyesMotion its window position for cursor tracking.
-private struct ScreenAnchor: NSViewRepresentable {
-    let motion: EyesMotion
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView(frame: .zero)
-        motion.anchorView = v
-        return v
+/// Appearance-resolved colours for one face (resolved once per appearance change, never per frame).
+struct EyesColours {
+    var palette: EyePalette
+    var faceAsleep: CGColor
+    var faceTop: CGColor
+    var faceBottom: CGColor
+    var sleepTone: CGColor
+    var ringTrack: CGColor
+    var ringWidth: CGFloat
+
+    @MainActor static func resolve(dark: Bool, increasedContrast: Bool) -> EyesColours {
+        let appearance = NSAppearance(named: dark ? .darkAqua : .aqua) ?? NSAppearance.currentDrawing()
+        return EyesColours(
+            palette: EyePalette.panel(appearance: appearance),
+            faceAsleep: Theme.faceAsleepNS.resolvedCGColor(for: appearance),
+            faceTop: Theme.faceTopNS.resolvedCGColor(for: appearance),
+            faceBottom: Theme.faceBottomNS.resolvedCGColor(for: appearance),
+            sleepTone: Theme.sleepToneNS.resolvedCGColor(for: appearance),
+            ringTrack: NSColor.labelColor.withAlphaComponent(dark ? 0.14 : 0.09).resolvedCGColor(for: appearance),
+            ringWidth: increasedContrast ? 4 : 3)
     }
-    func updateNSView(_ nsView: NSView, context: Context) { motion.anchorView = nsView }
+}
+
+private extension NSFont {
+    var rounded: NSFont {
+        guard let d = fontDescriptor.withDesign(.rounded), let f = NSFont(descriptor: d, size: pointSize) else { return self }
+        return f
+    }
+}
+
+extension EyesFrame {
+    /// Same picture to the eye (sub-0.2 % differences, e.g. gaze easing toward a still cursor, are not redrawn).
+    func looksLike(_ o: EyesFrame) -> Bool {
+        func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 0.002 }
+        func near(_ a: CGFloat?, _ b: CGFloat?) -> Bool {
+            switch (a, b) {
+            case (nil, nil): return true
+            case let (x?, y?): return near(x, y)
+            default: return false
+            }
+        }
+        let p = pose, q = o.pose
+        return near(p.openLeft, q.openLeft) && near(p.openRight, q.openRight)
+            && near(p.gaze.x, q.gaze.x) && near(p.gaze.y, q.gaze.y) && near(p.pupilScale, q.pupilScale)
+            && near(p.crossEyed, q.crossEyed) && p.squint == q.squint && p.rightCross == q.rightCross
+            && near(p.glow, q.glow) && near(p.sweep, q.sweep) && p.bags == q.bags && p.nightVision == q.nightVision
+            && near(p.sweat, q.sweat) && near(lights, o.lights) && near(ringAlpha, o.ringAlpha)
+            && progress == o.progress && near(zAlpha, o.zAlpha)
+            && near(zPosition.x, o.zPosition.x) && near(zPosition.y, o.zPosition.y)
+    }
+}
+
+/// The live face as an AppKit leaf: SwiftUI only pushes inputs (mood, ring, cues) when they change.
+private struct LiveEyes: NSViewRepresentable {
+    var mood: EyeMood
+    var progress: Double?
+    var heavyLids: Bool
+    var bags: Int
+    var cues: EyesCues
+    var dark: Bool
+    var increasedContrast: Bool
+
+    func makeNSView(context: Context) -> LiveEyesNSView {
+        LiveEyesNSView(mood: mood, cues: cues)
+    }
+
+    func updateNSView(_ view: LiveEyesNSView, context: Context) {
+        view.update(mood: mood, progress: progress, heavyLids: heavyLids, bags: bags, cues: cues,
+                    dark: dark, increasedContrast: increasedContrast)
+    }
+}
+
+/// Draws `EyesMotion` frames from its own display link (30 fps) while it is in a window. A frame that looks the same
+/// as the last one drawn is skipped, so a still face costs a cheap integration step per tick and no drawing.
+final class LiveEyesNSView: NSView {
+    private let motion = EyesMotion()
+    private var mood: EyeMood
+    private var progress: Double?
+    private var heavyLids = false
+    private var bags = 0
+    private var cues: EyesCues
+    private var colourKey: (dark: Bool, contrast: Bool)?
+    private var colours = EyesColours.resolve(dark: false, increasedContrast: false)
+    private var drawn: EyesFrame?
+    private var link: CADisplayLink?
+
+    init(mood: EyeMood, cues: EyesCues) {
+        self.mood = mood
+        self.cues = cues
+        super.init(frame: .zero)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        motion.anchorView = self
+        motion.reset(mood: mood)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }   // clicks go to the SwiftUI button around it
+
+    func update(mood new: EyeMood, progress: Double?, heavyLids: Bool, bags: Int, cues newCues: EyesCues,
+                dark: Bool, increasedContrast: Bool) {
+        if new != mood { motion.moodChanged(from: mood, to: new, animate: true) }
+        mood = new
+        if newCues.extend != cues.extend { motion.start(.doubleTake) }
+        if newCues.nightVision != cues.nightVision { motion.start(.sweep) }
+        if newCues.crossEyes != cues.crossEyes { motion.start(.cross) }
+        if newCues.firstWake != cues.firstWake { motion.start(.firstWake) }
+        cues = newCues
+        self.progress = progress
+        self.heavyLids = heavyLids
+        self.bags = bags
+        if colourKey?.dark != dark || colourKey?.contrast != increasedContrast {
+            colourKey = (dark, increasedContrast)
+            colours = EyesColours.resolve(dark: dark, increasedContrast: increasedContrast)
+            drawn = nil
+        }
+        step()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        link?.invalidate()
+        link = nil
+        guard window != nil else { return }
+        let l = displayLink(target: self, selector: #selector(displayTick(_:)))
+        l.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
+        l.add(to: .main, forMode: .common)
+        link = l
+    }
+
+    @objc private func displayTick(_ link: CADisplayLink) { step() }
+
+    /// Integrates one frame; redraws only when the picture changed.
+    private func step() {
+        let frame = motion.frame(at: Date(), mood: mood, heavyLids: heavyLids, bags: bags, progress: progress)
+        if let drawn, drawn.looksLike(frame) { return }
+        drawn = frame
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let ctx = NSGraphicsContext.current?.cgContext, let frame = drawn else { return }
+        EyesView.draw(ctx, size: bounds.size, frame: frame, colours: colours)
+    }
 }

@@ -152,7 +152,7 @@ Variants:
 | A | **Eyes button** (mascot = toggle) | 72 × 72 circle. Eyes 44 wide. Progress ring 3 pt, inset 2. | State = `status.isAwake`. **Off → on:** a manual hold with the default duration. **On → off:** ends manual and babysit holds and **pauses every satisfied rule until its condition goes false and true again** (subline "Xcode rule paused until Xcode quits"). If only client holds remain, the button is disabled with tooltip "Held by a command" and subline "Held by `make` (CLI)". The ring traces elapsed/total for timed holds. Hover: 1.03 scale, tooltip "Keep awake" / "Allow sleep". Rapid clicks feed the **poke egg** (§9). |
 | B | Headline | SF Pro 17 semibold, primary | The plain headline from §8. |
 | C | `⋯` menu button | 22 × 22, borderless, `ellipsis.circle` | Menu: **Sleep Now**, Why awake?…, Settings… ⌘,, About Insomnia, Quit ⌘Q. |
-| D | Subline | SF Pro 12, secondary, monospaced digits | timed: "42 min left · until 15:12" (last hour: `TimeFormat.countdown`, "41:07 left"). ∞: "Until you say so". Non-manual primary hold: "While ffmpeg (4411) runs · **Stop**" (Stop releases the babysit hold; CLI holds show "Held by `make` (CLI)" and rules show "Rule", neither with Stop). More holds: "· 2 more ›" (opens Why awake). Suspended: the reason in orange. This replaces the old holds list. |
+| D | Subline | SF Pro 12, secondary, monospaced digits | timed: "42 min left · until 15:12" (last hour: `TimeFormat.countdown`, "41:07 left"). End times more than 20 h away name the day, "until Sat 7:13", and more than 6 days away the date, "until Nov 9 at 7:13" (`TimeFormat.endTime`, shared by the panel, status item, Dock menu, CLI, Why awake and notifications). ∞: "Until you say so". Non-manual primary hold: "While ffmpeg (4411) runs · **Stop**" (Stop releases the babysit hold; CLI holds show "Held by `make` (CLI)" and rules show "Rule", neither with Stop). More holds: "· 2 more ›" (opens Why awake). Suspended: the reason in orange. This replaces the old holds list. |
 | E | Duration chips | Capsules 28 tall, SF Pro 12 medium, 8 pt gap | Clicking starts a manual hold right away (replacing any manual hold, which also serves as "extend"). The running preset's chip is filled amber with dark text and is `.isSelected` for VoiceOver. Tooltip: duration name (Cheeky and Unhinged). |
 | F | `Until…` / `While…` | Same capsule style | **Until…** opens an inline popover with an hour:minute `DatePicker` (step 5 min) and **Start**; a past time means tomorrow ("tomorrow 07:00"). **While…** opens a menu: *Running apps ▸*, *Suggested ▸* (only names from `claude, codex, xcodebuild, ffmpeg, rsync, make, cargo, npm, python3` that the matcher in `Models.swift` `WatchTarget.process` actually finds, shown with pid), *Process name…*, *PID…*. Extend is not a chip: use `+`, the Dock menu, the notification action or the VoiceOver action. |
 | G | Keep screen on | Row 28 tall, SF Pro 13, trailing `Toggle(.switch)`, mini | Binds `Settings.keepScreenOn`; applies live to manual and babysit holds (rules have their own box). |
@@ -205,7 +205,8 @@ Colour is **never** the only signal. Every coloured state also changes text and 
 | Error | Right eye shows "×" | Same |
 | Final 60 s | Heavy lids (40% closed) | Same (it's a static pose) |
 
-Use `TimelineView(.animation)` **only while the panel window is key/visible**. No timers run when it's closed.
+Animate **only while the panel window is key/visible** (≤ 30 fps, redrawing only frames that changed; the open, idle
+panel stays under 2% of a core). No timers run when it's closed.
 
 ### 2.5 Keyboard (the panel is first responder when it opens)
 

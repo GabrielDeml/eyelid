@@ -652,7 +652,7 @@ final class EngineControlResponder: ControlResponding {
             if let end = hold.end {
                 let minutes = Int((end.timeIntervalSince(hold.start) / 60).rounded())
                 what = (minutes > 0 ? AwakeDuration.minutes(minutes).shortLabel + " timer" : "timer")
-                    + " · until " + end.formatted(date: .omitted, time: .shortened)
+                    + " · until " + TimeFormat.endTime(end)
             } else {
                 what = "until you say so"
             }

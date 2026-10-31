@@ -23,16 +23,16 @@ struct PanelView: View {
     @Bindable var model: PanelModel
     var opaqueBackground = false
 
-    @State private var eyesHover = false
     @FocusState private var focus: PanelFocus?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let s = model.state
+        // Clock-free: the 1 Hz display tick invalidates only `PanelHeader` (eyes ring, countdown), not the whole panel.
+        let s = model.layoutState
         // Professional has no quips: row J collapses unless a safety banner or report needs it (UX §2.1).
         let showRowJ = s.personality != .professional || s.banner != nil || s.reopenReport != nil
         VStack(spacing: 0) {
-            header(s)
+            PanelHeader(model: model, focus: $focus)
             SectionDivider()
             if EpicMoments.shared.welcomeVisible {
                 LiveWelcomeCard()
@@ -75,73 +75,6 @@ struct PanelView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Insomnia")
-    }
-
-    // MARK: A B C D
-
-    private func header(_ s: PanelState) -> some View {
-        let sub = PlainCopy.subline(s)
-        return HStack(alignment: .center, spacing: 12) {
-            Button { model.send(.eyes) } label: {
-                EyesView(mood: EpicMoments.shared.eyesMood(for: s.mood), progress: s.isTimed ? s.progress : nil, isLive: model.isVisible,
-                         heavyLids: s.heavyLids, bags: s.bags, cues: model.cues)
-            }
-            .buttonStyle(EyesButtonStyle(hovering: $eyesHover))
-            .focused($focus, equals: .eyes)
-            .disabled(s.clientOnly)
-            .help(s.clientOnly ? "Held by a command" : (s.isAwake ? "Allow sleep" : "Keep awake"))
-            .accessibilityLabel("Keep awake")
-            .accessibilityValue(PlainCopy.eyesValue(s))
-            .accessibilityAddTraits(.isToggle)
-            .accessibilityHint(s.clientOnly ? "Held by a command" : "")
-            .accessibilityAction(named: "Extend 15 minutes") { model.send(.extend) }
-            .accessibilityAction(named: "Allow sleep") { if s.isAwake && !s.clientOnly { model.send(.eyes) } }
-
-            VStack(alignment: .leading, spacing: 3) {
-                // B and C share a row (UX §2.1 "Wide awake ⋯").
-                HStack(alignment: .center, spacing: 4) {
-                    Text(PlainCopy.headline(s))
-                        .font(Theme.headline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                        .contentTransition(.opacity)
-                        .accessibilityAddTraits(.isHeader)
-                    Spacer(minLength: 4)
-                    MoreMenuButton(canOpenSettings: s.canOpenSettings, send: model.send)
-                        .focused($focus, equals: .control)
-                        .offset(x: 4)
-                }
-                subline(sub)
-                    .font(Theme.subline)
-                    .foregroundStyle(subTone(sub.tone))
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .animation(.easeInOut(duration: 0.2), value: PlainCopy.headline(s))
-        }
-        .frame(height: Theme.eyesButton)
-    }
-
-    /// D: one line when it fits. Otherwise "· 2 more ›" gets its own line (never a dangling "·"), and a long watched
-    /// name truncates in the middle so the trailing "Stop" link stays visible.
-    @ViewBuilder
-    private func subline(_ sub: PlainCopy.Subline) -> some View {
-        if let more = sub.more {
-            ViewThatFits(in: .horizontal) {
-                InlineLinkLine(text: sub.text, links: [sub.link, more].compactMap { $0 }, send: model.send, focus: $focus)
-                VStack(alignment: .leading, spacing: 2) {
-                    InlineLinkLine(text: sub.text, links: [sub.link].compactMap { $0 }, send: model.send, focus: $focus)
-                    InlineLinkLine(text: "", links: [more], send: model.send, focus: $focus)
-                }
-            }
-        } else if let link = sub.link {
-            InlineLinkLine(text: sub.text, links: [link], send: model.send, focus: $focus)
-        } else {
-            Text(sub.text)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .contentTransition(reduceMotion ? .identity : .numericText(countsDown: true))
-        }
     }
 
     // MARK: E
@@ -212,6 +145,85 @@ struct PanelView: View {
                 }
                 LidSublabelView(sublabel: PlainCopy.lidSublabel(s, nudge: model.lidSetupNudge), send: model.send, focus: $focus)
             }
+        }
+    }
+}
+
+/// Rows A–D. The only part of the panel that reads the display clock (`model.state`: countdown, ring, heavy lids,
+/// eye bags), so the 1 Hz tick re-renders this header and nothing else.
+private struct PanelHeader: View {
+    @Bindable var model: PanelModel
+    var focus: FocusState<PanelFocus?>.Binding
+
+    @State private var eyesHover = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View { header(model.state) }
+
+    // MARK: A B C D
+
+    private func header(_ s: PanelState) -> some View {
+        let sub = PlainCopy.subline(s)
+        return HStack(alignment: .center, spacing: 12) {
+            Button { model.send(.eyes) } label: {
+                EyesView(mood: EpicMoments.shared.eyesMood(for: s.mood), progress: s.isTimed ? s.progress : nil, isLive: model.isVisible,
+                         heavyLids: s.heavyLids, bags: s.bags, cues: model.cues)
+            }
+            .buttonStyle(EyesButtonStyle(hovering: $eyesHover))
+            .focused(focus, equals: .eyes)
+            .disabled(s.clientOnly)
+            .help(s.clientOnly ? "Held by a command" : (s.isAwake ? "Allow sleep" : "Keep awake"))
+            .accessibilityLabel("Keep awake")
+            .accessibilityValue(PlainCopy.eyesValue(s))
+            .accessibilityAddTraits(.isToggle)
+            .accessibilityHint(s.clientOnly ? "Held by a command" : "")
+            .accessibilityAction(named: "Extend 15 minutes") { model.send(.extend) }
+            .accessibilityAction(named: "Allow sleep") { if s.isAwake && !s.clientOnly { model.send(.eyes) } }
+
+            VStack(alignment: .leading, spacing: 3) {
+                // B and C share a row (UX §2.1 "Wide awake ⋯").
+                HStack(alignment: .center, spacing: 4) {
+                    Text(PlainCopy.headline(s))
+                        .font(Theme.headline)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .contentTransition(.opacity)
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 4)
+                    MoreMenuButton(canOpenSettings: s.canOpenSettings, send: model.send)
+                        .focused(focus, equals: .control)
+                        .offset(x: 4)
+                }
+                subline(sub)
+                    .font(Theme.subline)
+                    .foregroundStyle(subTone(sub.tone))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(.easeInOut(duration: 0.2), value: PlainCopy.headline(s))
+        }
+        .frame(height: Theme.eyesButton)
+    }
+
+    /// D: one line when it fits. Otherwise "· 2 more ›" gets its own line (never a dangling "·"), and a long watched
+    /// name truncates in the middle so the trailing "Stop" link stays visible.
+    @ViewBuilder
+    private func subline(_ sub: PlainCopy.Subline) -> some View {
+        if let more = sub.more {
+            ViewThatFits(in: .horizontal) {
+                InlineLinkLine(text: sub.text, links: [sub.link, more].compactMap { $0 }, send: model.send, focus: focus)
+                VStack(alignment: .leading, spacing: 2) {
+                    InlineLinkLine(text: sub.text, links: [sub.link].compactMap { $0 }, send: model.send, focus: focus)
+                    InlineLinkLine(text: "", links: [more], send: model.send, focus: focus)
+                }
+            }
+        } else if let link = sub.link {
+            InlineLinkLine(text: sub.text, links: [link], send: model.send, focus: focus)
+        } else {
+            Text(sub.text)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(reduceMotion ? .identity : .numericText(countsDown: true))
         }
     }
 

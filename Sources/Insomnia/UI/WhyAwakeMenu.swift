@@ -205,7 +205,7 @@ extension WhyAwakeReport {
         guard let end = hold.end else { return "until you stop it" }
         let minutes = Int((end.timeIntervalSince(hold.start) / 60).rounded())
         if AwakeDuration.presets.contains(.minutes(minutes)) { return "\(AwakeDuration.minutes(minutes).shortLabel) timer" }
-        return "until \(end.formatted(date: .omitted, time: .shortened))"
+        return "until \(TimeFormat.endTime(end))"
     }
 
     static func guardText(_ g: GuardReason, _ input: WhyAwakeInput) -> String {

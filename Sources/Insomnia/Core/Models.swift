@@ -26,7 +26,7 @@ enum AwakeDuration: Hashable, Codable, Sendable {
         }
     }
 
-    /// Compact label for chips / menus: "30m", "1h", "8h", "∞", "→ 17:30".
+    /// Compact label for chips / menus: "30m", "1h", "8h", "∞", "→ 17:30" (`TimeFormat.endTime`).
     var shortLabel: String {
         switch self {
         case .indefinite: return "∞"
@@ -35,7 +35,7 @@ enum AwakeDuration: Hashable, Codable, Sendable {
             if m > 60 { return "\(m / 60)h \(m % 60)m" }
             return "\(m)m"
         case .until(let date):
-            return "→ " + date.formatted(date: .omitted, time: .shortened)   // FormatStyle: cached, Sendable
+            return "→ " + TimeFormat.endTime(date)
         }
     }
 
@@ -505,6 +505,37 @@ enum TimeFormat {
         if h == 0 { return "\(m)m" }
         return m == 0 ? "\(h)h" : "\(h)h \(m)m"
     }
+
+    /// When a hold ends, for every surface that shows it ("until …": panel subline, status item, Dock menu, CLI,
+    /// Why awake, notifications). The time alone up to 20 h ahead ("7:13 AM"); the weekday up to 6 days ahead
+    /// ("Sat 7:13 AM"), so a multi-day hold never reads like today; a date beyond that ("Nov 9 at 7:13 AM").
+    static func endTime(_ end: Date, now: Date = Date(), locale: Locale = .autoupdatingCurrent,
+                        timeZone: TimeZone = .autoupdatingCurrent) -> String {
+        let ahead = end.timeIntervalSince(now)
+        var style: Date.FormatStyle
+        if ahead <= endTimeOnlyHorizon {
+            style = Date.FormatStyle(date: .omitted, time: .shortened)
+        } else if ahead <= endWeekdayHorizon {
+            style = Date.FormatStyle.dateTime.weekday(.abbreviated).hour().minute()
+        } else {
+            style = Date.FormatStyle.dateTime.month(.abbreviated).day().hour().minute()
+            // A long hold can end in a later year, or ~a year out on today's month/day; name the year so it
+            // never reads like tomorrow ("Nov 1, 2027 at 7:34 AM").
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = timeZone
+            if cal.component(.year, from: end) != cal.component(.year, from: now) || ahead > 300 * 86_400 {
+                style = style.year()
+            }
+        }
+        style.locale = locale
+        style.timeZone = timeZone
+        return end.formatted(style)
+    }
+
+    /// Up to here an end time shows as a clock time only.
+    static let endTimeOnlyHorizon: TimeInterval = 20 * 3600
+    /// Up to here an end time shows weekday + time; beyond it, a date.
+    static let endWeekdayHorizon: TimeInterval = 6 * 86_400
 
     /// Long human form for stats: "3 days, 4 hours", "12 hours, 5 minutes", "7 minutes"
     static func humanLong(_ interval: TimeInterval) -> String {

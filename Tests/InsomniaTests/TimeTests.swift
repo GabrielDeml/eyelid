@@ -95,6 +95,88 @@ struct TimeFormatTests {
     }
 }
 
+/// `TimeFormat.endTime`: the one "until …" formatter. Fixed locale and zone so the expectations are exact.
+@Suite("End times")
+struct EndTimeTests {
+    private let utc = TimeZone(identifier: "UTC")!
+    private let us = Locale(identifier: "en_US")
+    /// Thu 2026-10-29 09:00 UTC.
+    private let now = Date(timeIntervalSince1970: 1_793_264_400)
+
+    private func end(_ s: TimeInterval) -> String {
+        // ICU puts a narrow no-break space before AM/PM; compare with plain spaces.
+        TimeFormat.endTime(now.addingTimeInterval(s), now: now, locale: us, timeZone: utc)
+            .replacingOccurrences(of: "\u{202F}", with: " ")
+    }
+
+    @Test func sameDayAndOvernightShowTheTimeOnly() {
+        #expect(end(42 * 60) == "9:42 AM")
+        #expect(end(14 * 3600) == "11:00 PM")
+        #expect(end(20 * 3600) == "5:00 AM")          // tomorrow, but < 20 h: no weekday
+        #expect(end(-60) == "8:59 AM")                // already past: still just the time
+    }
+
+    @Test func beyondTwentyHoursShowsTheWeekday() {
+        #expect(end(20 * 3600 + 60) == "Fri 5:01 AM")
+        #expect(end(46 * 3600 + 13 * 60) == "Sat 7:13 AM")
+        #expect(end(72 * 3600) == "Sun 9:00 AM")
+        #expect(end(6 * 86_400) == "Wed 9:00 AM")     // exactly 6 days: weekday is still unambiguous
+    }
+
+    @Test func beyondSixDaysShowsTheDate() {
+        #expect(end(6 * 86_400 + 60) == "Nov 4 at 9:01 AM")
+        #expect(end(30 * 86_400) == "Nov 28 at 9:00 AM")
+        // Crossing New Year, or ~a year out on the same month/day, names the year.
+        #expect(end(60 * 86_400) == "Dec 28 at 9:00 AM")
+        #expect(end(70 * 86_400) == "Jan 7, 2027 at 9:00 AM")
+        #expect(end(365 * 86_400).contains("2027"))
+    }
+
+    @Test func shortLabelForUntilUsesTheSameFormatter() {
+        let date = Date().addingTimeInterval(3 * 86_400)
+        #expect(AwakeDuration.until(date).shortLabel == "→ " + TimeFormat.endTime(date))
+        #expect(PlainCopy.spokenDuration(.until(date)) == "Until " + TimeFormat.endTime(date))
+    }
+}
+
+/// Every surface that shows when a hold ends goes through `TimeFormat.endTime`, so multi-day holds name the day.
+@MainActor
+@Suite("Multi-day hold end times")
+struct MultiDayHoldTests {
+    private let now = Date()
+
+    @Test func panelSublineAndDockHeaderNameTheDay() {
+        let end = now.addingTimeInterval(3 * 86_400 + 600)
+        var s = PanelState()
+        s.status = .timed(end: end)
+        s.now = now
+        s.remaining = end.timeIntervalSince(now)
+        let sub = PlainCopy.subline(s)
+        #expect(sub.text.hasSuffix(" left · until " + TimeFormat.endTime(end, now: now)))
+        #expect(TimeFormat.endTime(end, now: now) != end.formatted(date: .omitted, time: .shortened))
+        // Short holds keep the bare time.
+        let soon = now.addingTimeInterval(42 * 60)
+        s.status = .timed(end: soon)
+        s.remaining = 42 * 60
+        #expect(PlainCopy.subline(s).text.hasSuffix("until " + soon.formatted(date: .omitted, time: .shortened)))
+    }
+
+    @Test func cliStatusNamesTheDay() {
+        let end = now.addingTimeInterval(4 * 86_400)
+        let payload = StatusPayload(state: "timed", remainingSeconds: 4 * 86_400, endsAt: end, screen: false, lid: "off",
+                                    guards: [], holds: [], headline: "Wide awake", lidDetail: nil)
+        let lines = CLIFormat.status(payload, now: now).split(separator: "\n").map(String.init)
+        #expect(lines[1] == "  96 h left · until " + TimeFormat.endTime(end, now: now))
+    }
+
+    @Test func whyAwakeAndNotificationsNameTheDay() {
+        let end = now.addingTimeInterval(2 * 86_400 + 47 * 60)
+        let hold = Hold(owner: .manual(.cli), options: .systemOnly, start: now, end: end)
+        #expect(WhyAwakeReport.durationText(hold) == "until " + TimeFormat.endTime(end))
+        #expect(Narrator.durationPhrase(.until(end)) == "until " + TimeFormat.endTime(end))
+    }
+}
+
 @Suite("TickPlanner")
 struct TickPlannerTests {
     @Test func asleepWithPanelClosedRunsNoTimerAtAll() {

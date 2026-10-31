@@ -87,6 +87,7 @@ enum PanelAction: Equatable {
 @Observable
 final class PanelModel {
     @ObservationIgnored private let provider: () -> PanelState
+    @ObservationIgnored private let clockFreeProvider: (() -> PanelState)?
     @ObservationIgnored private let handler: (PanelAction) -> Void
     /// Builds the While… menu (`WhileMenu.provider(for:)`: running apps, suggested processes, name / PID prompts).
     @ObservationIgnored var whileMenuProvider: (() -> NSMenu)?
@@ -94,6 +95,9 @@ final class PanelModel {
     @ObservationIgnored weak var whileAnchor: NSView?
 
     var state: PanelState { provider() }
+    /// `state` without reading the display clock: `now`, `remaining`, `progress` and `awakeFor` are not current.
+    /// For the parts of the panel that don't show them, so the 1 Hz tick doesn't re-render the whole panel.
+    var layoutState: PanelState { clockFreeProvider?() ?? provider() }
 
     /// The panel window is on screen: the eyes animate only then.
     var isVisible = false
@@ -106,8 +110,10 @@ final class PanelModel {
 
     @ObservationIgnored private var pokes: [Date] = []
 
-    init(provider: @escaping () -> PanelState, handler: @escaping (PanelAction) -> Void) {
+    init(provider: @escaping () -> PanelState, clockFreeProvider: (() -> PanelState)? = nil,
+         handler: @escaping (PanelAction) -> Void) {
         self.provider = provider
+        self.clockFreeProvider = clockFreeProvider
         self.handler = handler
     }
 
@@ -245,7 +251,7 @@ enum PlainCopy {
         case .timed(let end):
             let r = s.remaining ?? max(0, end.timeIntervalSince(s.now))
             let left = r <= 3600 ? TimeFormat.countdown(r) : longRemaining(r)
-            text = "\(left) left · until \(end.formatted(date: .omitted, time: .shortened))"
+            text = "\(left) left · until \(TimeFormat.endTime(end, now: s.now))"
         case .indefinite:
             text = "Until you say so"
         case .watching(let t):
@@ -408,7 +414,7 @@ enum PlainCopy {
         switch d {
         case .indefinite: return "Until I stop"
         case .minutes(let m): return spokenRemaining(TimeInterval(m * 60))
-        case .until(let date): return "Until \(date.formatted(date: .omitted, time: .shortened))"
+        case .until(let date): return "Until \(TimeFormat.endTime(date))"
         }
     }
 
@@ -493,13 +499,16 @@ enum PlainCopy {
 extension PanelModel {
     /// Reads observable sources inside `state`, so SwiftUI re-renders exactly when they change.
     static func live() -> PanelModel {
-        PanelModel(provider: { LivePanelState.make() }, handler: { LivePanelState.perform($0) })
+        PanelModel(provider: { LivePanelState.make() }, clockFreeProvider: { LivePanelState.make(clock: false) },
+                   handler: { LivePanelState.perform($0) })
     }
 }
 
 @MainActor
 enum LivePanelState {
-    static func make() -> PanelState {
+    /// `clock: false` skips every read of the engine's display clock (`now`, `remaining`, `progress`, awake time), so
+    /// an observer of the result isn't invalidated by the 1 Hz tick.
+    static func make(clock: Bool = true) -> PanelState {
         let engine = AwakeEngine.shared
         let settings = Settings.shared
         let power = PowerMonitor.shared
@@ -507,9 +516,11 @@ enum LivePanelState {
         s.status = engine.status
         s.lid = engine.lid
         s.mood = engine.mood
-        s.now = engine.now
-        s.remaining = engine.remaining
-        s.progress = engine.progress
+        if clock {
+            s.now = engine.now
+            s.remaining = engine.remaining
+            s.progress = engine.progress
+        }
         s.quip = engine.quip
         s.hasLid = power.hasLid
         s.keepScreenOn = settings.keepScreenOn
@@ -528,7 +539,7 @@ enum LivePanelState {
         }
         s.clientOnly = engine.isHeldOnlyByClients
         s.extraHolds = max(0, holds.count - 1)
-        if s.isAwake, let since = engine.awakeSince { s.awakeFor = s.now.timeIntervalSince(since) }
+        if clock, s.isAwake, let since = engine.awakeSince { s.awakeFor = s.now.timeIntervalSince(since) }
         if !s.isAwake {
             let paused = settings.rules.filter { engine.pausedRuleIDs.contains($0.id) }
             if let first = paused.first { s.pausedRuleSummary = pausedSummary(first.condition) }

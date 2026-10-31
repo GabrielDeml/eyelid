@@ -540,7 +540,11 @@ enum EyesRenderer {
 - **App icon:** an indigo→violet gradient squircle with amber irises. When asleep it shows closed arcs and "z z". In the `.lid` mood it adds the lid bar and an indigo glow.
 
 ### `UI/EyesView.swift`
-A SwiftUI view of the panel eyes, built on `TimelineView(.animation)` **only while it's visible**. It handles:
+A SwiftUI view of the panel eyes. It animates **only while it's visible**, in an AppKit leaf (`LiveEyesNSView`) driven by
+its own display link at 30 fps, so per-frame motion never re-evaluates or re-lays-out the rest of the panel; a frame
+that looks like the last one is not redrawn (a still face costs ~nothing). Closed panel, snapshots and Reduce Motion
+draw a static pose in a `Canvas`. The 1 Hz display tick invalidates only the panel header (rows A–D): the rest of
+`PanelView` reads `PanelModel.layoutState`, which never touches the engine's clock. It handles:
 
 - blink every 4–9 s;
 - cursor tracking ±2 pt, using `NSEvent.mouseLocation` relative to the window;

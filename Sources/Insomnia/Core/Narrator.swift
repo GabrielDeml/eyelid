@@ -245,7 +245,7 @@ final class Narrator: Narrating {
         switch d {
         case .indefinite: return "until you stop it"
         case .minutes(let m): return "for " + PlainCopy.spokenRemaining(TimeInterval(m * 60))
-        case .until(let date): return "until " + date.formatted(date: .omitted, time: .shortened)
+        case .until(let date): return "until " + TimeFormat.endTime(date)
         }
     }
 

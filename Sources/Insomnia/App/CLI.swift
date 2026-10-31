@@ -200,13 +200,13 @@ enum CLIParser {
 // MARK: - Human output (pure)
 
 enum CLIFormat {
-    static func status(_ s: StatusPayload) -> String {
+    static func status(_ s: StatusPayload, now: Date = Date()) -> String {
         var lines = [s.headline ?? fallbackHeadline(s.state)]
         var detail: [String] = []
         switch s.state {
         case "timed":
             if let r = s.remainingSeconds { detail.append("\(remaining(r)) left") }
-            if let end = s.endsAt { detail.append("until " + end.formatted(date: .omitted, time: .shortened)) }
+            if let end = s.endsAt { detail.append("until " + TimeFormat.endTime(end, now: now)) }
         case "indefinite": detail.append("until you say so")
         case "suspended": detail.append("plug in to resume")
         default: break
