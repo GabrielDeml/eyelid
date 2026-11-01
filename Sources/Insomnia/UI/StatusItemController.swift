@@ -1,9 +1,9 @@
 import AppKit
 import os
 
-/// The menu bar item (docs/UX.md §1): a template glyph that never encodes state in colour, optional timer text,
-/// the click model (panel / toggle / ⌥ Why awake), tooltip and VoiceOver value, the one-blink toggle feedback, and the
-/// "hidden by macOS" heuristic.
+/// The menu bar item (docs/UX.md §1): a template glyph (the wide-awake moon) that never encodes state in colour,
+/// optional timer text, the click model (panel / toggle / ⌥ Why awake), tooltip and VoiceOver value, the one-blink
+/// toggle feedback, and the "hidden by macOS" heuristic.
 ///
 /// Never assigns `statusItem.menu` (27.0.1 drops clicks on multi-display setups with it).
 @MainActor
@@ -232,7 +232,7 @@ final class StatusItemController: NSObject {
         blinkFrames.forEach { $0.invalidate() }
         blinkFrames = []
         let mood = AwakeEngine.shared.mood
-        // Falling asleep blinks the open eyes shut; waking blinks the new eyes.
+        // Falling asleep blinks the open eye shut; waking blinks the new eye.
         let blinkMood: EyeMood = mood == .asleep ? .awake : (mood == .squint ? .awake : mood)
         let hc = Theme.increaseContrast
         let frames: [CGFloat] = [0.5, 1, 0.5]

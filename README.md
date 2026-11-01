@@ -1,6 +1,6 @@
 # Insomnia
 
-**A pair of eyes in your menu bar.** They stay open while your Mac stays awake, for exactly as long as you meant, lid open or shut. They tell you the truth about it, and they're funny a few times a day, never on every click.
+**A wide-awake moon in your menu bar.** Its eye stays open while your Mac stays awake, for exactly as long as you meant, lid open or shut. It tells you the truth about it, and it's funny a few times a day, never on every click.
 
 Insomnia is a native macOS menu bar app (with an optional live Dock tile) that keeps your Mac awake, like Caffeine, with more control: closed-lid mode with real safety guards, "stay awake while this app runs", rules, a CLI and a URL scheme.
 
@@ -8,13 +8,13 @@ Insomnia is a native macOS menu bar app (with an optional live Dock tile) that k
 
 ## Features
 
-- **One click.** Click the eyes to keep your Mac awake; click again to let it sleep. Right-click the menu bar eyes to toggle without opening anything.
+- **One click.** Click the eyes in the panel to keep your Mac awake; click again to let it sleep. Right-click the moon in the menu bar to toggle without opening anything.
 - **Presets:** 30m · 1h · 2h · 4h · 8h · ∞, plus **Until…** a clock time. Pick a chip again to extend; `+` adds 15 minutes.
 - **Keep screen on**, as a sticky switch.
 - **Stay awake with lid closed** (MacBooks). Run in a bag or under a desk with the lid shut, on power or battery, with guards that can't be switched off (see below).
 - **While…** keep awake until an app, a process name or a PID exits (`claude`, `codex`, `xcodebuild`, `ffmpeg`…), with a 5 s grace period.
 - **Rules:** *keep awake while Xcode is running*, *…while on power adapter*, *…while an external display is connected*.
-- **Why awake?** ⌥-click the menu bar eyes: Insomnia's own holds, active guards, other apps' sleep blockers and the system's sleep flag.
+- **Why awake?** ⌥-click the menu bar moon: Insomnia's own holds, active guards, other apps' sleep blockers and the system's sleep flag.
 - **Live Dock tile** with the remaining time drawn in (optional), plus a Dock menu.
 - **CLI** (`insomnia run -- make`), **URL scheme** (`insomnia://on?for=45m`) and one **global hotkey** (⌃⌥⌘I).
 - **Personality:** Professional (zero jokes), **Cheeky** (default) or Unhinged. Safety copy is plain in every tier.
@@ -22,7 +22,7 @@ Insomnia is a native macOS menu bar app (with an optional live Dock tile) that k
 
 | Input | Does |
 |---|---|
-| Click the menu bar eyes | Open the panel (swap with right-click in Settings) |
+| Click the menu bar moon | Open the panel (swap with right-click in Settings) |
 | Right-click / ⌃-click | Toggle with the default duration |
 | ⌥-click | Why is my Mac awake? |
 | In the panel | Return toggles · 1–6 presets · U Until… · W While… · = extend · S screen · L lid · Esc close |
@@ -50,7 +50,7 @@ macOS sleeps when you close the lid, even with "prevent sleep" assertions held, 
 
 **Setup (signed builds).** Turn on *Stay awake with lid closed*. Insomnia registers a tiny privileged helper (`SMAppService`), and macOS asks you once to allow it in **System Settings ▸ General ▸ Login Items & Extensions** (you'll also see a "Background Items Added" notification; that's expected). The helper does exactly one job: turn sleep off and back on. It only talks to this Insomnia, pinned by code signature (bundle id + Team ID).
 
-**It always gives sleep back.** If Insomnia quits, crashes, hangs for 45 s, or the Mac restarts, the helper resets the flag. At 10% battery it resets it and sleeps the Mac. At launch Insomnia also checks for an unclean exit and restores normal sleep. If every reset fails, the eyes turn to `×` and the panel offers **Reset with password…**.
+**It always gives sleep back.** If Insomnia quits, crashes, hangs for 45 s, or the Mac restarts, the helper resets the flag. At 10% battery it resets it and sleeps the Mac. At launch Insomnia also checks for an unclean exit and restores normal sleep. If every reset fails, the menu bar moon shows a "!", the panel's eyes turn to `×`, and the panel offers **Reset with password…**.
 
 **Guards (can't be switched off):** lid mode turns off at your battery floor (default 20%, minimum 10%), pauses when the Mac runs hot or in Low Power Mode, and on battery always has a time limit with the lid closed (default 1 h). A guard that fires while the lid is shut stays off until you open it, so a Mac in a bag never re-arms itself. Optional: lid mode only on the power adapter, and a time limit on power too.
 

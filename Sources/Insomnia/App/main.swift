@@ -19,7 +19,7 @@ let snapshotUsage: [String] = []
 #endif
 
 let usage = ([
-    "Insomnia \(HelperInfo.version): keeps your Mac awake. A pair of eyes in your menu bar.",
+    "Insomnia \(HelperInfo.version): keeps your Mac awake. A wide-awake moon in your menu bar.",
     "",
     "Usage:",
     "  Insomnia --gui                       Start the app (normally launched by Finder / LaunchServices)",

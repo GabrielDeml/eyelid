@@ -1,6 +1,6 @@
 # Insomnia: Architecture & Module Contracts
 
-Insomnia is a native macOS (14+) **menu bar app with an optional live Dock tile** that keeps the Mac awake. It works like Caffeine, with more control: closed-lid mode, babysitting a process, rules, a CLI, and a personality. The mascot is a pair of eyes: **open** while the Mac is held awake, **closed with a "z"** when sleep is allowed.
+Insomnia is a native macOS (14+) **menu bar app with an optional live Dock tile** that keeps the Mac awake. It works like Caffeine, with more control: closed-lid mode, babysitting a process, rules, a CLI, and a personality. The mascot is a pair of eyes in the panel, the Dock tile and the app icon, and a wide-awake moon with one eye in the menu bar (UX §1.1): **open** while the Mac is held awake, **closed with a "z"** when sleep is allowed.
 
 Read these first. They are the product and UX source of truth, and this file implements them:
 
@@ -541,6 +541,7 @@ enum EyesRenderer {
 }
 ```
 - **Drawing:** must work headless (`NSBitmapImageRep` + `NSGraphicsContext`) for `--export-icon`.
+- **Menu bar glyph:** `drawMenuBarGlyph(_:mood:blink:stroke:colour:pixelScale:)` draws the wide-awake moon (UX §1.1; geometry in `MenuBarMoon`): an outlined crescent with one eye and a badge slot, a solid moon with a knocked-out eye and a laptop badge for `.lid`. Always 22 × 16 pt; alpha-only, knock-outs by path subtraction or even-odd fill; hand-placed pixels at 1x.
 - **App icon:** an indigo→violet gradient squircle with amber irises. When asleep it shows closed arcs and "z z". In the `.lid` mood it adds the lid bar and an indigo glow.
 
 ### `UI/EyesView.swift`
@@ -803,3 +804,4 @@ struct URLCommand: Equatable { /* parsed, pure */ static func parse(_ url: URL) 
 | 42 | **User-confirmed (2026-10-31): do one real `register()`/`unregister()` from a root-owned `/Applications` copy during M2 verification. If macOS refuses an Apple Development–signed helper, STOP and get a Developer ID certificate + notarization (user will obtain it)** — do not silently promote the sudoers fallback | Promote sudoers to primary; skip the test | User preference: wants the signed helper, not the sudoers rule, as the real backend. |
 | 43 | **User-confirmed: signing key stays in the login keychain** (no per-build prompt); residual risk stays documented in CLOSED_LID threat model | Dedicated locked keychain by default | Matches how Xcode already uses the key on this Mac; convenience for a local tool. |
 | 44 | **User-confirmed: lid mode requires `make install` (sudo) into a root-owned `/Applications/Insomnia.app`**; drag-installed copies can't set up lid mode | Allow user-owned locations | Prevents same-user code from swapping the binary a root daemon runs. |
+| 45 | **The menu bar glyph is a wide-awake moon with one eye, not a pair of eyes** (user-confirmed 2026-11-01). Lid mode is a solid moon with a knocked-out night-vision eye plus a closed-laptop badge; every non-awake mood has a badge in one fixed slot (z, sparkle, sweat drop, "!", laptop). The panel eyes, Dock tile, app icon and the `EyeMood`/`EyePose` names stay. | The two almond eyes; an owl, cartoon peepers, a buddy face; lid as a plain filled crescent; lid as a heavier outline only | User feedback on the almond eyes: "a bit creepy and honestly looks like a bra"; the user picked the moon from four concepts. A filled crescent is SF `moon.fill`, which the menu bar shows while Focus is on, so lid must not be one; a heavier outline alone was too close to `.awake` (and vanishes under Increase Contrast, where every mood is already 2 pt). |

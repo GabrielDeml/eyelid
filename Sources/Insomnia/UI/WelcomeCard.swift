@@ -4,7 +4,7 @@ import SwiftUI
 ///
 /// ```
 /// Hi. I'm Insomnia. I keep your Mac awake.
-/// • Click my eyes (or right-click me in the menu bar) to toggle. ⌥-click: why awake.
+/// • Click my eyes (or right-click the moon in the menu bar) to toggle. ⌥-click: why awake.
 /// Where should I live?       [ Menu bar | Menu bar + Dock ]
 /// Awake with the lid closed? [Set up later]  [Set up now]     (MacBooks only)
 ///                                                      [Got it]
@@ -80,8 +80,8 @@ struct WelcomeCard: View {
 
     private var clickHint: String {
         let menuBar = leftClickAction == .toggle
-            ? "click me in the menu bar; right-click opens this panel"
-            : "right-click me in the menu bar"
+            ? "click the moon in the menu bar; right-click opens this panel"
+            : "right-click the moon in the menu bar"
         return "Click my eyes (or \(menuBar)) to toggle. ⌥-click: why awake."
     }
 

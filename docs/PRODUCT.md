@@ -1,6 +1,6 @@
 # Insomnia: Product Design
 
-> A pair of eyes in your menu bar. They stay open while your Mac stays awake, for exactly as long as you meant, lid open or shut. They tell you the truth about it, and they're funny a few times a day, never on every click.
+> A wide-awake moon in your menu bar. Its eye stays open while your Mac stays awake, for exactly as long as you meant, lid open or shut. It tells you the truth about it, and it's funny a few times a day, never on every click.
 
 Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md` and `../ARCHITECTURE.md` are the source of truth. If code and docs disagree, fix the docs first, then the code.
 
@@ -12,7 +12,7 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 |---|---|---|
 | 1 | **Simple surface** | Reading the panel takes 2 seconds and starting a session takes one click. Rare actions sit behind `⋯`, ⌥-click or Settings. Nothing scrolls. |
 | 2 | **Powerful depth** | One model sits underneath everything: **holds → guards → effective state**. A hold can come from the panel, a rule, the CLI, the URL scheme, the hotkey or the Dock, and every source goes through the same path. |
-| 3 | **Funny, not annoying** | The eyes show the state and the words carry the jokes. Jokes appear only at state changes and milestones. There are no sounds, no bouncing and no looping animation in the menu bar. **Professional mode has zero jokes.** |
+| 3 | **Funny, not annoying** | The mascot shows the state (the moon's eye in the menu bar, the eyes in the panel) and the words carry the jokes. Jokes appear only at state changes and milestones. There are no sounds, no bouncing and no looping animation in the menu bar. **Professional mode has zero jokes.** |
 | 4 | **Safe by default** | Lid mode has four independent ways of restoring sleep (normal path, the root helper's crash/hang watch, its boot reset and battery backstop, launch recovery). Its battery floor and heat guard **can't be turned off**. Closed on battery, it always has a time cap; on the power adapter a cap is optional. Plain keep-awake behaves like Caffeine and never stops on its own. Safety copy is plain in every personality. |
 | 5 | **Honest state** | State is read back from the system, never assumed. *Why awake?* also lists other apps' sleep blockers. The app never promises something it can't do (see the "Look busy" cut). |
 
@@ -40,7 +40,7 @@ Status: **v1 design, approved for build.** This file and `UX.md`, `CLOSED_LID.md
 | Automations | **Rules**, written as sentences: *Keep awake while [app / process] is running*, *…while on power adapter*, *…while an external display is connected*. Each rule has "screen on" and "allow lid closed" options; both default to off. A process rule stays on for 5 s after its process exits, so a loop of short runs is one hold. |
 | Insight | **Why awake?** (⌥-click on the menu bar item, plus Settings ▸ Diagnostics): our holds, guards, other processes' assertions (`IOPMCopyAssertionsByProcess`), and `SleepDisabled` / clamshell readback. |
 | Scripting | `insomnia://` URL scheme. **CLI** (`insomnia on/off/extend/status/why/run/watch`) over a local socket. One global hotkey (toggle). |
-| Surfaces | Menu bar item (template glyph). **Live Dock tile** (on by default, chosen on the welcome card) with time drawn in, a Dock menu and click-to-toggle. Panel. Four-tab Settings (three on desktops). |
+| Surfaces | Menu bar item (template glyph: the wide-awake moon, `UX.md` §1.1). **Live Dock tile** (on by default, chosen on the welcome card) with time drawn in, a Dock menu and click-to-toggle. Panel. Four-tab Settings (three on desktops). |
 | Personality | Professional / **Cheeky** (default) / Unhinged. Shuffle-bag copy with a quip budget. Poke egg. Milestones. Date-aware lines (copy only). Four **epic moments** (§4 rule 10). |
 | Other | Launch at login (`SMAppService.mainApp`). Sleep Now. Stats in About. First-run card. Detection of "macOS hid my menu bar item". |
 

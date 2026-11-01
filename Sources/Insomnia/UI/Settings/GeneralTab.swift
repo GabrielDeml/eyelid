@@ -62,7 +62,7 @@ struct GeneralTab: View {
                 }
             }
 
-            Picker("Clicking the eyes in the menu bar", selection: $settings.leftClickAction) {
+            Picker("Clicking the moon in the menu bar", selection: $settings.leftClickAction) {
                 ForEach(ClickAction.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.radioGroup)

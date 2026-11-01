@@ -321,111 +321,138 @@ enum EyesRenderer {
         return image
     }
 
-    /// Glyph geometry (y-down, 22 × 16). Eyes are 7.8 × ~6 pt almonds with a clear 3 pt gap so they never merge
-    /// into one shape at 1x; the asleep "z" sits up and to the right. `pixelScale` < 1.5 (a 1x display): a 1 pt
-    /// stroke (2 under Increase Contrast) on half-pixel centres, so edges land on pixels instead of smearing.
+    /// The wide-awake moon (UX.md §1.1), y-down in a 22 × 16 pt canvas: a fat outlined crescent opening up and to
+    /// the right with one eye in its belly, plus a badge in a fixed slot at the upper right for every mood but
+    /// `.awake`. Lid mode is a solid moon with a knocked-out night-vision eye and a closed-laptop badge (never a plain
+    /// filled crescent, which is macOS Focus). Alpha-only in `colour`: knock-outs are path subtractions or even-odd
+    /// fills, never a clear blend, so nothing underneath is punched through.
+    /// `pixelScale` < 1.5 (a 1x display): a 1 pt stroke (2 under Increase Contrast), eye and badges on whole pixels.
+    /// `blink` 0…1 closes the eye into the asleep eye (the same lens), so the toggle-off blink lands without a jump.
     static func drawMenuBarGlyph(_ ctx: CGContext, mood: EyeMood, blink: CGFloat, stroke: CGFloat,
                                  colour: CGColor = CGColor(gray: 0, alpha: 1), pixelScale: CGFloat = 2) {
+        typealias M = MenuBarMoon
         let snap = pixelScale < 1.5
-        let lineWidth = snap ? (stroke >= 2 ? 2.0 : 1.0) : stroke
+        // Optical weight: 10% over the spec stroke so the moon sits with SF Symbols (wifi) at 2x.
+        let lineWidth = snap ? (stroke >= 2 ? 2.0 : 1.0) : stroke * 1.1
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
         ctx.setStrokeColor(colour)
         ctx.setFillColor(colour)
         ctx.setLineWidth(lineWidth)
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
 
-        let a: CGFloat = 3.9                                // eye half-width
-        let cy: CGFloat = snap ? 8.5 : 8.4
-        let pair: [CGFloat] = snap ? [5.5, 16.5] : [5.4, 16.6]
-        let open = max(0, min(1, 1 - blink))
-        switch mood {
-        case .asleep:
-            // Two downward arcs (closed lids) where the open eyes sit, so the toggle-off blink closes into them
-            // without a jump, + a small "z" up and right, clear of the right arc.
-            for cx in pair { strokeClosed(ctx, cx: cx, cy: 9.2, a: 3.3) }
-            let z = CGRect(x: 17.4, y: 0.9, width: 3.8, height: 4.2)
-            ctx.setLineWidth(snap ? 1.0 : max(1.1, stroke - 0.25))
-            ctx.move(to: CGPoint(x: z.minX, y: z.minY))
-            ctx.addLine(to: CGPoint(x: z.maxX, y: z.minY))
-            ctx.addLine(to: CGPoint(x: z.minX, y: z.maxY))
-            ctx.addLine(to: CGPoint(x: z.maxX, y: z.maxY))
-            ctx.strokePath()
+        let moon = M.crescent
+        let outline = moon.copy(strokingWithWidth: lineWidth, lineCap: .round, lineJoin: .round, miterLimit: 10)
+        let t = max(0, min(1, mood == .asleep ? 1 : blink))
+        let centre = mood == .watching ? M.glanceCentre : M.eyeCentre
+        let radius = mood == .alarmed ? M.eyeRadius + 0.35 : M.eyeRadius
 
-        case .awake, .watching, .lid:
-            // Watching: eyes nudge left to make room for the trailing dot; pupils glance right.
-            let centres: [CGFloat] = mood == .watching ? [4.5, 14.3] : pair
-            for cx in centres {
-                let c = CGPoint(x: cx, y: cy)
-                if open < 0.12 { strokeClosed(ctx, cx: cx, cy: cy, a: a); continue }
-                let shape = glyphAlmond(c: c, a: a, top: 3.4 * open, bottom: 2.7)
-                let r: CGFloat = 1.65
-                let pupil = CGRect(x: c.x - r + (mood == .watching ? 1.9 : 0), y: c.y - r + 0.1, width: r * 2, height: r * 2)
-                if mood == .lid {
-                    // Night vision: a solid silhouette (the same outer size as the stroked moods, so the glyph
-                    // doesn't shrink when lid mode engages) with knocked-out pupils.
-                    let outline = shape.copy(strokingWithWidth: lineWidth, lineCap: .round, lineJoin: .round,
-                                             miterLimit: 10)
-                    let solid = shape.union(outline).subtracting(CGPath(ellipseIn: pupil.insetBy(dx: 0.15, dy: 0.15),
-                                                                        transform: nil))
-                    ctx.addPath(solid)
-                    ctx.fillPath()
+        if mood == .lid {
+            // Solid moon (the outlined moods' outer size, so the glyph doesn't grow) with the eye knocked out and a
+            // solid pupil left inside it; the closed-laptop badge breaks the plain crescent silhouette.
+            var solid = moon.union(outline)
+            if snap {
+                solid = t < 0.25 ? solid.subtracting(M.PixelEye.lidHole).union(M.PixelEye.lidPupil)
+                                 : solid.subtracting(M.PixelEye.path(t: t))
+            } else {
+                let eye = M.eye(centre, radius, t: t)
+                let hole = eye.union(eye.copy(strokingWithWidth: 0.7 + lineWidth * t, lineCap: .round,
+                                              lineJoin: .round, miterLimit: 10))
+                solid = solid.subtracting(hole)
+                if t < 0.75 { solid = solid.union(M.disc(centre, radius * 0.55).intersection(eye)) }
+            }
+            ctx.addPath(solid)
+            ctx.addPath(M.laptop(snap: snap))
+            ctx.fillPath()
+            return
+        }
+
+        ctx.addPath(outline)
+        ctx.fillPath()
+
+        switch mood {
+        case .squint:
+            // Heavy-lidded: the lower half of the eye under a lid tilted up at the outer (left) corner.
+            if snap {
+                ctx.fill(CGRect(x: 3, y: 9, width: 4, height: 1))
+                ctx.fill(CGRect(x: 4, y: 10, width: 2, height: 1))
+            } else {
+                ctx.saveGState()
+                ctx.translateBy(x: centre.x, y: centre.y - 0.15)
+                ctx.rotate(by: 0.3)
+                ctx.addArc(center: .zero, radius: radius, startAngle: 0, endAngle: .pi, clockwise: false)
+                ctx.closePath()
+                ctx.fillPath()
+                ctx.setLineWidth(lineWidth * 0.8)   // the heavy upper lid
+                ctx.move(to: CGPoint(x: -radius, y: 0))
+                ctx.addLine(to: CGPoint(x: radius, y: 0))
+                ctx.strokePath()
+                ctx.restoreGState()
+            }
+        default:
+            if snap {
+                // 1x: hand-placed pixels (open, half-closed, closed), so nothing smears into the outline.
+                ctx.addPath(M.PixelEye.path(t: t, dy: mood == .watching ? -1 : 0, tall: mood == .alarmed))
+                ctx.fillPath(using: .evenOdd)
+            } else {
+                let eye = M.eye(centre, radius, t: t)
+                if t < 0.01 {
+                    // Open: a solid round eye with a knocked-out catch-light up and to the right.
+                    ctx.addPath(eye)
+                    let glint = CGPoint(x: centre.x + radius * 0.36, y: centre.y - radius * 0.36)
+                    ctx.addPath(M.disc(glint, radius * 0.34))
+                    ctx.fillPath(using: .evenOdd)
                 } else {
-                    ctx.addPath(shape)
+                    // Closing: the lens flattens into the closed "‿" lid, stroked to moon weight as it shuts.
+                    ctx.addPath(eye)
+                    ctx.fillPath()
+                    ctx.setLineWidth(lineWidth * t)
+                    ctx.addPath(eye)
                     ctx.strokePath()
-                    ctx.saveGState()
-                    ctx.addPath(shape)
-                    ctx.clip()
-                    ctx.fillEllipse(in: pupil)
-                    ctx.restoreGState()
+                    ctx.setLineWidth(lineWidth)
                 }
             }
-            if mood == .watching {
-                // A 2 pt dot after the right eye: "…".
-                ctx.fillEllipse(in: CGRect(x: 19.6, y: cy + 1.2, width: 2, height: 2))
-            }
-
-        case .squint:
-            // Flat slits, 3 pt tall, no pupils.
-            for cx in pair {
-                ctx.addPath(glyphAlmond(c: CGPoint(x: cx, y: cy), a: a + 0.2, top: 1.5, bottom: 1.5))
-                ctx.strokePath()
-            }
-
-        case .alarmed:
-            let c = CGPoint(x: pair[0], y: cy)
-            let shape = glyphAlmond(c: c, a: a, top: 3.4, bottom: 2.7)
-            ctx.addPath(shape)
-            ctx.strokePath()
-            ctx.saveGState()
-            ctx.addPath(shape)
-            ctx.clip()
-            ctx.fillEllipse(in: CGRect(x: c.x - 1.65, y: c.y - 1.55, width: 3.3, height: 3.3))
-            ctx.restoreGState()
-            let x = CGPoint(x: pair[1], y: cy), s: CGFloat = 2.7
-            ctx.move(to: CGPoint(x: x.x - s, y: x.y - s)); ctx.addLine(to: CGPoint(x: x.x + s, y: x.y + s))
-            ctx.move(to: CGPoint(x: x.x + s, y: x.y - s)); ctx.addLine(to: CGPoint(x: x.x - s, y: x.y + s))
-            ctx.strokePath()
         }
-    }
 
-    /// Almond whose upper/lower lid peaks sit `top` / `bottom` pt from the corner line (cubic peaks at 0.75 × control).
-    private static func glyphAlmond(c: CGPoint, a: CGFloat, top: CGFloat, bottom: CGFloat) -> CGPath {
-        let upY = c.y - top / 0.75, lowY = c.y + bottom / 0.75
-        let p = CGMutablePath()
-        p.move(to: CGPoint(x: c.x - a, y: c.y))
-        p.addCurve(to: CGPoint(x: c.x + a, y: c.y), control1: CGPoint(x: c.x - a * 0.45, y: upY),
-                   control2: CGPoint(x: c.x + a * 0.45, y: upY))
-        p.addCurve(to: CGPoint(x: c.x - a, y: c.y), control1: CGPoint(x: c.x + a * 0.45, y: lowY),
-                   control2: CGPoint(x: c.x - a * 0.45, y: lowY))
-        p.closeSubpath()
-        return p
-    }
-
-    private static func strokeClosed(_ ctx: CGContext, cx: CGFloat, cy: CGFloat, a: CGFloat) {
-        ctx.move(to: CGPoint(x: cx - a, y: cy - 1.0))
-        ctx.addCurve(to: CGPoint(x: cx + a, y: cy - 1.0), control1: CGPoint(x: cx - a * 0.45, y: cy + 2.4),
-                     control2: CGPoint(x: cx + a * 0.45, y: cy + 2.4))
-        ctx.strokePath()
+        // The badge (same slot for every mood).
+        let slot = snap ? CGPoint(x: 18.5, y: 3.5) : M.slot
+        switch mood {
+        case .asleep:
+            let z = snap ? CGRect(x: 16, y: 1, width: 4, height: 4)
+                         : CGRect(x: slot.x - 2.1, y: slot.y - 2.2, width: 4.2, height: 4.4)
+            let zw = snap ? 1.0 : lineWidth * 0.8
+            let inset = zw / 2
+            ctx.setLineWidth(zw)
+            ctx.move(to: CGPoint(x: z.minX + inset, y: z.minY + inset))
+            ctx.addLine(to: CGPoint(x: z.maxX - inset, y: z.minY + inset))
+            ctx.addLine(to: CGPoint(x: z.minX + inset, y: z.maxY - inset))
+            ctx.addLine(to: CGPoint(x: z.maxX - inset, y: z.maxY - inset))
+            ctx.strokePath()
+        case .watching:
+            // The eye glances up and to the right at a sparkle: something automatic is keeping me up.
+            ctx.addPath(M.sparkle(slot, r: snap ? 2.0 : 2.6, inner: 0.7))
+            ctx.fillPath()
+        case .squint:
+            ctx.addPath(M.drop(CGPoint(x: slot.x, y: slot.y + 1.3), r: snap ? 1.5 : 1.6))
+            ctx.fillPath()
+        case .alarmed:
+            // A full-height "!" beside a wider eye.
+            let x = snap ? 18.5 : slot.x
+            ctx.setLineWidth(snap ? 1.0 : lineWidth * 1.1)
+            ctx.setLineCap(snap ? .butt : .round)
+            ctx.move(to: CGPoint(x: x, y: snap ? 1.0 : 1.9))
+            ctx.addLine(to: CGPoint(x: x, y: snap ? 10.0 : 9.6))
+            ctx.strokePath()
+            if snap {
+                ctx.fill(CGRect(x: 18, y: 12, width: 1, height: 2))
+            } else {
+                let d = lineWidth * 1.35
+                ctx.fillEllipse(in: CGRect(x: x - d / 2, y: 12.9 - d / 2, width: d, height: d))
+            }
+        case .awake, .lid:
+            break
+        }
     }
 
     // MARK: App icon / Dock tile
@@ -640,5 +667,119 @@ enum EyesRenderer {
             }
         }
         return ok
+    }
+}
+
+// MARK: - Menu bar moon geometry (UX.md §1.1)
+
+/// Geometry of the wide-awake moon, y-down in the 22 × 16 pt menu bar canvas.
+enum MenuBarMoon {
+    /// Outer disc: extremes on half points (1.5 … 14.5), so 1x edges land on pixels.
+    static let centre = CGPoint(x: 8, y: 8)
+    static let radius: CGFloat = 6.5
+    /// The bite: a disc offset up and to the right (≈ 20°). Belly thickness = radius + biteOffset − biteRadius = 7.1.
+    static let axis = CGVector(dx: cos(-0.36), dy: sin(-0.36))
+    static let biteOffset: CGFloat = 5.0
+    static let biteRadius: CGFloat = 4.4
+    /// The eye: centred in the belly, ≥ 0.8 pt clear of the outline's inner edge at the 1.65 pt stroke.
+    static let eyeCentre = CGPoint(x: 5.25, y: 9.0)
+    static let eyeRadius: CGFloat = 1.9
+    /// `.watching`: the eye glances up and to the right, toward the sparkle.
+    static let glanceCentre = CGPoint(x: 5.65, y: 8.7)
+    /// Badge slot centre (z, sparkle, drop, "!", laptop).
+    static let slot = CGPoint(x: 18.6, y: 3.6)
+
+    static var crescent: CGPath {
+        let bite = CGPoint(x: centre.x + axis.dx * biteOffset, y: centre.y + axis.dy * biteOffset)
+        return disc(centre, radius).subtracting(disc(bite, biteRadius))
+    }
+
+    static func disc(_ c: CGPoint, _ r: CGFloat) -> CGPath {
+        CGPath(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r), transform: nil)
+    }
+
+    /// The eye at blink `t`: 0 a round disc … 1 the closed "‿" lid (a thin downward lens). Mid-blink is a level,
+    /// symmetric lens, so no blink frame looks like the tilted squint.
+    static func eye(_ c: CGPoint, _ r: CGFloat, t: CGFloat) -> CGPath {
+        let w = r - 0.2 * r * t
+        let top = r - 1.53 * r * t          // the upper lid falls past the corner line onto the lower one
+        let bottom = r - 0.47 * r * t
+        // Closing drifts a little down and right, where the belly is widest, so the lid line clears the outline.
+        let c = CGPoint(x: c.x + 0.25 * t, y: c.y + 0.25 * t), y = c.y
+        let k: CGFloat = 4.0 / 3.0          // a cubic with both controls at h peaks at 0.75 h
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: c.x - w, y: y))
+        p.addCurve(to: CGPoint(x: c.x + w, y: y), control1: CGPoint(x: c.x - w, y: y - top * k),
+                   control2: CGPoint(x: c.x + w, y: y - top * k))
+        p.addCurve(to: CGPoint(x: c.x - w, y: y), control1: CGPoint(x: c.x + w, y: y + bottom * k),
+                   control2: CGPoint(x: c.x - w, y: y + bottom * k))
+        p.closeSubpath()
+        return p
+    }
+
+    /// The 1x eye on whole pixels: columns 3…6, one clear pixel inside the 1 px outline at rows 6…10.
+    enum PixelEye {
+        /// Blink `t` < 0.25: a 4 × 4 px disc (corners off; 4 × 5 if `tall`) with a 1 px catch-light, for an even-odd
+        /// fill. < 0.75: a level 4 × 2 px slit. Otherwise the closed "‿" (the asleep eye).
+        static func path(t: CGFloat, dy: CGFloat = 0, tall: Bool = false) -> CGPath {
+            let p = CGMutablePath()
+            if t < 0.25 {
+                let b = CGRect(x: 3, y: 7 + dy - (tall ? 1 : 0), width: 4, height: tall ? 5 : 4)
+                p.addRect(CGRect(x: b.minX + 1, y: b.minY, width: 2, height: b.height))
+                p.addRect(CGRect(x: b.minX, y: b.minY + 1, width: 4, height: b.height - 2))
+                let out = CGMutablePath()
+                out.addPath(p.normalized())
+                out.addRect(CGRect(x: 5, y: b.minY + 1, width: 1, height: 1))
+                return out
+            }
+            if t < 0.75 {
+                p.addRect(CGRect(x: 3, y: 8, width: 4, height: 2))
+            } else {
+                p.addRect(CGRect(x: 3, y: 8, width: 1, height: 1))
+                p.addRect(CGRect(x: 6, y: 8, width: 1, height: 1))
+                p.addRect(CGRect(x: 4, y: 9, width: 2, height: 1))
+            }
+            return p
+        }
+        /// Lid mode at 1x: a 4 × 4 px hole around a 2 × 2 px pupil.
+        static var lidHole: CGPath { CGPath(rect: CGRect(x: 3, y: 7, width: 4, height: 4), transform: nil) }
+        static var lidPupil: CGPath { CGPath(rect: CGRect(x: 4, y: 8, width: 2, height: 2), transform: nil) }
+    }
+
+    /// Lid mode's badge: a closed laptop seen from the side (lid and base joined by a rounded hinge on the left,
+    /// open at the front).
+    static func laptop(snap: Bool) -> CGPath {
+        let body = snap ? CGRect(x: 16, y: 2, width: 6, height: 4) : CGRect(x: 15.6, y: 1.9, width: 6.0, height: 3.9)
+        let corner: CGFloat = snap ? 1.0 : 1.2
+        let slit = snap ? CGRect(x: 18, y: 3, width: 4, height: 1)
+                        : CGRect(x: body.minX + 1.6, y: body.minY + 1.25, width: body.width, height: 0.9)
+        return CGPath(roundedRect: body, cornerWidth: corner, cornerHeight: corner, transform: nil)
+            .subtracting(CGPath(rect: slit, transform: nil))
+    }
+
+    /// Four-point sparkle.
+    static func sparkle(_ c: CGPoint, r: CGFloat, inner: CGFloat) -> CGPath {
+        let p = CGMutablePath()
+        for i in 0..<8 {
+            let a = CGFloat(i) * .pi / 4 - .pi / 2
+            let rr = i.isMultiple(of: 2) ? r : inner
+            let pt = CGPoint(x: c.x + cos(a) * rr, y: c.y + sin(a) * rr)
+            if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+        }
+        p.closeSubpath()
+        return p
+    }
+
+    /// Sweat drop: round bottom centred on `c`, pointed top.
+    static func drop(_ c: CGPoint, r: CGFloat) -> CGPath {
+        let tip = CGPoint(x: c.x, y: c.y - r - 2.6)
+        let p = CGMutablePath()
+        p.move(to: tip)
+        p.addCurve(to: CGPoint(x: c.x + r, y: c.y), control1: CGPoint(x: c.x + 0.4, y: c.y - r - 1.4),
+                   control2: CGPoint(x: c.x + r, y: c.y - 1.2))
+        p.addArc(center: c, radius: r, startAngle: 0, endAngle: .pi, clockwise: false)
+        p.addCurve(to: tip, control1: CGPoint(x: c.x - r, y: c.y - 1.2), control2: CGPoint(x: c.x - 0.4, y: c.y - r - 1.4))
+        p.closeSubpath()
+        return p
     }
 }

@@ -25,7 +25,7 @@ struct AboutView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
-                Text("A pair of eyes in your menu bar.")
+                Text("A wide-awake moon in your menu bar.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
