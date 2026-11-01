@@ -199,36 +199,42 @@ enum Snapshot {
         let names = ["asleep", "awake", "watching", "lid", "squint", "alarmed"]
         let mag: CGFloat = 4
         let cell = CGSize(width: 22 * mag + 24, height: 16 * mag + 22)
-        let bars: [(String, NSColor, NSColor)] = [("light bar", NSColor(srgb: 0xF2F2F4), .black), ("dark bar", NSColor(srgb: 0x232327), .white)]
-        let size = CGSize(width: 130 + cell.width * CGFloat(moods.count), height: 30 + cell.height * 4)
+        let light = (NSColor(srgb: 0xF2F2F4), NSColor.black), dark = (NSColor(srgb: 0x232327), NSColor.white)
+        // Light and dark bars at both scales; then Increase Contrast (stroke 2.0) and the blink frames, which are
+        // where the eye is likeliest to touch the outline.
+        let rows: [(label: String, bar: (NSColor, NSColor), px: Int, stroke: CGFloat, blink: CGFloat)] = [
+            ("light @1x", light, 1, 1.5, 0), ("light @2x", light, 2, 1.5, 0),
+            ("dark @1x", dark, 1, 1.5, 0), ("dark @2x", dark, 2, 1.5, 0),
+            ("contrast @1x", light, 1, 2.0, 0), ("contrast @2x", light, 2, 2.0, 0),
+            ("blink ½ @1x", light, 1, 1.5, 0.5), ("blink ½ @2x", light, 2, 1.5, 0.5),
+            ("blink 1 @2x", light, 2, 1.5, 1),
+        ]
+        let size = CGSize(width: 130 + cell.width * CGFloat(moods.count), height: 30 + cell.height * CGFloat(rows.count))
         let scale: CGFloat = 2
         return EyesRenderer.bitmap(width: Int(size.width * scale), height: Int(size.height * scale), pointSize: size) { ctx in
             ctx.setFillColor(NSColor(srgb: 0x2A2A30).cgColor)
             ctx.fill(CGRect(origin: .zero, size: size))
             for (i, n) in names.enumerated() { drawLabel(ctx, n, at: CGPoint(x: 130 + CGFloat(i) * cell.width + 8, y: 8)) }
-            var rowIndex = 0
-            for (barName, bg, fg) in bars {
-                for px in [1, 2] {
-                    let y = 30 + CGFloat(rowIndex) * cell.height
-                    drawLabel(ctx, "\(barName) @\(px)x", at: CGPoint(x: 10, y: y + cell.height / 2 - 8))
-                    for (i, mood) in moods.enumerated() {
-                        let x = 130 + CGFloat(i) * cell.width
-                        let tile = CGRect(x: x + 4, y: y + 4, width: cell.width - 8, height: cell.height - 8)
-                        ctx.setFillColor(bg.cgColor)
-                        ctx.fill(tile)
-                        guard let glyph = EyesRenderer.bitmap(width: 22 * px, height: 16 * px, pointSize: EyesRenderer.menuBarSize, draw: { g in
-                            EyesRenderer.drawMenuBarGlyph(g, mood: mood, blink: 0, stroke: 1.5, colour: fg.cgColor,
-                                                          pixelScale: CGFloat(px))
-                        }), let cg = glyph.cgImage else { continue }
-                        ctx.saveGState()
-                        ctx.interpolationQuality = .none
-                        let r = CGRect(x: tile.midX - 11 * mag, y: tile.midY - 8 * mag, width: 22 * mag, height: 16 * mag)
-                        ctx.translateBy(x: r.minX, y: r.maxY)
-                        ctx.scaleBy(x: 1, y: -1)
-                        ctx.draw(cg, in: CGRect(origin: .zero, size: r.size))
-                        ctx.restoreGState()
-                    }
-                    rowIndex += 1
+            for (rowIndex, row) in rows.enumerated() {
+                let (bg, fg) = row.bar
+                let y = 30 + CGFloat(rowIndex) * cell.height
+                drawLabel(ctx, row.label, at: CGPoint(x: 10, y: y + cell.height / 2 - 8))
+                for (i, mood) in moods.enumerated() {
+                    let x = 130 + CGFloat(i) * cell.width
+                    let tile = CGRect(x: x + 4, y: y + 4, width: cell.width - 8, height: cell.height - 8)
+                    ctx.setFillColor(bg.cgColor)
+                    ctx.fill(tile)
+                    guard let glyph = EyesRenderer.bitmap(width: 22 * row.px, height: 16 * row.px, pointSize: EyesRenderer.menuBarSize, draw: { g in
+                        EyesRenderer.drawMenuBarGlyph(g, mood: mood, blink: row.blink, stroke: row.stroke, colour: fg.cgColor,
+                                                      pixelScale: CGFloat(row.px))
+                    }), let cg = glyph.cgImage else { continue }
+                    ctx.saveGState()
+                    ctx.interpolationQuality = .none
+                    let r = CGRect(x: tile.midX - 11 * mag, y: tile.midY - 8 * mag, width: 22 * mag, height: 16 * mag)
+                    ctx.translateBy(x: r.minX, y: r.maxY)
+                    ctx.scaleBy(x: 1, y: -1)
+                    ctx.draw(cg, in: CGRect(origin: .zero, size: r.size))
+                    ctx.restoreGState()
                 }
             }
         }

@@ -10,27 +10,27 @@ This file specifies every surface for v1. Behaviour lives in `../ARCHITECTURE.md
 
 The menu bar item is a **moon with one eye**, not the panel's pair of eyes: a fat crescent tilted so it opens up and to the right, with one round eye in its belly. Every mood except `.awake` adds a small **badge** in one fixed slot at the upper right. The panel eyes, the Dock tile and the app icon keep the pair of eyes (§2.4, §3).
 
-- **Canvas:** 22 × 16 pt inside the 22 pt bar, the same for every mood, so the status item never changes width. The moon is the outer disc (centre 8, 8; radius 6.5, extremes on half points 1.5…14.5) minus a bite disc (radius 4.4) offset 5.0 pt up and to the right along a ≈ 20° axis: the belly is 7.1 pt thick. The badge slot is centred at (18.6, 3.6).
-- **Stroke:** 1.5 pt (2.0 under Increase Contrast), drawn 10% heavier at 2x (1.65 / 2.2) so it sits with SF Symbols such as Wi-Fi. Round caps and joins.
-- **Eye:** a solid disc 3.8 pt across (radius 1.9, centre 5.25, 9.0) with a knocked-out catch-light up and to the right, at least 0.8 pt clear of the outline. Big enough to read as an open, friendly eye at 1x and 2x, not a speck.
+- **Canvas:** 22 × 16 pt inside the 22 pt bar, the same for every mood, so the status item never changes width. The moon is the outer disc (centre 8, 8; radius 6.5, extremes on half points 1.5…14.5) minus a bite disc (radius 4.4) offset 5.0 pt up and to the right along a ≈ 20° axis: the belly is 7.1 pt thick. The badge slot is centred at (18.5, 3.5) at both scales, and every badge is laid out from it with its edges on the device pixel grid.
+- **Stroke:** 1.5 pt (2.0 under Increase Contrast), drawn 10% heavier at 2x (1.65 / 2.2) so it sits with SF Symbols such as Wi-Fi. Round caps and joins. Weight over the base stroke (1.65 pt at 2x, 1 px at 1x) grows **outward** only: the outer disc grows and the bite shrinks by half the extra, so the outline's inner edge, the belly's clear space and the eye never move. The eye keeps its weight under Increase Contrast.
+- **Eye:** a solid disc 3.8 pt across (radius 1.9, centre 5.25, 9.0) with a knocked-out catch-light up and to the right. For every mood, blink frame and weight it stays at least 0.8 pt clear of the outline's inner edge (tests check it by pixel). Big enough to read as an open, friendly eye at 1x and 2x, not a speck.
 - **Format:** `isTemplate = true`, alpha only, crisp at 1x and 2x. Knock-outs are path subtractions or even-odd fills (never a clear blend).
 - **Colour:** never encodes state. Shape alone does.
-- **1x rules:** stroke 1.0 pt (2.0 under Increase Contrast). The eye is hand-placed pixels: a 4 × 4 px disc with its corners off and a 1 px catch-light (columns 3…6, rows 7…10), a 4 × 2 px slit mid-blink, and a 4 px "‿" when closed; badges sit on whole pixels (the slot centre snaps to 18.5, 3.5).
+- **1x rules:** outline 1.5 px (2 px under Increase Contrast), grown outward from a 1 px base whose inner edge is on a pixel boundary, so it matches Wi-Fi's ~2 px arcs and one clear pixel always separates it from the eye. The eye is hand-placed pixels: a 4 × 4 px disc with its corners off and a 1 px catch-light (columns 3…6, rows 7…10), a 4 × 2 px slit mid-blink, and a 4 px "‿" when closed. Badges are whole pixels centred on the slot: a 5 × 5 px z, the sparkle and drop, a 1 px "!" (2 px under Increase Contrast; the z stays 1 px, a 2 px z doesn't fit), and the laptop (a 4 px lid over a 5 × 2 px base).
 
 | Mood (`EyeMood`) | Moon | Eye | Badge | When |
 |---|---|---|---|---|
 | `.asleep` | Outline | Closed: a "‿" lid line, stroked at moon weight | "z" | Nothing is holding the Mac awake |
 | `.awake` | Outline | Open, round, with a catch-light | none | Manual hold (timed or indefinite) |
-| `.watching` | Outline | Open, glancing up and to the right (0.4 pt; 1 px up at 1x) | 4-point sparkle | Only babysit, CLI or rule holds are active |
-| `.lid` | **Solid** (the outline's outer size) | **Knocked out**: a clear ring around a solid pupil ("night vision") | Closed laptop (lid and base joined by a hinge on the left, open at the front) | Lid mode engaged (flag read back as 1) |
-| `.squint` | Outline | Heavy-lidded: the lower half of the eye under a lid line tilted up at the outer corner | Sweat drop | An alarm guard: `thermal`, `lowPowerMode`, `batteryFloor`, `awakeBatteryFloor`. (`acRequired` and the two time caps keep the normal mood; H′ explains.) |
-| `.alarmed` | Outline | Wider open (radius + 0.35 pt; 4 × 5 px at 1x) | Full-height "!" | Lid error or stuck |
+| `.watching` | Outline | Open, glancing up toward the sparkle: 0.4 pt up and a touch narrower (radius 1.75; up and to the right would hit the bite); 1 px up at 1x | 4-point sparkle | Only babysit, CLI or rule holds are active |
+| `.lid` | **Solid** (the outline's outer size) | **Knocked out**: a clear ring around a solid pupil ("night vision"); at 1x the rounded 4 × 4 px eye block around a 2 × 2 px pupil | Closed laptop from the side: a thin lid resting on a thicker base that sticks out 1 pt (1 px) further on the right | Lid mode engaged (flag read back as 1) |
+| `.squint` | Outline | Heavy-lidded: the lower half of the eye under a lid line tilted up at the outer corner (level at 1x) | Sweat drop | An alarm guard: `thermal`, `lowPowerMode`, `batteryFloor`, `awakeBatteryFloor`. (`acRequired` and the two time caps keep the normal mood; H′ explains.) |
+| `.alarmed` | Outline | Wider open: an oval 0.5 pt taller along the belly (perpendicular to the bite axis, where there is room); 4 × 5 px at 1x | Full-height "!" | Lid error or stuck |
 
 **Lid is never a plain filled crescent.** That silhouette is SF Symbol `moon.fill`, which macOS shows in the menu bar while Focus / Do Not Disturb is on, so a solid crescent would read as "Focus is on". Lid mode stays the boldest state (the only solid one), and two things break the `moon.fill` silhouette: the large knocked-out eye with its pupil, and the laptop badge beside it.
 
-**Blink** (§1.2): `blink` 0…1 closes the eye as a lens whose upper lid falls onto the lower one, drifting slightly down and right, and ends exactly on the asleep eye, so the toggle-off blink lands without a jump. Mid-blink is a level, symmetric lens, so no frame looks like the tilted squint. In lid mode the knocked-out eye closes the same way.
+**Blink** (§1.2): `blink` 0…1 closes the eye as a lens whose upper lid falls onto the lower one, narrowing and drifting slightly down, and ends exactly on the asleep eye, so the toggle-off blink lands without a jump. The watching glance and the alarmed oval ease back into the round eye as it closes, so their blinks end on the asleep eye too; the squint keeps its own lid. Mid-blink is a level, symmetric lens, so no frame looks like the tilted squint. In lid mode the knocked-out eye closes the same way.
 
-When several apply, the first one wins: `alarmed > squint > lid > awake > watching > asleep` (`EyeMood(status:lid:)` in `Models.swift`). `make snapshot` renders all six side by side at 1x and 2x, light and dark (`build/snapshots/menubar-glyphs.png`); check them there after any change.
+When several apply, the first one wins: `alarmed > squint > lid > awake > watching > asleep` (`EyeMood(status:lid:)` in `Models.swift`). `make snapshot` renders all six side by side at 1x and 2x, light and dark, under Increase Contrast and mid- and end-blink (`build/snapshots/menubar-glyphs.png`); check them there after any change.
 
 ### 1.2 Motion (the only motion the menu bar ever shows)
 
