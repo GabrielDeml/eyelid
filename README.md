@@ -4,13 +4,13 @@ A wide-awake moon in your menu bar that keeps your Mac awake, lid open or shut.
 
 Click the moon to open the panel, or right-click to turn Insomnia on or off.
 
-- **Power button**: keep awake until you turn it off. **1h · 2h · 4h · 8h**: keep awake that long.
+- **The switch** next to *Awake* / *Off*: keep awake until you turn it off (or for the time set in Settings).
 - **Keep screen on**: hold the display awake too.
 - **Stay awake with lid closed** (MacBooks): keep running with the lid shut, on power or battery.
 - **When unplugged**: *Keep going*, *Sleep with lid closed* (no lid mode on battery), or *Turn off*.
 
-Everything else is in **⋯ ▸ Settings…**: what the power button does, the four timer buttons, what clicking the
-moon does, overheat and low-battery protection, and Open at login.
+Everything else is in **Settings…** (the panel footer): how long turning on keeps awake, what clicking the moon
+does, overheat and low-battery protection, and Open at login.
 
 ## The moon shows the mode
 

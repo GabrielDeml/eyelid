@@ -115,7 +115,6 @@ final class StatusItem: NSObject, NSPopoverDelegate {
     private func perform(_ action: PanelAction) {
         switch action {
         case .toggle: engine.toggle()
-        case .start(let minutes): engine.start(minutes: minutes)
         case .setScreen(let on): engine.prefs.keepScreenOn = on
         case .setLid(let on): engine.setLidMode(on)
         case .setUnplugged(let choice): engine.prefs.whenUnplugged = choice

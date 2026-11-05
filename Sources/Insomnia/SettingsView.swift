@@ -14,22 +14,9 @@ struct SettingsView: View {
         let p = engine.powerState
         Form {
             Section("Keep awake") {
-                Picker("Power button keeps awake", selection: $prefs.powerButtonMinutes) {
+                Picker("Turning on keeps awake", selection: $prefs.powerButtonMinutes) {
                     Text("Until turned off").tag(0)
                     ForEach([60, 120, 240, 480], id: \.self) { Text(DurationText.short(minutes: $0)).tag($0) }
-                }
-                LabeledContent("Timer buttons") {
-                    HStack(spacing: 6) {
-                        ForEach(0..<4, id: \.self) { i in
-                            Picker("", selection: presetBinding(i)) {
-                                ForEach(Preferences.presetChoices, id: \.self) {
-                                    Text(DurationText.short(minutes: $0)).tag($0)
-                                }
-                            }
-                            .labelsHidden()
-                            .fixedSize()
-                        }
-                    }
                 }
                 Toggle("Keep screen on", isOn: $prefs.keepScreenOn)
                 Picker("Clicking the moon", selection: $prefs.clickAction) {
@@ -136,11 +123,6 @@ struct SettingsView: View {
         let what = hasBattery ? "When your Mac gets hot or the battery runs low" : "When your Mac gets hot"
         return what + " while Insomnia keeps it awake, it lets go. With the lid closed it always sleeps the Mac."
             + (hasBattery ? " The lid helper also sleeps the Mac at 10% battery, whatever these say." : "")
-    }
-
-    private func presetBinding(_ i: Int) -> Binding<Int> {
-        Binding(get: { prefs.timerPresets[i] },
-                set: { v in var all = prefs.timerPresets; all[i] = v; prefs.timerPresets = all })
     }
 
     private func setOpenAtLogin(_ on: Bool) {

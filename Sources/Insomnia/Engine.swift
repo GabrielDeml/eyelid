@@ -60,7 +60,7 @@ final class Engine {
 
     private(set) var isOn = false
     private(set) var endsAt: Date?
-    /// The duration last started, in minutes (nil = until turned off). Selects the matching timer button.
+    /// The duration last started, in minutes (nil = until turned off). Not shown in the panel; kept for the engine's tests.
     private(set) var runMinutes: Int?
     private(set) var notice: Notice?
     /// A safety action happened and the panel hasn't been opened since: "!" on the moon.

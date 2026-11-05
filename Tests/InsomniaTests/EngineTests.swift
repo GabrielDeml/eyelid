@@ -435,12 +435,12 @@ struct PreferencesTests {
         let a = Preferences(defaults: defaults)
         #expect(a.keepScreenOn && !a.closedLidMode && a.whenUnplugged == .sleepWhenLidCloses)
         #expect(a.overheatProtection && a.lowBatteryProtection && a.lowBatteryPercent == 12)
-        #expect(a.timerPresets == [60, 120, 240, 480] && a.powerButtonMinutes == 0)
+        #expect(a.powerButtonMinutes == 0)
         a.closedLidMode = true
-        a.timerPresets = [15, 30, 45, 60]
+        a.powerButtonMinutes = 120
         a.tripAction = .turnOff
         let b = Preferences(defaults: defaults)
-        #expect(b.closedLidMode && b.timerPresets == [15, 30, 45, 60] && b.tripAction == .turnOff)
+        #expect(b.closedLidMode && b.powerButtonMinutes == 120 && b.tripAction == .turnOff)
     }
 
     @Test func initNeverWrites() {

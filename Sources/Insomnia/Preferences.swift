@@ -58,8 +58,6 @@ enum ClickAction: String, CaseIterable, Identifiable, Sendable {
 final class Preferences {
     static let shared = Preferences()
 
-    nonisolated static let presetChoices = [15, 30, 45, 60, 90, 120, 180, 240, 360, 480, 600, 720]
-    nonisolated static let defaultPresets = [60, 120, 240, 480]
     nonisolated static let lowBatteryRange = 11...50
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -72,10 +70,8 @@ final class Preferences {
     var keepScreenOn: Bool { didSet { save(keepScreenOn, Key.keepScreenOn) } }
     var closedLidMode: Bool { didSet { save(closedLidMode, Key.closedLidMode) } }
     var whenUnplugged: UnpluggedAction { didSet { save(whenUnplugged.rawValue, Key.whenUnplugged) } }
-    /// Minutes the power button keeps awake for; 0 = until turned off.
+    /// Minutes turning Insomnia on keeps it awake for; 0 = until turned off. (Key name predates the switch.)
     var powerButtonMinutes: Int { didSet { save(powerButtonMinutes, Key.powerButtonMinutes) } }
-    /// The panel's four timer buttons, in minutes.
-    var timerPresets: [Int] { didSet { save(timerPresets, Key.timerPresets) } }
     var clickAction: ClickAction { didSet { save(clickAction.rawValue, Key.clickAction) } }
 
     var overheatProtection: Bool { didSet { save(overheatProtection, Key.overheatProtection) } }
@@ -99,8 +95,6 @@ final class Preferences {
         closedLidMode = bool(Key.closedLidMode, false)
         whenUnplugged = UnpluggedAction(rawValue: defaults.string(forKey: Key.whenUnplugged) ?? "") ?? .sleepWhenLidCloses
         powerButtonMinutes = max(0, int(Key.powerButtonMinutes, 0))
-        let stored = (defaults.array(forKey: Key.timerPresets) as? [Int])?.filter { $0 > 0 }
-        timerPresets = stored?.count == 4 ? stored! : Self.defaultPresets
         clickAction = ClickAction(rawValue: defaults.string(forKey: Key.clickAction) ?? "") ?? .openPanel
         overheatProtection = bool(Key.overheatProtection, true)
         lowBatteryProtection = bool(Key.lowBatteryProtection, true)
@@ -120,7 +114,6 @@ final class Preferences {
         static let closedLidMode = "closedLidMode"
         static let whenUnplugged = "whenUnplugged"
         static let powerButtonMinutes = "powerButtonMinutes"
-        static let timerPresets = "timerPresets"
         static let clickAction = "clickAction"
         static let overheatProtection = "overheatProtection"
         static let lowBatteryProtection = "lowBatteryProtection"

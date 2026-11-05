@@ -14,25 +14,24 @@ A menu bar moon. Click it and a small panel opens:
 
 ```
 ╭──────────────────────────────────────╮
-│  ☾   Awake                       (⏻)  │   big round power button: on = until you turn it off
-│      1h 42m left · until 3:40 PM      │   or "Until you turn it off" / "Your Mac can sleep"
-│                                       │
-│     [ 1h ]  [ 2h ]  [ 4h ]  [ 8h ]    │   tap = keep awake that long, from now
-│ ───────────────────────────────────── │
-│  🖥  Keep screen on              [●]  │
-│  💻  Stay awake with lid closed  [●]  │   MacBooks only
-│      Waiting for approval in System Settings ›    (caption only when needed)
-│  🔌  When unplugged  Sleep with lid closed ⌄  │   MacBooks only
-│ ───────────────────────────────────── │
-│  ⚠︎ Slept because the Mac got hot  ✕  │   only after a safety action
-│                                    ⋯ │   menu: Settings… ⌘, · Quit
+│ Awake                        (  ━━●) │   the switch: on = until turned off (or Settings' duration)
+│ 1h 42m left · until 3:40 PM          │   or "Until you turn it off" / "Your Mac sleeps normally"
+│ Screen on · Lid can close            │   the mode in words (only while on)
+│ ⚠ Slept because the Mac got hot   ✕  │   only after a safety action
+│ ──────────────────────────────────── │
+│ Keep screen on                 (━●)  │
+│ Stay awake with lid closed     (━●)  │   MacBooks only
+│ Waiting for approval in System Settings ›   (caption only when needed)
+│ When unplugged  Sleep with lid closed ⌃⌄    MacBooks only
+├──────────────────────────────────────┤
+│ Settings…              Quit Insomnia │
 ╰──────────────────────────────────────╯
 ```
 
-On a desktop Mac the panel is just the header, the chips and *Keep screen on*.
+On a desktop Mac the panel is just the header and *Keep screen on*.
 
-- **Power button** toggles (on = indefinite). **A chip** keeps it awake that long from now (also replaces a running
-  timer). The chip matching the running timer is filled. **Right-click the moon** toggles without opening the panel.
+- **The switch** next to the state toggles: on = until turned off, or for Settings' *Turning on keeps awake* duration
+  (Return toggles too). **Right-click the moon** toggles without opening the panel. No timer buttons in the panel.
 - **Keep screen on** (default on): also hold the display awake.
 - **Stay awake with lid closed** (default off): sets the system's `SleepDisabled` flag while Insomnia is on.
   Turning it on while Insomnia is off also turns Insomnia on, so the switch always means what it says.
@@ -70,11 +69,11 @@ Each trips once on entering its condition (not continuously, so you can turn Ins
 
 ### Settings window
 
-One window, one scrolling grouped `Form` (no tabs), opened from ⋯ ▸ Settings… or ⌘, while the panel is open.
+One window, one scrolling grouped `Form` (no tabs), opened from *Settings…* in the panel footer or ⌘, while the panel is open.
 The panel's three rows are the same settings, so changes show up in both places.
 
-- **Keep awake:** Power button keeps awake for: *Until turned off* / 1h / 2h / 4h / 8h · Timer buttons: four
-  duration pickers (15m … 12h; defaults 1h 2h 4h 8h) · Keep screen on · Right-click on the moon: *Toggle* / *Open the panel*.
+- **Keep awake:** Turning on keeps awake: *Until turned off* / 1h / 2h / 4h / 8h · Keep screen on · Clicking the
+  moon: *Opens the panel* / *Turns Insomnia on or off* (right-click does the other).
 - **Lid closed** (MacBooks): Stay awake with lid closed · helper status line (Ready / Waiting for approval › / Needs
   the copy in Applications / error) with **Set up…** or **Reset with password…** when relevant · When unplugged.
 - **Safety:** Overheat protection · When it triggers · Low battery protection · Battery level (stepper, %).
@@ -92,24 +91,29 @@ Each mode has its own silhouette, so it reads at 16 pt without colour:
 | **Awake, lid closed OK** (lid mode engaged) | **solid** crescent with the eye knocked out, **open-laptop** badge |
 | **Needs attention** (safety tripped, lid mode failed/stuck, waiting for approval) | a small **"!"** under the badge (the mode stays readable) |
 
-The panel header also names the mode in small tags (*Screen on*, *Lid can close*, *Screen may sleep*).
+The panel header names the mode in a line of words (*Screen on · Lid can close*, *Screen may sleep*).
 A timer adds nothing to the glyph (the tooltip says "Awake · 1h 12m left · screen on · lid closed OK"). The panel
-header repeats the glyph large with the mode in words, and Settings shows a small legend of the glyphs.
+doesn't repeat the glyph (the moon sits right above it); Settings shows a small legend of the glyphs.
 Geometry starts from the current `MenuBarMoon`; checked in `make snapshot` at 1× and 2×.
 
 ### Look
 
-Keep the current visual language, trimmed into one file: `Theme.swift`'s amber accent with dark-on-amber text, indigo
-tint for the lid row, warning/danger text colours, SF Rounded numerals, 300 pt width, 14 pt padding, 28 pt chips and
-rows, hairline separators, continuous corners, SF Symbols (`display`, `laptopcomputer`, `powerplug`). The power
-button is a filled amber circle when on, neutral when off. The panel is an `NSPopover` (Liquid Glass on macOS 26+,
-opaque under Reduce Transparency). Countdown in minutes, no ticking seconds. Checked with `make snapshot` (light and
-dark, every state).
+Quiet and typographic: type, spacing and native controls, no decoration. `Theme.swift` holds every token. 300 pt wide,
+everything on one 16 pt leading/trailing edge. Header: the state word (20 pt semibold), the subtitle (SF Rounded
+numerals) and the mode line, with a small switch tinted amber (the same size as the rows'). Then a hairline and 32 pt rows with no icons:
+small switches (amber for the screen, indigo for the lid), and *When unplugged* as a borderless native pop-up (not a custom-label SwiftUI `Menu`: that didn't open in the popover)
+that truncates rather than ever widening the panel. Captions hang under their row on the same edge, with a
+triangle/octagon icon for warning/danger, and wrap to two lines. Notices sit inline under the status they explain. A
+full-bleed hairline and a 36 pt footer with quiet text buttons (*Settings…*, *Quit Insomnia*) close it. Indigo text
+uses `lidText` (system indigo fails 4.5:1 at 11 pt on dark glass); amber text sits on nothing. No `.glassEffect` or
+materials on content: the `NSPopover` is the glass (Liquid Glass on macOS 26+, opaque under Reduce Transparency); fills
+are `Color.primary` opacities so both look right. Countdown in minutes, no ticking seconds. Checked with
+`make snapshot` (light and dark, every state; it fails if the content is ever wider than the panel).
 
 ### Removed
 
 Personalities and quips, animated eyes, Dock tile, rules, While…, Until…, Why awake?, hotkey, stats, notifications,
-welcome/epic cards, the 5-tab Settings window, About, Sleep Now, the ∞ chip, CLI + control socket, URL scheme, sudoers fallback,
+welcome/epic cards, the 5-tab Settings window, About, Sleep Now, the ∞ chip, the timer chips and the big power button, CLI + control socket, URL scheme, sudoers fallback,
 `docs/{PRODUCT,UX,CLOSED_LID,README}.md`, `ARCHITECTURE.md`, review logs, `scripts/lid-tests.md`. Raycast can come
 later as a 3-verb `insomnia://on|off|toggle` scheme (never lid mode), ~30 lines.
 
@@ -128,7 +132,8 @@ Sources/Insomnia/                    (~1,700 lines, rewritten)
   HelperCommands.swift   kept, trimmed: --helper-status, --unregister-helper
   StatusItem.swift    NSStatusItem + NSPopover(.transient) hosting PanelView
   MoonGlyph.swift     4 glyph states + the app icon for --export-icon
-  PanelView.swift     the panel + theme tokens; renders a PanelState, sends PanelAction
+  PanelView.swift     the panel; renders a PanelState, sends PanelAction
+  Theme.swift         colour, type and metric tokens; QuietButtonStyle
   SettingsView.swift  the one-page Settings window
   Snapshot.swift      DEBUG: panel states + glyphs to PNG
 Sources/InsomniaHelper/   UNCHANGED (root daemon)
@@ -177,7 +182,7 @@ Pass:
   (the helper resets on invalidation), then poll the flag.
 - **Heartbeat** every 10 s (`.common` mode) + an App Nap activity while engaged. Any reply other than `.ok`, or a lost
   connection → invalidate, read back, `.failed`.
-- **`.failed` is sticky** until a user action (toggle the switch or the power button). Reasons: foreign flag
+- **`.failed` is sticky** until a user action (toggle the lid switch or the keep-awake switch, or right-click the moon). Reasons: foreign flag
   (*Another app has turned off sleep*; auto-retried when the flag reads 0, checked every 10 s), other user, battery
   backstop, set failed, helper lost, overridden. A user's `sudo pmset -a disablesleep 0` is never re-applied.
 - **Lid shut, no external display, engaged** → `pmset displaysleepnow`. 5 s clamshell poll while engaged as a fallback

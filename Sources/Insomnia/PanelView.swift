@@ -14,8 +14,6 @@ struct PanelState: Equatable {
     var attention = false
     var isOn = false
     var endsAt: Date?
-    var runMinutes: Int?
-    var presets = Preferences.defaultPresets
     var keepScreenOn = true
     var showLid = true
     var lidOn = false
@@ -31,7 +29,6 @@ struct PanelState: Equatable {
 
 enum PanelAction: Equatable {
     case toggle
-    case start(minutes: Int)
     case setScreen(Bool)
     case setLid(Bool)
     case setUnplugged(UnpluggedAction)
@@ -53,8 +50,6 @@ extension PanelState {
         s.attention = engine.needsAttention
         s.isOn = engine.isOn
         s.endsAt = engine.endsAt
-        s.runMinutes = engine.runMinutes
-        s.presets = prefs.timerPresets
         s.keepScreenOn = prefs.keepScreenOn
         s.notice = engine.notice
         s.showLid = p.hasLid && lid.setup != .noLid
@@ -118,103 +113,59 @@ extension PanelState {
     }
 }
 
-/// The menu bar panel.
+/// The menu bar panel: type, spacing and native controls on one 16 pt edge (docs/DESIGN.md, Look).
 struct PanelView: View {
     var state: PanelState
     var send: @MainActor (PanelAction) -> Void
 
+    #if DEBUG
+    /// Width the content asked for, before the fixed frame. `make snapshot` fails if it is wider than the panel.
+    @MainActor static var contentWidth: CGFloat = 0
+    #endif
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            HStack(spacing: 8) {
-                ForEach(Array(state.presets.enumerated()), id: \.offset) { _, minutes in
-                    let selected = state.isOn && state.runMinutes == minutes
-                    Button(DurationText.short(minutes: minutes)) { send(.start(minutes: minutes)) }
-                        .buttonStyle(ChipStyle(selected: selected))
-                        .help("Keep awake for \(DurationText.short(minutes: minutes)), from now")
-                        .accessibilityAddTraits(selected ? .isSelected : [])
-                }
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                header
+                if let notice = state.notice { noticeView(notice).padding(.top, 10) }
+                Divider().padding(.top, Theme.gap)
+                rows.padding(.top, 4)
             }
+            #if DEBUG
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { PanelView.contentWidth = $0 }
+            #endif
+            .padding(.horizontal, Theme.inset)
+            .padding(.top, Theme.top)
+            .padding(.bottom, 6)
             Divider()
-            VStack(spacing: 2) {
-                row(symbol: "display", title: "Keep screen on") {
-                    Toggle("", isOn: binding(state.keepScreenOn) { send(.setScreen($0)) })
-                }
-                if state.showLid {
-                    row(symbol: "laptopcomputer", title: "Stay awake with lid closed", tint: Theme.lid) {
-                        Toggle("", isOn: binding(state.lidOn) { send(.setLid($0)) })
-                            .disabled(!state.lidEnabled)
-                    }
-                    if let caption = state.lidCaption { captionView(caption) }
-                }
-                if state.showUnplugged {
-                    row(symbol: "powerplug", title: "When unplugged") {
-                        Picker("", selection: binding(state.unplugged) { send(.setUnplugged($0)) }) {
-                            ForEach(state.unpluggedChoices) { Text($0.title).tag($0) }
-                        }
-                        .pickerStyle(.menu)
-                        .fixedSize()
-                    }
-                }
-            }
-            if let notice = state.notice { noticeView(notice) }
-            HStack {
-                Spacer()
-                Menu {
-                    Button("Settings…") { send(.openSettings) }
-                    Divider()
-                    Button("Quit Insomnia") { send(.quit) }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel("More")
-            }
-            .padding(.top, -6)
+            footer
         }
-        .padding(Theme.padding)
         .frame(width: Theme.panelWidth)
     }
 
     // MARK: Header
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(nsImage: MoonGlyph.image(mode: state.mode, attention: state.attention))
-                .renderingMode(.template)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 40, height: 30)
-                .foregroundStyle(state.isOn ? (state.mode == .lid ? Theme.lid : Theme.accent) : Color.secondary)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .center, spacing: 8) {
                 Text(state.isOn ? "Awake" : "Off").font(Theme.title)
-                TimelineView(.periodic(from: .now, by: 15)) { context in
-                    Text(subtitle(now: context.date))
-                        .font(Theme.subtitle)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                }
-                if state.isOn { modeTags }
+                Spacer(minLength: 8)
+                Toggle("Keep awake", isOn: binding(state.isOn) { _ in send(.toggle) })
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)   // .regular is oversized on the macOS 26+ glass switch
+                    .tint(Theme.accent)
+                    .keyboardShortcut(.defaultAction)   // Return toggles
+                    .help(state.isOn ? "Turn off" : "Keep awake")
             }
-            Spacer(minLength: 0)
-            Button { send(.toggle) } label: {
-                Image(systemName: "power")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(state.isOn ? Theme.onAccent : Color.primary)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(state.isOn ? Theme.accent : Color.primary.opacity(0.09)))
-                    .contentShape(Circle())
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                Text(subtitle(now: context.date))
+                    .font(Theme.subtitle)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.defaultAction)
-            .help(state.isOn ? "Turn off" : "Keep awake until you turn it off")
-            .accessibilityLabel(state.isOn ? "Turn off" : "Turn on")
+            if state.isOn { modeLine.padding(.top, 1) }
         }
         .accessibilityElement(children: .contain)
     }
@@ -225,43 +176,69 @@ struct PanelView: View {
         return DurationText.left(until: end, now: now) + " · until " + DurationText.clock(end)
     }
 
-    /// The mode in words, next to the moon that shows it in shape.
-    private var modeTags: some View {
-        HStack(spacing: 4) {
-            if state.mode == .screenOn || (state.mode == .lid && state.keepScreenOn) { tag("Screen on", symbol: "sparkle") }
-            if state.mode == .lid { tag("Lid can close", symbol: "laptopcomputer", tint: Theme.lid) }
-            if state.mode == .awake { tag("Screen may sleep", symbol: "moon.zzz") }
-        }
-    }
-
-    private func tag(_ text: String, symbol: String, tint: Color = .secondary) -> some View {
-        Label(text, systemImage: symbol)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(tint)
+    /// The mode in words: the menu bar moon right above shows it in shape.
+    private var modeLine: some View {
+        var parts: [Text] = []
+        if state.mode == .screenOn || (state.mode == .lid && state.keepScreenOn) { parts.append(Text("Screen on")) }
+        if state.mode == .lid { parts.append(Text("Lid can close").foregroundStyle(Theme.lidText)) }
+        if state.mode == .awake { parts.append(Text("Screen may sleep")) }
+        let line = parts.dropFirst().reduce(parts.first ?? Text("")) { Text("\($0) · \($1)") }
+        return line
+            .font(Theme.mode)
+            .foregroundStyle(.secondary)
             .lineLimit(1)
-            .fixedSize()
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(tint.opacity(0.12)))
     }
 
     // MARK: Rows
 
-    private func row<Control: View>(symbol: String, title: String, tint: Color = .secondary,
+    private var rows: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            row("Keep screen on") {
+                Toggle("Keep screen on", isOn: binding(state.keepScreenOn) { send(.setScreen($0)) })
+                    .tint(Theme.accent)
+            }
+            if state.showLid {
+                row("Stay awake with lid closed", dimmed: !state.lidEnabled) {
+                    Toggle("Stay awake with lid closed", isOn: binding(state.lidOn) { send(.setLid($0)) })
+                        .tint(Theme.lid)
+                        .disabled(!state.lidEnabled)
+                }
+                if let caption = state.lidCaption { captionView(caption) }
+            }
+            if state.showUnplugged {
+                row("When unplugged") { unpluggedMenu }
+            }
+        }
+    }
+
+    private func row<Control: View>(_ title: String, dimmed: Bool = false,
                                     @ViewBuilder control: () -> Control) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol)
-                .font(.system(size: 13))
-                .foregroundStyle(tint)
-                .frame(width: 20)
-            Text(title).font(Theme.row).lineLimit(1).fixedSize().layoutPriority(1)
-            Spacer(minLength: 8)
+        HStack(spacing: 0) {
+            Text(title)
+                .font(Theme.row)
+                .foregroundStyle(dimmed ? .secondary : .primary)
+                .lineLimit(1)
+                .fixedSize()
+                .layoutPriority(1)
+            Spacer(minLength: 12)
             control()
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
         }
-        .frame(minHeight: Theme.rowHeight)
+        .frame(maxWidth: .infinity)
+        .frame(height: Theme.rowHeight)
+    }
+
+    /// The native pop-up (a SwiftUI `Menu` with a custom label didn't open in the real popover). Borderless so it reads
+    /// as a value; no fixedSize, so it can never widen the panel.
+    private var unpluggedMenu: some View {
+        Picker("When unplugged", selection: binding(state.unplugged) { send(.setUnplugged($0)) }) {
+            ForEach(state.unpluggedChoices) { Text($0.title).tag($0) }
+        }
+        .pickerStyle(.menu)
+        .buttonStyle(.borderless)
+        .help("What Insomnia does when you unplug the power adapter")
     }
 
     private func captionView(_ caption: PanelState.Caption) -> some View {
@@ -270,41 +247,81 @@ struct PanelView: View {
         case .warning: Theme.warningText
         case .danger: Theme.dangerText
         }
-        return Group {
+        let symbol: String? = switch caption.tone {
+        case .secondary: nil
+        case .warning: "exclamationmark.triangle.fill"
+        case .danger: "exclamationmark.octagon.fill"
+        }
+        return HStack(alignment: .firstTextBaseline, spacing: 4) {
+            if let symbol { Image(systemName: symbol).font(.system(size: 10)).accessibilityHidden(true) }
             if let action = caption.action {
-                Button(caption.text) { send(action) }.buttonStyle(.plain)
+                Button { send(action) } label: { captionText(caption.text) }
+                    .buttonStyle(.plain)
+                    .linkPointer()
             } else {
-                Text(caption.text)
+                captionText(caption.text)
             }
         }
         .font(Theme.caption)
         .foregroundStyle(colour)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, 30)
-        .padding(.top, -6)
-        .padding(.bottom, 2)
+        .padding(.top, -4)
+        .padding(.bottom, 6)
     }
 
+    private func captionText(_ text: String) -> some View {
+        Text(text)
+            .multilineTextAlignment(.leading)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    // MARK: Notice and footer
+
     private func noticeView(_ notice: Engine.Notice) -> some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: notice.isWarning ? "exclamationmark.triangle.fill" : "info.circle.fill")
+                .font(.system(size: 11))
                 .foregroundStyle(notice.isWarning ? Theme.warning : .secondary)
-            Text(notice.text).font(.system(size: 12))
-            Spacer(minLength: 4)
+                .accessibilityHidden(true)
+            Text(notice.text)
+                .font(Theme.notice)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
             Button { send(.dismissNotice) } label: {
-                Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(QuietButtonStyle())
+            .padding(.trailing, -Theme.quietPadding)
+            .help("Dismiss")
             .accessibilityLabel("Dismiss")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill((notice.isWarning ? Theme.warning : Color.secondary).opacity(0.12)))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 0) {
+            Button("Settings…") { send(.openSettings) }
+                .help("Open Insomnia settings")
+            Spacer(minLength: 8)
+            Button("Quit Insomnia") { send(.quit) }
+        }
+        .font(Theme.footer)
+        .buttonStyle(QuietButtonStyle())
+        .padding(.horizontal, Theme.inset - Theme.quietPadding)
+        .frame(height: Theme.footerHeight)
     }
 
     private func binding<T: Sendable>(_ value: T, _ set: @escaping @MainActor (T) -> Void) -> Binding<T> {
         Binding(get: { value }, set: set)
+    }
+}
+
+private extension View {
+    /// The pointing hand over an actionable caption, where the OS has it.
+    @ViewBuilder func linkPointer() -> some View {
+        if #available(macOS 15, *) { pointerStyle(.link) } else { self }
     }
 }
 

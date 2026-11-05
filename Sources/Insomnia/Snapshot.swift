@@ -14,7 +14,6 @@ enum Snapshot {
         var timed = PanelState()
         timed.mode = .screenOn
         timed.isOn = true
-        timed.runMinutes = 120
         timed.endsAt = now.addingTimeInterval(102 * 60)
         var lidOn = PanelState()
         lidOn.mode = .lid
@@ -43,16 +42,36 @@ enum Snapshot {
         notInstalled.lidCaption = .init(text: "Needs the copy installed in Applications")
         notInstalled.unpluggedChoices = [.keepGoing, .turnOff]
         notInstalled.unplugged = .keepGoing
+        var timedLid = lidOn
+        timedLid.endsAt = now.addingTimeInterval(230 * 60)
+        var lidFailed = lidOn
+        lidFailed.mode = .screenOn
+        lidFailed.attention = true
+        lidFailed.lidCaption = .init(text: "The lid helper couldn't be registered (error 1). Try again", tone: .warning,
+                                     action: .retryLid)
+        var unpluggedOff = PanelState()
+        unpluggedOff.unplugged = .turnOff
+        unpluggedOff.unpluggedChoices = [.keepGoing, .turnOff]
+        unpluggedOff.notice = Engine.Notice(text: "Turned off: your Mac was unplugged", isWarning: false)
 
-        let states: [(String, PanelState)] = [("off", off), ("timed", timed), ("lid", lidOn), ("approval", approval),
-                                              ("hot", hot), ("stuck", stuck), ("desktop", desktop),
-                                              ("not-installed", notInstalled)]
+        let states: [(String, PanelState)] = [("off", off), ("timed", timed), ("lid", lidOn), ("timed-lid", timedLid),
+                                              ("approval", approval), ("lid-failed", lidFailed), ("hot", hot),
+                                              ("stuck", stuck), ("desktop", desktop), ("not-installed", notInstalled),
+                                              ("unplugged-off", unpluggedOff)]
+        let maxContent = Theme.panelWidth - 2 * Theme.inset + 0.5
         var ok = true
         for (name, state) in states {
             for dark in [false, true] {
+                let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
                 let view = PanelView(state: state, send: { _ in })
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
+                    .background(shape.fill(Color(nsColor: .windowBackgroundColor)))
+                    .clipShape(shape)
+                PanelView.contentWidth = 0
                 guard let rep = render(view, dark: dark) else { ok = false; continue }
+                if PanelView.contentWidth > maxContent {
+                    print("panel \(name) content is \(PanelView.contentWidth)pt (max \(maxContent - 0.5))")
+                    ok = false
+                }
                 ok = write(rep, to: dir.appendingPathComponent("panel-\(name)-\(dark ? "dark" : "light").png")) && ok
             }
         }
@@ -92,7 +111,7 @@ enum Snapshot {
         window.backgroundColor = dark ? NSColor(srgb: 0x1B1B1F) : NSColor(srgb: 0xD9D9DE)
         window.contentView = hosting
         hosting.layoutSubtreeIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.25))   // let AppKit-backed switches draw
+        RunLoop.main.run(until: Date().addingTimeInterval(0.35))   // let AppKit-backed switches draw
         hosting.layoutSubtreeIfNeeded()
         guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { return nil }
         appearance.performAsCurrentDrawingAppearance {

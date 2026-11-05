@@ -21,7 +21,7 @@ find_pids() {
 }
 # LaunchServices' view (an Insomnia under another executable name). An osascript error adds nothing: pgrep decides.
 registered() { [[ "$(/usr/bin/osascript -e "application id \"$ID\" is running" 2>/dev/null)" == true ]]; }
-cant_tell() { echo "Can't tell whether Insomnia is running. Quit it (⋯ ▸ Quit), then try again." >&2; exit 1; }
+cant_tell() { echo "Can't tell whether Insomnia is running. Quit it (Quit Insomnia in its panel), then try again." >&2; exit 1; }
 
 find_pids; found=$?
 (( found == 2 )) && cant_tell
@@ -47,7 +47,7 @@ while :; do
         [[ "$SENT" == *" $pid "* ]] || { kill -TERM "$pid" 2>/dev/null; SENT+="$pid "; }
     done
     if (( SECONDS >= end )); then
-        echo "Insomnia didn't quit within $TIMEOUT s. Quit it (⋯ ▸ Quit), then try again." >&2
+        echo "Insomnia didn't quit within $TIMEOUT s. Quit it (Quit Insomnia in its panel), then try again." >&2
         exit 1
     fi
     sleep 0.2
