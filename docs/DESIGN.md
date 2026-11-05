@@ -22,7 +22,7 @@ A menu bar moon. Click it and a small panel opens:
 │  🖥  Keep screen on              [●]  │
 │  💻  Stay awake with lid closed  [●]  │   MacBooks only
 │      Waiting for approval in System Settings ›    (caption only when needed)
-│  🔌  When unplugged  Sleep when lid closes ⌄  │   MacBooks only
+│  🔌  When unplugged  Sleep with lid closed ⌄  │   MacBooks only
 │ ───────────────────────────────────── │
 │  ⚠︎ Slept because the Mac got hot  ✕  │   only after a safety action
 │                                    ⋯ │   menu: Settings… ⌘, · Quit
@@ -39,9 +39,9 @@ On a desktop Mac the panel is just the header, the chips and *Keep screen on*.
   First time: registers the existing helper and opens System Settings ▸ Login Items. The switch stays on with the
   caption *Waiting for approval in System Settings ›*; the app re-checks every 2 s for 3 minutes and whenever the
   panel opens, and lid mode engages once allowed. Outside `/Applications`: *Needs the copy installed in Applications*.
-- **When unplugged** (MacBooks only, default **Sleep when lid closes**):
+- **When unplugged** (MacBooks only, default **Sleep with lid closed**):
   - *Keep going*: nothing changes.
-  - *Sleep when lid closes*: no lid mode while on battery; keep-awake with the lid open continues. If the lid is
+  - *Sleep with lid closed*: no lid mode while on battery; keep-awake with the lid open continues. If the lid is
     already shut when the power goes, the Mac sleeps. Shown only while lid mode is on (otherwise it is the same as
     *Keep going*, and the picker displays it that way).
   - *Turn off*: the moment the adapter is unplugged, Insomnia turns off. Starting it again on battery works.

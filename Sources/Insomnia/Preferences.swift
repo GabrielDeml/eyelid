@@ -12,7 +12,7 @@ enum UnpluggedAction: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
-    /// Without lid mode, "Sleep when lid closes" is the same as "Keep going": offered and shown that way.
+    /// Without lid mode, "Sleep with lid closed" is the same as "Keep going": offered and shown that way.
     static func choices(lidMode: Bool) -> [UnpluggedAction] { lidMode ? allCases : [.keepGoing, .turnOff] }
     static func shown(_ value: UnpluggedAction, lidMode: Bool) -> UnpluggedAction {
         !lidMode && value == .sleepWhenLidCloses ? .keepGoing : value
@@ -21,7 +21,7 @@ enum UnpluggedAction: String, CaseIterable, Identifiable, Sendable {
     var title: String {
         switch self {
         case .keepGoing: "Keep going"
-        case .sleepWhenLidCloses: "Sleep when lid closes"
+        case .sleepWhenLidCloses: "Sleep with lid closed"
         case .turnOff: "Turn off"
         }
     }
