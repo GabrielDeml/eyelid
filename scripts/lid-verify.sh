@@ -1,5 +1,5 @@
 #!/bin/bash
-# Read-only lid-mode checks (docs/CLOSED_LID.md §8 "Verify by hand"). Never uses sudo, never registers anything,
+# Read-only lid-mode checks (docs/DESIGN.md "Verify"). Never uses sudo, never registers anything,
 # never changes a power setting. Usage:
 #   scripts/lid-verify.sh [path/to/Insomnia.app]     (default /Applications copy)
 #   scripts/lid-verify.sh --staged <path>            signatures, daemon plist and root ownership only; exit 1 on any
@@ -23,7 +23,7 @@ echo "Signatures"
 APP_INFO=$(codesign -dvvv "$APP" 2>&1)
 HELPER_INFO=$(codesign -dvvv "$HELPER" 2>&1)
 TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$APP_INFO")
-[[ -n "$TEAM" && "$TEAM" != "not set" ]] && ok "team $TEAM" || bad "no Team ID (ad-hoc build: sudoers fallback)"
+[[ -n "$TEAM" && "$TEAM" != "not set" ]] && ok "team $TEAM" || bad "no Team ID (unsigned build)"
 # Any flags word that includes "runtime" (e.g. 0x10000(runtime), or 0x10002(adhoc,runtime) on an ad-hoc build).
 RUNTIME_RE='flags=0x[0-9a-f]+\([^)]*runtime'
 grep -Eq "$RUNTIME_RE" <<<"$APP_INFO" && ok "app: hardened runtime" || bad "app: no hardened runtime"
@@ -55,7 +55,7 @@ if [[ -f "$PLIST" ]]; then
     [[ "$(pval KeepAlive:SuccessfulExit)" == "false" ]] && ok "KeepAlive { SuccessfulExit = false }" \
         || bad "KeepAlive is not { SuccessfulExit = false }"
 else
-    bad "no daemon plist (ad-hoc build, or not built by scripts/build.sh)"
+    bad "no daemon plist (not built by scripts/build.sh)"
 fi
 
 echo "Install location (root-owned, no group/other write)"

@@ -34,18 +34,7 @@
 	<false/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
-	<key>CFBundleURLTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleURLName</key>
-			<string>com.gdeml.Insomnia</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>insomnia</string>
-			</array>
-		</dict>
-	</array>
 	<key>NSHumanReadableCopyright</key>
-	<string>© 2026 Gabriel Deml. Sleep is for the weak (and for Macs, eventually).</string>
+	<string>© 2026 Gabriel Deml.</string>
 </dict>
 </plist>

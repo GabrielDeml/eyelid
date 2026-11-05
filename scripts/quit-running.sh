@@ -1,7 +1,7 @@
 #!/bin/bash
 # Quits every running Insomnia and waits for them to exit. Its quit path releases lid mode first
 # (applicationShouldTerminate, up to 2 s), so `make install` / `make uninstall` run this before touching the bundle or
-# the safety nets (docs/CLOSED_LID.md §9). Never launches the app, and sends each copy its quit only once: a second
+# the helper. Never launches the app, and sends each copy its quit only once: a second
 # quit during the pending lid release would cut it short. Copies are found by process (pgrep on the app executable)
 # and quit with SIGTERM, which the app routes through its normal quit; a copy only LaunchServices sees (bundle id) gets
 # one quit Apple Event. Fails closed: if pgrep can't answer, the copies count as running.
@@ -9,7 +9,7 @@
 # Exit 0 = nothing was running, 3 = it was running and has quit, 1 = it is still running (or that can't be told).
 set -uo pipefail
 
-# The overrides exist for the hermetic test only (Tests/InsomniaTests/FixFollowUpTests.swift).
+# Test hooks: override the bundle id and process pattern.
 ID=${INSOMNIA_QUIT_TEST_ID:-com.gdeml.Insomnia}
 PATTERN=${INSOMNIA_QUIT_TEST_PATTERN:-'/Contents/MacOS/Insomnia$'}
 TIMEOUT=${1:-10}

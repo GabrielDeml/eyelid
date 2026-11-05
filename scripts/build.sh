@@ -1,9 +1,8 @@
 #!/bin/bash
-# Build, assemble, sign and verify build/Insomnia.app (ARCHITECTURE.md "Build model").
+# Build, assemble, sign and verify build/Insomnia.app (docs/DESIGN.md "Build and install").
 #
 #   scripts/build.sh                         sign with the first "Apple Development" identity (lid mode: helper)
 #   INSOMNIA_SIGN_IDENTITY="…" scripts/build.sh   sign with a specific identity
-#   INSOMNIA_SIGN_IDENTITY=- scripts/build.sh     ad-hoc build on purpose (lid mode: sudoers fallback)
 #   INSOMNIA_SIGN_KEYCHAIN=~/Library/Keychains/insomnia.keychain-db   optional locked signing keychain
 #
 # Never installs anything, never needs sudo. `make install` is the separate, explicit step.
@@ -26,31 +25,22 @@ die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 ID="${INSOMNIA_SIGN_IDENTITY:-}"
 if [[ -z "$ID" ]]; then
     ID=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
-    [[ -n "$ID" ]] || die "no 'Apple Development' signing identity found. Set INSOMNIA_SIGN_IDENTITY=- for an unsigned build, which uses the sudoers fallback for lid mode."
+    [[ -n "$ID" ]] || die "no 'Apple Development' signing identity found (security find-identity -v -p codesigning)."
 fi
-ADHOC=0
-if [[ "$ID" == "-" ]]; then
-    ADHOC=1
-    # A registered signed helper must be removed first (Decision 38): never strand it behind a weaker backend.
-    if [[ -x "$INSTALLED/Contents/MacOS/Insomnia" ]] && "$INSTALLED/Contents/MacOS/Insomnia" --helper-status >/dev/null 2>&1; then
-        die "a signed lid-mode helper is registered from $INSTALLED. Remove it first with 'make uninstall', then build ad hoc."
-    fi
-fi
+[[ "$ID" != "-" ]] || die "ad-hoc builds aren't supported: lid mode needs a signed helper."
 
 # An explicitly named identity must exist before we spend a full compile on it.
-if [[ $ADHOC -eq 0 ]]; then
-    IDENTITIES=$(security find-identity -v -p codesigning ${INSOMNIA_SIGN_KEYCHAIN:+"$INSOMNIA_SIGN_KEYCHAIN"} || true)
-    grep -Fq -- "$ID" <<<"$IDENTITIES" || die "signing identity '$ID' not found (security find-identity -v -p codesigning)"
-fi
+IDENTITIES=$(security find-identity -v -p codesigning ${INSOMNIA_SIGN_KEYCHAIN:+"$INSOMNIA_SIGN_KEYCHAIN"} || true)
+grep -Fq -- "$ID" <<<"$IDENTITIES" || die "signing identity '$ID' not found (security find-identity -v -p codesigning)"
 
 KEYCHAIN_ARGS=()
-if [[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" && $ADHOC -eq 0 ]]; then
+if [[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" ]]; then
     say "Unlocking signing keychain $INSOMNIA_SIGN_KEYCHAIN"
     security unlock-keychain "$INSOMNIA_SIGN_KEYCHAIN"
     trap 'security lock-keychain "$INSOMNIA_SIGN_KEYCHAIN" || true' EXIT
     KEYCHAIN_ARGS=(--keychain "$INSOMNIA_SIGN_KEYCHAIN")
 fi
-say "Signing identity: $([[ $ADHOC -eq 1 ]] && echo 'ad hoc (-)' || echo "$ID")"
+say "Signing identity: $ID"
 
 # 2. Compile ------------------------------------------------------------------------------------------------------------
 say "swift build -c release"
@@ -62,7 +52,7 @@ BIN=$(swift build -c release --show-bin-path)
 mkdir -p "$ROOT/build"
 STAGE=$(mktemp -d "$ROOT/build/.stage.XXXXXX")
 cleanup_stage() { rm -rf "$STAGE"; }
-trap 'cleanup_stage; [[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" && $ADHOC -eq 0 ]] && security lock-keychain "$INSOMNIA_SIGN_KEYCHAIN" || true' EXIT
+trap 'cleanup_stage; [[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" ]] && security lock-keychain "$INSOMNIA_SIGN_KEYCHAIN" || true' EXIT
 APP="$STAGE/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 ditto "$BIN/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
@@ -98,21 +88,18 @@ say "Signing helper"
 codesign --force --options runtime --timestamp=none --identifier "$HELPER_ID" "${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"}" \
     --sign "$ID" "$APP/Contents/MacOS/InsomniaHelper"
 
-# 7. Launchd plist (signed builds only; CLOSED_LID.md §2.3): Team ID + the signed helper's cdhash pinned in a
-#    SpawnConstraint. Ad-hoc builds get none: they use the sudoers fallback and must never register a daemon.
+# 7. Launchd plist: Team ID + the signed helper's cdhash pinned in a SpawnConstraint.
 [[ -f "$HELPER_TEMPLATE" ]] || die "missing $HELPER_TEMPLATE"
-if [[ $ADHOC -eq 0 ]]; then
-    say "Filling the helper's launchd plist"
-    INFO=$(codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1)
-    TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$INFO")
-    CDHASH=$(sed -n 's/^CDHash=//p' <<<"$INFO")
-    [[ -n "$TEAM" && "$TEAM" != "not set" && -n "$CDHASH" ]] || die "could not read the helper's TeamIdentifier / CDHash"
-    CDHASH_B64=$(xxd -r -p <<<"$CDHASH" | base64)
-    mkdir -p "$APP/Contents/Library/LaunchDaemons"
-    sed -e "s|__TEAM_ID__|$TEAM|g" -e "s|__HELPER_CDHASH_BASE64__|$CDHASH_B64|g" "$HELPER_TEMPLATE" \
-        > "$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST_NAME"
-    plutil -lint "$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST_NAME" >/dev/null
-fi
+say "Filling the helper's launchd plist"
+INFO=$(codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1)
+TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$INFO")
+CDHASH=$(sed -n 's/^CDHash=//p' <<<"$INFO")
+[[ -n "$TEAM" && "$TEAM" != "not set" && -n "$CDHASH" ]] || die "could not read the helper's TeamIdentifier / CDHash"
+CDHASH_B64=$(xxd -r -p <<<"$CDHASH" | base64)
+mkdir -p "$APP/Contents/Library/LaunchDaemons"
+sed -e "s|__TEAM_ID__|$TEAM|g" -e "s|__HELPER_CDHASH_BASE64__|$CDHASH_B64|g" "$HELPER_TEMPLATE" \
+    > "$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST_NAME"
+plutil -lint "$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST_NAME" >/dev/null
 
 # 8. Sign the app (no --deep; seals Info.plist and the daemon plist) ---------------------------------------------------
 say "Signing app"
@@ -129,39 +116,35 @@ for b in "$APP" "$APP/Contents/MacOS/InsomniaHelper"; do
         if grep -q "$forbidden" <<<"$ents"; then die "$(basename "$b") carries the forbidden entitlement $forbidden"; fi
     done
 done
-if [[ $ADHOC -eq 0 ]]; then
-    APP_INFO=$(codesign -dvvv "$APP" 2>&1)
-    HELPER_INFO=$(codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1)
-    APP_TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$APP_INFO")
-    HELPER_TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$HELPER_INFO")
-    [[ -n "$APP_TEAM" && "$APP_TEAM" != "not set" && "$APP_TEAM" == "$HELPER_TEAM" ]] \
-        || die "TeamIdentifier mismatch (app '$APP_TEAM', helper '$HELPER_TEAM')"
-    grep -q 'flags=0x10000(runtime)' <<<"$APP_INFO" || die "app is not signed with the hardened runtime"
-    grep -q 'flags=0x10000(runtime)' <<<"$HELPER_INFO" || die "helper is not signed with the hardened runtime"
-    # The exact requirements each side pins at runtime (HelperInfo.clientRequirement / helperRequirement).
-    req() { echo "identifier \"$1\" and anchor apple generic and certificate leaf[subject.OU] = \"$APP_TEAM\" and !(entitlement[\"com.apple.security.get-task-allow\"] exists)"; }
-    codesign --verify -R="$(req "$BUNDLE_ID")" "$APP" || die "app fails the client requirement"
-    codesign --verify -R="$(req "$HELPER_ID")" "$APP/Contents/MacOS/InsomniaHelper" || die "helper fails the helper requirement"
-    # The daemon plist must pin exactly the helper we ship (signing the app doesn't touch the helper: no --deep).
-    DAEMON_PLIST="$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST_NAME"
-    [[ -f "$DAEMON_PLIST" ]] || die "signed build without the helper's launchd plist"
-    plutil -lint "$DAEMON_PLIST" >/dev/null
-    pval() { /usr/libexec/PlistBuddy -c "Print :$1" "$DAEMON_PLIST" 2>/dev/null || true; }
-    [[ "$(pval Label)" == "$HELPER_ID" ]] || die "daemon plist Label is not $HELPER_ID"
-    [[ "$(pval "MachServices:$HELPER_ID")" == "true" ]] || die "daemon plist doesn't publish the $HELPER_ID Mach service"
-    [[ "$(pval BundleProgram)" == "Contents/MacOS/InsomniaHelper" ]] || die "daemon plist BundleProgram isn't the helper"
-    [[ "$(pval KeepAlive:SuccessfulExit)" == "false" ]] || die "daemon plist KeepAlive must be { SuccessfulExit = false }"
-    [[ "$(pval RunAtLoad)" == "true" ]] || die "daemon plist RunAtLoad must be true (the boot reset depends on it)"
-    [[ "$(pval SpawnConstraint:team-identifier)" == "$APP_TEAM" ]] || die "SpawnConstraint team-identifier != $APP_TEAM"
-    [[ "$(pval SpawnConstraint:signing-identifier)" == "$HELPER_ID" ]] || die "SpawnConstraint signing-identifier != $HELPER_ID"
-    FINAL_CDHASH=$(sed -n 's/^CDHash=//p' <<<"$(codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1)")
-    PINNED_CDHASH=$(plutil -extract 'SpawnConstraint.cdhash.$in.0' raw -o - "$DAEMON_PLIST" 2>/dev/null | base64 -d | xxd -p | tr -d '\n')
-    [[ -n "$FINAL_CDHASH" && "$PINNED_CDHASH" == "$FINAL_CDHASH" ]] \
-        || die "SpawnConstraint cdhash ($PINNED_CDHASH) != signed helper ($FINAL_CDHASH)"
-    say "Helper $FINAL_CDHASH pinned (team $APP_TEAM)"
-else
-    [[ ! -e "$APP/Contents/Library/LaunchDaemons" ]] || die "ad-hoc build must not carry a launchd daemon plist"
-fi
+APP_INFO=$(codesign -dvvv "$APP" 2>&1)
+HELPER_INFO=$(codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1)
+APP_TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$APP_INFO")
+HELPER_TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$HELPER_INFO")
+[[ -n "$APP_TEAM" && "$APP_TEAM" != "not set" && "$APP_TEAM" == "$HELPER_TEAM" ]] \
+    || die "TeamIdentifier mismatch (app '$APP_TEAM', helper '$HELPER_TEAM')"
+grep -q 'flags=0x10000(runtime)' <<<"$APP_INFO" || die "app is not signed with the hardened runtime"
+grep -q 'flags=0x10000(runtime)' <<<"$HELPER_INFO" || die "helper is not signed with the hardened runtime"
+# The exact requirements each side pins at runtime (HelperInfo.clientRequirement / helperRequirement).
+req() { echo "identifier \"$1\" and anchor apple generic and certificate leaf[subject.OU] = \"$APP_TEAM\" and !(entitlement[\"com.apple.security.get-task-allow\"] exists)"; }
+codesign --verify -R="$(req "$BUNDLE_ID")" "$APP" || die "app fails the client requirement"
+codesign --verify -R="$(req "$HELPER_ID")" "$APP/Contents/MacOS/InsomniaHelper" || die "helper fails the helper requirement"
+# The daemon plist must pin exactly the helper we ship (signing the app doesn't touch the helper: no --deep).
+DAEMON_PLIST="$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST_NAME"
+[[ -f "$DAEMON_PLIST" ]] || die "signed build without the helper's launchd plist"
+plutil -lint "$DAEMON_PLIST" >/dev/null
+pval() { /usr/libexec/PlistBuddy -c "Print :$1" "$DAEMON_PLIST" 2>/dev/null || true; }
+[[ "$(pval Label)" == "$HELPER_ID" ]] || die "daemon plist Label is not $HELPER_ID"
+[[ "$(pval "MachServices:$HELPER_ID")" == "true" ]] || die "daemon plist doesn't publish the $HELPER_ID Mach service"
+[[ "$(pval BundleProgram)" == "Contents/MacOS/InsomniaHelper" ]] || die "daemon plist BundleProgram isn't the helper"
+[[ "$(pval KeepAlive:SuccessfulExit)" == "false" ]] || die "daemon plist KeepAlive must be { SuccessfulExit = false }"
+[[ "$(pval RunAtLoad)" == "true" ]] || die "daemon plist RunAtLoad must be true (the boot reset depends on it)"
+[[ "$(pval SpawnConstraint:team-identifier)" == "$APP_TEAM" ]] || die "SpawnConstraint team-identifier != $APP_TEAM"
+[[ "$(pval SpawnConstraint:signing-identifier)" == "$HELPER_ID" ]] || die "SpawnConstraint signing-identifier != $HELPER_ID"
+FINAL_CDHASH=$(sed -n 's/^CDHash=//p' <<<"$(codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1)")
+PINNED_CDHASH=$(plutil -extract 'SpawnConstraint.cdhash.$in.0' raw -o - "$DAEMON_PLIST" 2>/dev/null | base64 -d | xxd -p | tr -d '\n')
+[[ -n "$FINAL_CDHASH" && "$PINNED_CDHASH" == "$FINAL_CDHASH" ]] \
+    || die "SpawnConstraint cdhash ($PINNED_CDHASH) != signed helper ($FINAL_CDHASH)"
+say "Helper $FINAL_CDHASH pinned (team $APP_TEAM)"
 for b in "$APP/Contents/MacOS/$APP_NAME" "$APP/Contents/MacOS/InsomniaHelper"; do
     stamped=$(vtool -show-build "$b" | awk '$1 == "sdk" {print $2; exit}')
     [[ "$stamped" == "$SDK_VERSION" ]] || die "$(basename "$b") is stamped sdk $stamped, not $SDK_VERSION"
