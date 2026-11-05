@@ -200,6 +200,9 @@ Pass:
 - IOPS callback is a C pointer; source on the main run loop in `.commonModes`. Thermal notes arrive on any thread.
 - Quit: `.terminateLater`, release, reply; ignore a second quit while pending; SIGTERM through the same path;
   `NSSupportsSuddenTermination = false`. Single instance in `willFinishLaunching`.
+- Reinstalling replaces the bundle under a running helper. Its code then no longer exists on disk, the app's peer
+  requirement fails (`errSecCSNoSuchCode`, -67065) and every engage fails, even with an identical cdhash, because an
+  identical cdhash skips the silent upgrade. `make install` therefore runs `launchctl kickstart -k` on the helper after the swap.
 - Accessory app: `NSApp.activate` before showing the popover; close it on `willSleep`; never set `statusItem.menu`;
   keep the item narrow (no permanent timer text).
 

@@ -40,6 +40,9 @@ install: app
 	if [ $$q -ne 0 ] && [ $$q -ne 3 ]; then echo "nothing installed"; exit 1; fi; \
 	if [ -e "$(DEST)" ]; then sudo mv "$(DEST)" "$$T/previous.app"; fi; \
 	sudo mv "$$T/Insomnia.app" "$(DEST)"; \
+	if sudo launchctl print system/com.gdeml.Insomnia.helper >/dev/null 2>&1; then \
+		sudo launchctl kickstart -k system/com.gdeml.Insomnia.helper || echo "warning: couldn't restart the lid helper"; \
+	fi; \
 	if [ $$q -eq 3 ]; then open "$(DEST)"; echo "Installed $(DEST) and reopened it. Lid mode is set up from this copy only."; \
 	else echo "Installed $(DEST). Open it from /Applications; lid mode is set up from this copy only."; fi
 
