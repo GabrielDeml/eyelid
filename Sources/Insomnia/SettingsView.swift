@@ -2,7 +2,7 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// The one-page Settings window. Everything is optional: the panel's three rows are the same settings.
+/// The one-page Settings window. The panel's rows are the same settings, so a change shows in both.
 struct SettingsView: View {
     let engine: Engine
     let lid: LidController
@@ -13,116 +13,98 @@ struct SettingsView: View {
     var body: some View {
         let p = engine.powerState
         Form {
-            Section("Keep awake") {
-                Picker("Turning on keeps awake", selection: $prefs.powerButtonMinutes) {
-                    Text("Until turned off").tag(0)
-                    ForEach([60, 120, 240, 480], id: \.self) { Text(DurationText.short(minutes: $0)).tag($0) }
+            Section {
+                Picker("Turn Insomnia off after", selection: $prefs.powerButtonMinutes) {
+                    Text("Never").tag(0)
+                    ForEach(Preferences.durationChoices, id: \.self) { Text(DurationText.hours(minutes: $0)).tag($0) }
                 }
                 Toggle("Keep screen on", isOn: $prefs.keepScreenOn)
-                Picker("Clicking the moon", selection: $prefs.clickAction) {
+                Picker(selection: $prefs.clickAction) {
                     ForEach(ClickAction.allCases) { Text($0.title).tag($0) }
+                } label: {
+                    Text("Click the menu bar icon to")
+                    Text(prefs.clickAction == .openPanel ? "Right-click to turn Insomnia on or off."
+                                                         : "Right-click to open the panel.")
                 }
-                Text(prefs.clickAction == .openPanel ? "Right-click turns Insomnia on or off."
-                                                     : "Right-click opens the panel.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
 
             if p.hasLid && lid.setup != .noLid {
-                Section("Lid closed") {
-                    Toggle("Stay awake with lid closed", isOn: Binding(
-                        get: { prefs.closedLidMode && lidUsable },
-                        set: { engine.setLidMode($0) }))
-                        .disabled(!lidUsable)
-                    LabeledContent("Lid-mode helper") {
-                        HStack(spacing: 8) {
-                            Text(helperStatus).foregroundStyle(.secondary)
-                            if lid.setup == .notRegistered { Button("Set Up…") { lid.install() } }
-                            if lid.setup == .needsApproval { Button("Open System Settings") { lid.openLoginItems() } }
-                            if lid.state == .stuck { Button("Reset with Password…") { lid.resetWithPassword() } }
+                Section {
+                    Toggle(isOn: Binding(get: { prefs.closedLidMode && lidUsable }, set: { engine.setLidMode($0) })) {
+                        Text("Stay awake with lid closed")
+                        Text("While Insomnia is on, Sleep in the Apple menu doesn't work.")
+                    }
+                    .disabled(!lidUsable)
+                    if p.hasBattery { unpluggedPicker(lidMode: prefs.closedLidMode) }
+                    if let helperStatus {
+                        LabeledContent("Lid helper") {
+                            HStack(spacing: 8) {
+                                Text(helperStatus).foregroundStyle(.secondary)
+                                if lid.state == .stuck {
+                                    Button("Reset with Password…") { lid.resetWithPassword() }
+                                } else if lid.setup == .notRegistered, !lid.installing {
+                                    Button("Set Up…") { lid.install() }
+                                } else if lid.setup == .needsApproval {
+                                    Button("Open System Settings") { lid.openLoginItems() }
+                                }
+                            }
                         }
                     }
-                    if p.hasBattery {
-                        Picker("When unplugged", selection: unplugged) {
-                            ForEach(UnpluggedAction.choices(lidMode: prefs.closedLidMode)) { Text($0.title).tag($0) }
-                        }
-                    }
-                    Text("While lid mode is on, the Apple menu's Sleep is blocked by macOS: turn Insomnia off first.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
             } else if p.hasBattery {
-                Section("Power") {
-                    Picker("When unplugged", selection: unplugged) {
-                        ForEach(UnpluggedAction.choices(lidMode: false)) { Text($0.title).tag($0) }
-                    }
-                }
+                Section { unpluggedPicker(lidMode: false) }
             }
 
-            Section("Safety") {
-                Toggle("Overheat protection", isOn: $prefs.overheatProtection)
-                if !prefs.overheatProtection {
-                    Text("Insomnia won't step in if your Mac gets hot. With the lid closed, macOS may not either.")
-                        .font(.caption).foregroundStyle(Theme.warningText)
+            Section {
+                Toggle(isOn: $prefs.overheatProtection) {
+                    Text("Turn Insomnia off if your Mac gets hot")
+                    Text(overheatNote(p))
                 }
-                if p.hasBattery {
-                    Toggle("Low battery protection", isOn: $prefs.lowBatteryProtection)
-                    Stepper(value: $prefs.lowBatteryPercent, in: Preferences.lowBatteryRange) {
-                        LabeledContent("At or below", value: "\(prefs.lowBatteryPercent)%")
-                    }
-                    .disabled(!prefs.lowBatteryProtection)
-                }
-                Picker("With the lid open", selection: $prefs.tripAction) {
-                    ForEach(TripAction.allCases) { Text($0.title).tag($0) }
-                }
-                .disabled(!prefs.overheatProtection && !(p.hasBattery && prefs.lowBatteryProtection))
-                Text(safetyFootnote(hasBattery: p.hasBattery))
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("General") {
-                Toggle("Open at login", isOn: Binding(get: { openAtLogin }, set: setOpenAtLogin))
-                if let loginError { Text(loginError).font(.caption).foregroundStyle(Theme.dangerText) }
-                LabeledContent("Menu bar") { legend }
-                HStack {
-                    Spacer()
-                    Button("Quit Insomnia") { NSApp.terminate(nil) }
+                Toggle(isOn: Binding(get: { openAtLogin }, set: setOpenAtLogin)) {
+                    Text("Open at login")
+                    if let loginError { Text(loginError).foregroundStyle(Theme.dangerText) }
                 }
             }
         }
         .formStyle(.grouped)
         .frame(width: 480)
-        .frame(idealHeight: 760, maxHeight: max(400, (NSScreen.main?.visibleFrame.height ?? 800) - 80))
+        .frame(maxHeight: max(400, (NSScreen.main?.visibleFrame.height ?? 800) - 80))
         .task { await lid.refreshSetup() }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             openAtLogin = SMAppService.mainApp.status == .enabled
         }
     }
 
-    private var unplugged: Binding<UnpluggedAction> {
-        Binding(get: { UnpluggedAction.shown(prefs.whenUnplugged, lidMode: prefs.closedLidMode) },
-                set: { prefs.whenUnplugged = $0 })
+    private func unpluggedPicker(lidMode: Bool) -> some View {
+        Picker(selection: Binding(get: { UnpluggedAction.shown(prefs.whenUnplugged, lidMode: lidMode) },
+                                  set: { prefs.whenUnplugged = $0 })) {
+            ForEach(UnpluggedAction.choices(lidMode: lidMode)) { Text($0.title).tag($0) }
+        } label: {
+            Text("When unplugged")
+            Text("At \(Engine.lowBatteryPercent)% battery, Insomnia turns off or puts your Mac to sleep.")
+        }
     }
 
     private var lidUsable: Bool {
         ![.notInApplications, .unsigned, .missingFiles].contains(lid.setup)
     }
 
-    private var helperStatus: String {
-        if lid.state == .stuck { return "Sleep is stuck off" }
+    /// Only when the lid helper needs something; nothing when it's ready or not wanted.
+    private var helperStatus: String? {
+        if lid.state == .stuck { return "Couldn't turn sleep back on" }
         switch lid.setup {
-        case .noLid: return "Not available"
-        case .notInApplications: return "Needs the copy in Applications (make install)"
+        case .notInApplications: return "Works only when installed in Applications"
         case .unsigned: return "Needs a signed build"
         case .missingFiles: return "Missing from this build"
-        case .notRegistered: return "Not set up"
-        case .needsApproval: return "Waiting for approval"
-        case .ready: return lid.isEngaged ? "Ready · holding sleep off" : "Ready"
+        case .needsApproval: return "Needs your approval"
+        case .notRegistered: return prefs.closedLidMode ? (lid.installing ? "Setting up" : "Not set up") : nil
+        case .noLid, .ready: return nil
         }
     }
 
-    private func safetyFootnote(hasBattery: Bool) -> String {
-        let what = hasBattery ? "When your Mac gets hot or the battery runs low" : "When your Mac gets hot"
-        return what + " while Insomnia keeps it awake, it lets go. With the lid closed it always sleeps the Mac."
-            + (hasBattery ? " The lid helper also sleeps the Mac at 10% battery, whatever these say." : "")
+    private func overheatNote(_ p: PowerState) -> String {
+        let s = "If no one is using your Mac, Insomnia puts it to sleep instead."
+        return p.hasLid ? s + " With the lid closed and no external display, this can't be turned off." : s
     }
 
     private func setOpenAtLogin(_ on: Bool) {
@@ -130,24 +112,11 @@ struct SettingsView: View {
         do {
             if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         } catch {
-            loginError = "Couldn't change this (\((error as NSError).code))."
+            let code = (error as NSError).code
+            loginError = on ? "Couldn't add Insomnia to Login Items (error \(code))."
+                            : "Couldn't remove Insomnia from Login Items (error \(code))."
         }
         openAtLogin = SMAppService.mainApp.status == .enabled
-    }
-
-    private var legend: some View {
-        HStack(spacing: 14) {
-            ForEach([(Engine.Mode.off, "Off"), (.awake, "Awake"), (.screenOn, "Screen on"), (.lid, "Lid")], id: \.1) { m, name in
-                VStack(spacing: 3) {
-                    Image(nsImage: MoonGlyph.image(mode: m, attention: false))
-                    Text(name).font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-            }
-            VStack(spacing: 3) {
-                Image(nsImage: MoonGlyph.image(mode: .awake, attention: true))
-                Text("Attention").font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-        }
     }
 }
 

@@ -12,7 +12,7 @@ protocol AssertionApplying: AnyObject {
     var hasDisplayAssertion: Bool { get }
 }
 
-/// Thin IOKit wrapper (docs/CLOSED_LID.md §1). Idempotent: creates/releases only when the desired set changes, and
+/// Thin IOKit wrapper. Idempotent: creates/releases only when the desired set changes, and
 /// re-creates an assertion when its reason string changes so `pmset -g assertions` stays accurate.
 @MainActor
 final class PowerAssertions: AssertionApplying {

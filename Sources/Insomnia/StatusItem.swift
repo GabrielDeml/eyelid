@@ -6,15 +6,13 @@ import SwiftUI
 /// Never assigns `statusItem.menu` (macOS 27 drops clicks on multi-display setups with it), and stays narrow: no
 /// timer text.
 @MainActor
-final class StatusItem: NSObject, NSPopoverDelegate {
+final class StatusItem: NSObject {
     private let engine: Engine
     private let lid: LidController
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
     private var observers: [NSObjectProtocol] = []
     private var lastGlyph: (Engine.Mode, Bool, Bool)?
-    /// Refreshes the tooltip's countdown while a timer runs (nothing observable changes as time passes).
-    private var tooltipTimer: Timer?
 
     init(engine: Engine, lid: LidController) {
         self.engine = engine
@@ -32,7 +30,6 @@ final class StatusItem: NSObject, NSPopoverDelegate {
         popover.contentViewController = host
         popover.behavior = .transient
         popover.animates = true
-        popover.delegate = self
 
         // Never leave the panel up across sleep.
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(
@@ -59,32 +56,25 @@ final class StatusItem: NSObject, NSPopoverDelegate {
             let text = tooltip()
             item.button?.toolTip = text
             item.button?.setAccessibilityValue(text)
-            scheduleTooltipRefresh(timed: engine.endsAt != nil)
         } onChange: { [weak self] in
             Task { @MainActor in self?.refresh() }
         }
     }
 
-    private func scheduleTooltipRefresh(timed: Bool) {
-        tooltipTimer?.invalidate()
-        tooltipTimer = nil
-        guard timed else { return }
-        let timer = Timer(timeInterval: 30, repeats: false) { _ in
-            MainActor.assumeIsolated { [weak self] in self?.refresh() }
-        }
-        timer.tolerance = 5
-        RunLoop.main.add(timer, forMode: .common)
-        tooltipTimer = timer
-    }
-
+    /// The state in a sentence, plus what happened or what needs attention. The icon's badges show the mode.
     private func tooltip() -> String {
-        var parts = [engine.isOn ? "Awake" : (lid.isStuck ? "Sleep is still turned off" : "Off")]
-        if let end = engine.endsAt { parts.append(DurationText.left(until: end, now: Date())) }
-        if engine.mode == .screenOn || (engine.mode == .lid && engine.prefs.keepScreenOn) { parts.append("screen on") }
-        if engine.mode == .lid { parts.append("lid can close") }
-        if let notice = engine.notice { parts.append(notice.text) }
-        if engine.needsAttention, engine.notice == nil, !lid.isStuck { parts.append("lid mode needs a look") }
-        return "Insomnia · " + parts.joined(separator: " · ")
+        let state = if lid.isStuck {
+            "Your Mac still can't sleep"
+        } else if engine.isOn {
+            "Insomnia is on" + (engine.endsAt.map { " until " + DurationText.clock($0) } ?? "")
+        } else {
+            "Insomnia is off"
+        }
+        if let notice = engine.notice { return state + "\n" + notice.text }
+        guard engine.needsAttention, !lid.isStuck else { return state }
+        if lid.setup == .needsApproval { return state + "\nThe lid helper needs your approval in System Settings" }
+        guard let caption = PanelState.live(engine: engine, lid: lid).lidCaption?.text else { return state }
+        return state + "\n" + (caption.hasSuffix(".") ? String(caption.dropLast()) : caption)
     }
 
     @objc private func clicked(_ sender: NSStatusBarButton) {

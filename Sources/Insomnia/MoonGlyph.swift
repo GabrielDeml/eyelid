@@ -19,16 +19,16 @@ enum MoonGlyph {
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "Insomnia: " + description(mode) + (attention ? ", needs attention" : "")
+        image.accessibilityDescription = "Insomnia " + description(mode) + (attention ? ", needs attention" : "")
         return image
     }
 
     static func description(_ mode: Engine.Mode) -> String {
         switch mode {
-        case .off: "Off, your Mac sleeps normally"
-        case .awake: "Awake"
-        case .screenOn: "Awake, screen on"
-        case .lid: "Awake, even with the lid closed"
+        case .off: "off"
+        case .awake: "awake"
+        case .screenOn: "awake, screen on"
+        case .lid: "awake, even with the lid closed"
         }
     }
 

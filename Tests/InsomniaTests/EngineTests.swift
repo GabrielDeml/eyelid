@@ -1,4 +1,5 @@
 import Foundation
+import InsomniaShared
 import Testing
 @testable import Insomnia
 
@@ -156,6 +157,14 @@ struct EngineLidTests {
         #expect(r.engine.isOn && r.prefs.closedLidMode && r.lid.desired == true)
     }
 
+    @Test func lidSwitchUsesTheTimeLimit() {
+        let r = Rig { $0.prefs.powerButtonMinutes = 60 }
+        r.engine.setLidMode(true)
+        #expect(r.engine.isOn && r.engine.runMinutes == 60 && r.engine.endsAt != nil)
+        r.advance(3600)
+        #expect(!r.engine.isOn && r.lid.desired == false)
+    }
+
     @Test func lidSwitchRegistersTheHelperWhenNeeded() {
         let r = Rig { $0.lid.needsSetup = true; $0.lid.isReady = false }
         r.engine.setLidMode(true)
@@ -255,7 +264,7 @@ struct EngineSafetyTests {
         r.engine.toggle()
         r.power.set { $0.thermal = .critical }
         #expect(!r.engine.isOn && r.sleeps == 0)
-        #expect(r.engine.notice?.text == "Turned off because your Mac got hot")
+        #expect(r.engine.notice?.text == "Your Mac got hot, so Insomnia turned off")
         #expect(r.engine.needsAttention)
         r.engine.panelOpened()
         #expect(!r.engine.needsAttention)
@@ -266,7 +275,7 @@ struct EngineSafetyTests {
         r.engine.toggle()
         r.power.set { $0.thermal = .critical }
         #expect(!r.engine.isOn && r.sleeps == 1)
-        #expect(r.engine.notice?.text == "Slept because your Mac got hot")
+        #expect(r.engine.notice?.text == "Your Mac got hot, so Insomnia put it to sleep")
     }
 
     @Test func seriousWithTheLidOpenWaitsFiveMinutes() {
@@ -346,15 +355,28 @@ struct EngineSafetyTests {
         #expect(r.engine.isOn && r.sleeps == 0)
     }
 
-    @Test func tripActionAlwaysSleep() {
-        let r = Rig { $0.prefs.tripAction = .sleep }
+    @Test func overheatSwitchDoesNotApplyWithTheLidClosed() {
+        let r = Rig { $0.prefs.overheatProtection = false; $0.prefs.closedLidMode = true }
         r.engine.toggle()
+        r.power.set { $0.isLidClosed = true }
         r.power.set { $0.thermal = .critical }
-        #expect(r.sleeps == 1)
+        #expect(!r.engine.isOn && r.sleeps == 1)
+        let events = r.lid.events
+        let release = events.lastIndex(of: "desired:false")
+        let sleep = events.lastIndex(of: "sleepNow")
+        #expect(release != nil && sleep != nil && release! < sleep!)
     }
 
-    @Test func tripActionTurnOffNeverSleepsWithTheLidOpen() {
-        let r = Rig { $0.prefs.tripAction = .turnOff; $0.power.idleSeconds = 600 }
+    @Test func overheatSwitchStillAppliesWithAnExternalDisplay() {
+        let r = Rig { $0.prefs.overheatProtection = false; $0.power.state.externalDisplays = 1 }
+        r.engine.toggle()
+        r.power.set { $0.isLidClosed = true }
+        r.power.set { $0.thermal = .critical }
+        #expect(r.engine.isOn && r.sleeps == 0)
+    }
+
+    @Test func activeUserMeansTurnOffNotSleep() {
+        let r = Rig { $0.power.idleSeconds = 10 }
         r.engine.toggle()
         r.power.set { $0.thermal = .critical }
         #expect(!r.engine.isOn && r.sleeps == 0)
@@ -384,21 +406,16 @@ struct EngineSafetyTests {
         r.engine.toggle()
         r.power.set { $0.batteryPercent = 12 }
         #expect(!r.engine.isOn && r.sleeps == 1)
-        #expect(r.engine.notice?.text == "Slept: battery at 12%")
+        #expect(r.engine.notice?.text == "Your battery fell to 12%, so Insomnia put your Mac to sleep")
     }
 
-    @Test func lowBatteryRespectsItsSwitchAndThreshold() {
-        let r = Rig { $0.power.state.isOnAC = false; $0.prefs.lowBatteryPercent = 30 }
+    @Test func lowBatteryTripsAtTwelvePercent() {
+        let r = Rig { $0.power.state.isOnAC = false }
         r.engine.toggle()
-        r.power.set { $0.batteryPercent = 31 }
+        r.power.set { $0.batteryPercent = 13 }
         #expect(r.engine.isOn)
-        r.power.set { $0.batteryPercent = 30 }
+        r.power.set { $0.batteryPercent = 12 }
         #expect(!r.engine.isOn)
-
-        let off = Rig { $0.power.state.isOnAC = false; $0.prefs.lowBatteryProtection = false }
-        off.engine.toggle()
-        off.power.set { $0.batteryPercent = 5 }
-        #expect(off.engine.isOn)
     }
 
     @Test func lowBatteryRule() {
@@ -418,12 +435,8 @@ struct EngineSafetyTests {
         #expect(!Engine.isLowBattery(p, threshold: 12, was: true))
     }
 
-    @Test func thresholdNeverReachesTheHelperBackstop() {
-        let prefs = Preferences(defaults: ScratchDefaults.make("clamp"))
-        prefs.lowBatteryPercent = 5
-        #expect(prefs.lowBatteryPercent == 11)
-        prefs.lowBatteryPercent = 90
-        #expect(prefs.lowBatteryPercent == 50)
+    @Test func thresholdStaysAboveTheHelperBackstop() {
+        #expect(Engine.lowBatteryPercent > HelperInfo.backstopPercent)
     }
 }
 
@@ -434,13 +447,12 @@ struct PreferencesTests {
         let defaults = ScratchDefaults.make("prefs")
         let a = Preferences(defaults: defaults)
         #expect(a.keepScreenOn && !a.closedLidMode && a.whenUnplugged == .sleepWhenLidCloses)
-        #expect(a.overheatProtection && a.lowBatteryProtection && a.lowBatteryPercent == 12)
+        #expect(a.overheatProtection)
         #expect(a.powerButtonMinutes == 0)
         a.closedLidMode = true
         a.powerButtonMinutes = 120
-        a.tripAction = .turnOff
         let b = Preferences(defaults: defaults)
-        #expect(b.closedLidMode && b.powerButtonMinutes == 120 && b.tripAction == .turnOff)
+        #expect(b.closedLidMode && b.powerButtonMinutes == 120)
     }
 
     @Test func initNeverWrites() {
@@ -450,11 +462,17 @@ struct PreferencesTests {
     }
 
     @Test func durations() {
-        #expect(DurationText.short(minutes: 45) == "45m")
-        #expect(DurationText.short(minutes: 120) == "2h")
-        #expect(DurationText.short(minutes: 90) == "1h 30m")
-        let now = Date(timeIntervalSince1970: 0)
-        #expect(DurationText.left(until: now.addingTimeInterval(61), now: now) == "2m left")
-        #expect(DurationText.left(until: now.addingTimeInterval(102 * 60), now: now) == "1h 42m left")
+        #expect(DurationText.hours(minutes: 60) == "1 hour")
+        #expect(DurationText.hours(minutes: 480) == "8 hours")
+    }
+
+    /// Durations stored by older versions round up to a choice the picker has, without writing anything.
+    @Test func oldDurationsSnapToAChoice() {
+        for (stored, read) in [(30, 60), (90, 120), (1000, 480), (-5, 0)] {
+            let defaults = ScratchDefaults.make("prefs-snap-\(stored)")
+            defaults.set(stored, forKey: Preferences.Key.powerButtonMinutes)
+            #expect(Preferences(defaults: defaults).powerButtonMinutes == read)
+            #expect(defaults.integer(forKey: Preferences.Key.powerButtonMinutes) == stored)
+        }
     }
 }

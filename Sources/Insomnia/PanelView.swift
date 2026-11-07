@@ -3,15 +3,18 @@ import SwiftUI
 
 /// Everything the panel shows, derived from the engine. A plain value, so snapshots need no engine.
 struct PanelState: Equatable {
+    /// A line under the lid switch. `text` is a fragment with no period, unless a link follows; then it ends with one.
     struct Caption: Equatable {
         enum Tone: Equatable { case secondary, warning, danger }
+        struct Link: Equatable {
+            var title: String
+            var action: PanelAction
+        }
         var text: String
         var tone: Tone = .secondary
-        var action: PanelAction? = nil
+        var link: Link? = nil
     }
 
-    var mode: Engine.Mode = .off
-    var attention = false
     var isOn = false
     var endsAt: Date?
     var keepScreenOn = true
@@ -20,8 +23,8 @@ struct PanelState: Equatable {
     var lidEnabled = true
     var lidCaption: Caption?
     var showUnplugged = true
-    var unplugged = UnpluggedAction.sleepWhenLidCloses
-    var unpluggedChoices = UnpluggedAction.allCases
+    var unplugged = UnpluggedAction.keepGoing
+    var unpluggedChoices = UnpluggedAction.choices(lidMode: false)
     var notice: Engine.Notice?
     /// A release failed: SleepDisabled is still set although we meant to clear it.
     var stuck = false
@@ -46,8 +49,6 @@ extension PanelState {
         let prefs = engine.prefs
         let p = engine.powerState
         var s = PanelState()
-        s.mode = engine.mode
-        s.attention = engine.needsAttention
         s.isOn = engine.isOn
         s.endsAt = engine.endsAt
         s.keepScreenOn = prefs.keepScreenOn
@@ -59,24 +60,16 @@ extension PanelState {
         s.stuck = lid.isStuck
 
         switch lid.setup {
-        case .notInApplications:
-            s.lidEnabled = false
-            s.lidCaption = Caption(text: "Needs the copy installed in Applications")
-        case .unsigned:
-            s.lidEnabled = false
-            s.lidCaption = Caption(text: "Needs a signed build")
-        case .missingFiles:
-            s.lidEnabled = false
-            s.lidCaption = Caption(text: "The lid helper is missing from this build", tone: .warning)
-        default:
-            break
+        case .notInApplications: s.lidEnabled = false; s.lidCaption = notInApplicationsCaption
+        case .unsigned: s.lidEnabled = false; s.lidCaption = unsignedCaption
+        case .missingFiles: s.lidEnabled = false; s.lidCaption = missingFilesCaption
+        default: break
         }
         s.lidOn = prefs.closedLidMode && s.lidEnabled
         if lid.state == .stuck {
-            s.lidCaption = Caption(text: "Sleep is still off. Reset with password…", tone: .danger,
-                                   action: .resetWithPassword)
+            s.lidCaption = stuckCaption
         } else if let error = lid.setupError {
-            s.lidCaption = Caption(text: error + " Try again", tone: .warning, action: .retryLid)
+            s.lidCaption = setupErrorCaption(error)
         } else if s.lidOn {
             s.lidCaption = lidCaption(engine: engine, lid: lid, power: p)
         }
@@ -86,31 +79,49 @@ extension PanelState {
     @MainActor
     private static func lidCaption(engine: Engine, lid: LidController, power p: PowerState) -> Caption? {
         switch lid.setup {
-        case .notRegistered: return Caption(text: "Setting up…")
-        case .needsApproval:
-            return Caption(text: "Waiting for approval in System Settings ›", tone: .warning, action: .openLoginItems)
+        case .notRegistered: return lid.installing ? settingUpCaption : notSetUpCaption
+        case .needsApproval: return needsApprovalCaption
         default: break
         }
-        if case .failed(let f) = lid.state {
-            let text = switch f {
-            case .foreignFlag: "Another app has turned sleep off"
-            case .otherUser: "Another user is using lid mode"
-            case .lowBattery: "Battery too low for lid mode"
-            case .setFailed: "Couldn't turn lid mode on. Try again"
-            case .lost: "Lost the lid-mode helper. Try again"
-            case .overridden: "Something turned sleep back on. Try again"
-            }
-            let retryable = f != .foreignFlag && f != .otherUser
-            return Caption(text: text, tone: .warning, action: retryable ? .retryLid : nil)
-        }
+        if case .failed(let f) = lid.state { return failureCaption(f) }
         guard engine.isOn else { return nil }
-        if engine.hotEpisode { return Caption(text: "Paused: your Mac is hot", tone: .warning) }
-        if engine.lowEpisode { return Caption(text: "Paused: battery low", tone: .warning) }
-        if p.isOnBattery, engine.prefs.whenUnplugged == .sleepWhenLidCloses {
-            return Caption(text: "Paused on battery (When unplugged)")
-        }
+        if engine.hotEpisode { return hotCaption }
+        if engine.lowEpisode { return lowBatteryCaption }
+        if p.isOnBattery, engine.prefs.whenUnplugged == .sleepWhenLidCloses { return pausedOnBatteryCaption }
         return nil
     }
+
+    // The captions, shared with `make snapshot` so its pictures show the app's real text.
+    static let notInApplicationsCaption = Caption(text: "Works only when installed in Applications")
+    static let unsignedCaption = Caption(text: "Needs a signed build")
+    static let missingFilesCaption = Caption(text: "This build is missing the lid helper", tone: .warning)
+    static let stuckCaption = Caption(text: "Couldn't turn sleep back on.", tone: .danger,
+                                      link: .init(title: "Reset with Password…", action: .resetWithPassword))
+    static let settingUpCaption = Caption(text: "Setting up the lid helper")
+    static let notSetUpCaption = Caption(text: "The lid helper isn't set up.",
+                                         link: .init(title: "Set Up…", action: .retryLid))
+    static let needsApprovalCaption = Caption(text: "Needs your approval.", tone: .warning,
+                                              link: .init(title: "Open System Settings", action: .openLoginItems))
+    static let hotCaption = Caption(text: "Paused while your Mac is hot", tone: .warning)
+    static let lowBatteryCaption = Caption(text: "Paused while the battery is low", tone: .warning)
+    static let pausedOnBatteryCaption = Caption(text: "Paused while on battery")
+
+    static func setupErrorCaption(_ error: String) -> Caption {
+        Caption(text: error, tone: .warning, link: tryAgain)
+    }
+
+    static func failureCaption(_ f: LidController.Failure) -> Caption {
+        switch f {
+        case .foreignFlag: Caption(text: "Another app has already turned off sleep", tone: .warning)
+        case .otherUser: Caption(text: "In use by another user on this Mac", tone: .warning)
+        case .lowBattery: Caption(text: "Battery too low. Plug in your Mac.", tone: .warning, link: tryAgain)
+        case .setFailed: Caption(text: "Couldn't turn off sleep.", tone: .warning, link: tryAgain)
+        case .lost: Caption(text: "Lost contact with the lid helper.", tone: .warning, link: tryAgain)
+        case .overridden: Caption(text: "Something else turned sleep back on.", tone: .warning, link: tryAgain)
+        }
+    }
+
+    private static let tryAgain = Caption.Link(title: "Try Again", action: .retryLid)
 }
 
 /// The menu bar panel: type, spacing and native controls on one 16 pt edge (docs/DESIGN.md, Look).
@@ -156,37 +167,22 @@ struct PanelView: View {
                     .controlSize(.small)   // .regular is oversized on the macOS 26+ glass switch
                     .tint(Theme.accent)
                     .keyboardShortcut(.defaultAction)   // Return toggles
-                    .help(state.isOn ? "Turn off" : "Keep awake")
+                    .help(state.isOn ? "Let your Mac sleep" : "Keep your Mac awake")
             }
-            TimelineView(.periodic(from: .now, by: 15)) { context in
-                Text(subtitle(now: context.date))
+            if let subtitle {
+                Text(subtitle)
                     .font(Theme.subtitle)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.85)
             }
-            if state.isOn { modeLine.padding(.top, 1) }
         }
         .accessibilityElement(children: .contain)
     }
 
-    private func subtitle(now: Date) -> String {
-        guard state.isOn else { return state.stuck ? "Sleep is still turned off (see below)" : "Your Mac sleeps normally" }
-        guard let end = state.endsAt else { return "Until you turn it off" }
-        return DurationText.left(until: end, now: now) + " · until " + DurationText.clock(end)
-    }
-
-    /// The mode in words: the menu bar moon right above shows it in shape.
-    private var modeLine: some View {
-        var parts: [Text] = []
-        if state.mode == .screenOn || (state.mode == .lid && state.keepScreenOn) { parts.append(Text("Screen on")) }
-        if state.mode == .lid { parts.append(Text("Lid can close").foregroundStyle(Theme.lidText)) }
-        if state.mode == .awake { parts.append(Text("Screen may sleep")) }
-        let line = parts.dropFirst().reduce(parts.first ?? Text("")) { Text("\($0) · \($1)") }
-        return line
-            .font(Theme.mode)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
+    /// Only what the state word doesn't say: when a timed session ends, or that sleep is still off.
+    private var subtitle: String? {
+        if state.isOn { return state.endsAt.map { "Until " + DurationText.clock($0) } }
+        return state.stuck ? "Your Mac still can't sleep" : nil
     }
 
     // MARK: Rows
@@ -254,12 +250,16 @@ struct PanelView: View {
         }
         return HStack(alignment: .firstTextBaseline, spacing: 4) {
             if let symbol { Image(systemName: symbol).font(.system(size: 10)).accessibilityHidden(true) }
-            if let action = caption.action {
-                Button { send(action) } label: { captionText(caption.text) }
+            if let link = caption.link {
+                // One text, so the link wraps with the message; non-breaking spaces keep the link itself whole.
+                let title = Text(link.title.replacingOccurrences(of: " ", with: "\u{00A0}"))
+                    .foregroundStyle(Color(nsColor: .linkColor))
+                Button { send(link.action) } label: { captionText(Text("\(Text(caption.text)) \(title)")) }
                     .buttonStyle(.plain)
                     .linkPointer()
+                    .accessibilityLabel(caption.text + " " + link.title)
             } else {
-                captionText(caption.text)
+                captionText(Text(caption.text))
             }
         }
         .font(Theme.caption)
@@ -269,8 +269,8 @@ struct PanelView: View {
         .padding(.bottom, 6)
     }
 
-    private func captionText(_ text: String) -> some View {
-        Text(text)
+    private func captionText(_ text: Text) -> some View {
+        text
             .multilineTextAlignment(.leading)
             .lineLimit(2)
             .fixedSize(horizontal: false, vertical: true)
@@ -282,7 +282,7 @@ struct PanelView: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: notice.isWarning ? "exclamationmark.triangle.fill" : "info.circle.fill")
                 .font(.system(size: 11))
-                .foregroundStyle(notice.isWarning ? Theme.warning : .secondary)
+                .foregroundStyle(notice.isWarning ? Theme.warningText : .secondary)
                 .accessibilityHidden(true)
             Text(notice.text)
                 .font(Theme.notice)
@@ -303,7 +303,6 @@ struct PanelView: View {
     private var footer: some View {
         HStack(spacing: 0) {
             Button("Settings…") { send(.openSettings) }
-                .help("Open Insomnia settings")
             Spacer(minLength: 8)
             Button("Quit Insomnia") { send(.quit) }
         }

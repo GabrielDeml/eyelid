@@ -7,19 +7,15 @@ enum Theme {
     static let accent = Color(nsColor: dynamic(light: 0xE8940C, dark: 0xFFB547))
     /// Lid mode: the lid switch.
     static let lid = Color(nsColor: .systemIndigo)
-    /// Lid mode as 11 pt text (system indigo fails 4.5:1 on dark glass).
-    static let lidText = Color(nsColor: dynamic(light: 0x3F3CBB, dark: 0xA5A3FF))
     /// 11–12 pt warning / error text, ≥ 4.5:1 in light and dark.
     static let warningText = Color(nsColor: dynamic(light: 0xA84A00, dark: 0xFF9F0A))
     static let dangerText = Color(nsColor: dynamic(light: 0xC0201A, dark: 0xFF453A))
-    static let warning = Color(nsColor: .systemOrange)
     /// Quiet-button backgrounds. Primary opacities, so they read on glass and on the opaque fallback alike.
     static let hover = Color.primary.opacity(0.07)
     static let pressed = Color.primary.opacity(0.11)
 
     static let title = Font.system(size: 20, weight: .semibold)
-    static let subtitle = Font.system(size: 12, design: .rounded).monospacedDigit()
-    static let mode = Font.system(size: 11, weight: .medium)
+    static let subtitle = Font.system(size: 12)
     static let row = Font.system(size: 13)
     static let caption = Font.system(size: 11)
     static let notice = Font.system(size: 12)

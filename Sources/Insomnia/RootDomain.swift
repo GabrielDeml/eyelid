@@ -3,7 +3,7 @@ import IOKit
 import IOKit.pwr_mgt
 import InsomniaShared
 
-/// Read-only access to IOPMrootDomain (docs/CLOSED_LID.md §1 "State readback"). No privileges, never parses `pmset`.
+/// Read-only access to IOPMrootDomain. No privileges, never parses `pmset`.
 /// Every IOKit object obtained here is released before returning.
 enum RootDomain {
     /// `kIOPMMessageClamshellStateChange` is a function-like macro Swift can't import:
@@ -70,7 +70,7 @@ private final class ClamshellObservation: @unchecked Sendable {
         let kr = IOServiceAddInterestNotification(port, service, kIOGeneralInterest, { refcon, _, messageType, argument in
             guard messageType == RootDomain.clamshellStateChangeMessage, let refcon else { return }
             let decoded = RootDomain.decodeClamshell(UInt(bitPattern: argument))
-            // Registered on the main run loop, so this always runs on the main thread (ARCHITECTURE.md Concurrency).
+            // Registered on the main run loop, so this always runs on the main thread.
             MainActor.assumeIsolated {
                 let box = Unmanaged<Box>.fromOpaque(refcon).takeUnretainedValue()
                 box.handler(decoded.closed, decoded.causesSleep)

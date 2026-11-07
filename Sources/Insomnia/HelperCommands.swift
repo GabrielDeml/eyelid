@@ -3,7 +3,7 @@ import Foundation
 import InsomniaShared
 import ServiceManagement
 
-/// Headless helper maintenance (docs/CLOSED_LID.md §2.6, §9). Routed from main.swift before any NSApplication exists:
+/// Headless lid helper maintenance (docs/DESIGN.md, LidController). Routed from main.swift before any NSApplication exists:
 ///
 ///     case "--helper-status":     exit(MainActor.assumeIsolated { HelperCommands.status() })
 ///     case "--unregister-helper": exit(MainActor.assumeIsolated { HelperCommands.unregister() })
@@ -17,6 +17,7 @@ enum HelperCommands {
     static func status() -> Int32 {
         let status = SMAppService.daemon(plistName: HelperInfo.plistName).status
         print(describe(status))
+        if status == .requiresApproval { printError("Approve it in System Settings > General > Login Items & Extensions.") }
         return isRegistered(status) ? 0 : 1
     }
 
@@ -28,7 +29,7 @@ enum HelperCommands {
 
         let service = SMAppService.daemon(plistName: HelperInfo.plistName)
         guard isRegistered(service.status) else {
-            print("No lid-mode helper is registered.")
+            print("No lid helper is registered.")
             forgetRegistration()
             return 0
         }
@@ -48,11 +49,11 @@ enum HelperCommands {
         let after = service.status
         if after == .notRegistered || after == .notFound {
             forgetRegistration()
-            print("Removed the lid-mode helper (\(describe(after))).")
+            print("Removed the lid helper (\(describe(after))).")
             return 0
         }
-        printError("The helper is still registered (\(describe(after)))\(failure.map { ": \($0)" } ?? "").")
-        printError("Switch Insomnia off in System Settings ▸ General ▸ Login Items & Extensions, then try again.")
+        printError("The lid helper is still registered (\(describe(after)))\(failure.map { ": \($0)" } ?? "").")
+        printError("In System Settings > General > Login Items & Extensions, turn off Insomnia under Allow in the Background, then try again.")
         return 1
     }
 
@@ -62,10 +63,10 @@ enum HelperCommands {
 
     static func describe(_ s: SMAppService.Status) -> String {
         switch s {
-        case .notRegistered: return "not registered: lid mode isn't set up"
+        case .notRegistered: return "not registered"
         case .enabled: return "enabled"
-        case .requiresApproval: return "requires approval: System Settings ▸ General ▸ Login Items & Extensions"
-        case .notFound: return "not found: lid mode was never set up from this copy"
+        case .requiresApproval: return "waiting for approval"
+        case .notFound: return "not found"
         @unknown default: return "unknown (\(s.rawValue))"
         }
     }
@@ -76,19 +77,19 @@ enum HelperCommands {
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: HelperInfo.appBundleID)
             .filter { $0.processIdentifier != me }
         guard !running.isEmpty else { return }
-        print("Quitting Insomnia so it can release lid mode…")
+        print("Quitting Insomnia…")
         for app in running { app.terminate() }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline && running.contains(where: { kill($0.processIdentifier, 0) == 0 }) {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
         }
         if running.contains(where: { kill($0.processIdentifier, 0) == 0 }) {
-            printError("Insomnia didn't quit within \(Int(timeout)) s; removing the helper anyway (it resets its own flag on stop).")
+            printError("Insomnia didn't quit within \(Int(timeout)) seconds. Unregistering the lid helper anyway; it turns sleep back on when it stops.")
         }
     }
 
-    /// Same as ClosedLidController.uninstall's bookkeeping (CLOSED_LID.md §2.6 Remove step 4), written straight to
-    /// the app's defaults domain because there's no Settings object in a headless run.
+    /// Clears what the app remembers about the registration, written straight to the app's defaults domain because
+    /// there's no Preferences object in a headless run.
     private static func forgetRegistration() {
         guard Bundle.main.bundleIdentifier == HelperInfo.appBundleID else { return }
         let defaults = UserDefaults.standard

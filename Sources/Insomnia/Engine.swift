@@ -28,7 +28,7 @@ protocol LidControlling: AnyObject {
     func releaseForQuit() async
 }
 
-/// The single place that decides: on/off, timer, the settings, "When unplugged", and the safety protections.
+/// The single place that decides: on/off, the time limit, the settings, When unplugged, and the safety checks.
 /// Every input calls `reconcile()`; re-entrant calls fold into one more pass.
 @MainActor
 @Observable
@@ -39,7 +39,7 @@ final class Engine {
         var isWarning: Bool
     }
 
-    /// Lid open: sleep only if nobody has touched the Mac for this long (TripAction.sleepIfIdle).
+    /// Lid open: when a safety check trips, sleep only if nobody has touched the Mac for this long, otherwise turn off.
     static let idleForSleep: TimeInterval = 120
     /// How long `.serious` must last before overheat protection trips: lid closed (in a bag) / otherwise.
     static let seriousWindowClosed: TimeInterval = 60
@@ -48,6 +48,9 @@ final class Engine {
     static let bagWindow: TimeInterval = 300
     /// The low-battery protection clears this many points above its threshold (no flapping).
     static let batteryHysteresis = 3
+    /// Low-battery protection: on battery at or below this. Above HelperInfo.backstopPercent (10), so the app acts
+    /// before the lid helper does.
+    static let lowBatteryPercent = 12
     static let lidPollInterval: TimeInterval = 5
     static let assertionReason = "Insomnia is keeping your Mac awake"
 
@@ -149,14 +152,15 @@ final class Engine {
         reconcile()
     }
 
-    /// The lid switch. Turning it on also turns Insomnia on, so the switch always means what it says.
+    /// The lid switch. Turning it on also turns Insomnia on (for the usual time limit), so the switch always means what
+    /// it says.
     func setLidMode(_ on: Bool) {
         userActed()
         if on {
             if !isOn {
                 isOn = true
-                runMinutes = nil
-                endsAt = nil
+                runMinutes = prefs.powerButtonMinutes > 0 ? prefs.powerButtonMinutes : nil
+                endsAt = runMinutes.map { now().addingTimeInterval(TimeInterval($0) * 60) }
                 notice = nil
             }
             if lid.needsSetup { lid.install() }
@@ -213,27 +217,28 @@ final class Engine {
             && lid.isEngaged
         bagSince = inBag ? min(bagSince ?? t, t) : nil
         let ours = isOn || lid.isEngaged
-        let hot = prefs.overheatProtection && Self.isHot(thermal: p.thermal, seriousSince: seriousSince,
-                                                         bagSince: bagSince, now: t,
-                                                         closedWithoutDisplay: p.isClosedWithoutDisplay)
+        // The overheat switch applies unless the lid is shut with no external display; then the check always applies.
+        let guarded = prefs.overheatProtection || p.isClosedWithoutDisplay
+        let hot = guarded && Self.isHot(thermal: p.thermal, seriousSince: seriousSince,
+                                        bagSince: bagSince, now: t, closedWithoutDisplay: p.isClosedWithoutDisplay)
         if hot, !hotEpisode {
             hotEpisode = true
             if ours { letGo(.hot, p) }
         } else if !hot {
             hotEpisode = false
         }
-        let low = prefs.lowBatteryProtection && Self.isLowBattery(p, threshold: prefs.lowBatteryPercent, was: lowEpisode)
+        let low = Self.isLowBattery(p, threshold: Self.lowBatteryPercent, was: lowEpisode)
         if low, !lowEpisode {
             lowEpisode = true
-            if isOn || lid.isEngaged { letGo(.lowBattery(p.batteryPercent ?? prefs.lowBatteryPercent), p) }
+            if isOn || lid.isEngaged { letGo(.lowBattery(p.batteryPercent ?? Self.lowBatteryPercent), p) }
         } else if !low {
             lowEpisode = false
         }
 
-        // 4. When unplugged: Turn off.
+        // 4. When unplugged: Turn Insomnia off.
         if unplugged, isOn, prefs.whenUnplugged == .turnOff {
             turnOff()
-            notice = Notice(text: "Turned off: your Mac was unplugged", isWarning: false)
+            notice = Self.unpluggedNotice
         }
 
         // 5. Lid mode.
@@ -261,25 +266,25 @@ final class Engine {
         armTimers(now: t, state: p)
     }
 
-    private enum Trip { case hot, lowBattery(Int) }
+    enum Trip { case hot, lowBattery(Int) }
 
+    static let unpluggedNotice = Notice(text: "Your Mac was unplugged, so Insomnia turned off", isWarning: false)
+
+    static func notice(for trip: Trip, slept: Bool) -> Notice {
+        let text = switch trip {
+        case .hot:
+            slept ? "Your Mac got hot, so Insomnia put it to sleep" : "Your Mac got hot, so Insomnia turned off"
+        case .lowBattery(let pct):
+            "Your battery fell to \(pct)%, so Insomnia " + (slept ? "put your Mac to sleep" : "turned off")
+        }
+        return Notice(text: text, isWarning: true)
+    }
+
+    /// A safety check tripped. Lid shut with no external display: sleep. Otherwise sleep only if nobody is using the Mac.
     private func letGo(_ trip: Trip, _ p: PowerState) {
-        let sleep: Bool
-        if p.isClosedWithoutDisplay {
-            sleep = true
-        } else {
-            switch prefs.tripAction {
-            case .sleep: sleep = true
-            case .turnOff: sleep = false
-            case .sleepIfIdle: sleep = power.idleSeconds >= Self.idleForSleep
-            }
-        }
+        let sleep = p.isClosedWithoutDisplay || power.idleSeconds >= Self.idleForSleep
         turnOff()
-        let verb = sleep ? "Slept" : "Turned off"
-        switch trip {
-        case .hot: notice = Notice(text: "\(verb) because your Mac got hot", isWarning: true)
-        case .lowBattery(let pct): notice = Notice(text: "\(verb): battery at \(pct)%", isWarning: true)
-        }
+        notice = Self.notice(for: trip, slept: sleep)
         unseenAlert = true
         if sleep { pendingSleep = true }
     }
@@ -322,7 +327,7 @@ final class Engine {
             guard let d, d > t else { return }
             next = next.map { min($0, d) } ?? d
         }
-        if prefs.overheatProtection, !hotEpisode {
+        if prefs.overheatProtection || p.isClosedWithoutDisplay, !hotEpisode {
             consider(seriousSince?.addingTimeInterval(p.isClosedWithoutDisplay ? Self.seriousWindowClosed
                                                                                : Self.seriousWindowOpen))
             consider(bagSince?.addingTimeInterval(Self.bagWindow))

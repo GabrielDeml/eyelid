@@ -1,4 +1,4 @@
-# Insomnia (docs/DESIGN.md). `make` builds; `make install` is the only target that uses sudo.
+# Insomnia. See docs/DESIGN.md. `make` only builds; `make install` and `make uninstall` use sudo.
 APP      := build/Insomnia.app
 DEST     := /Applications/Insomnia.app
 SNAPDIR  := build/snapshots
@@ -41,10 +41,10 @@ install: app
 	if [ -e "$(DEST)" ]; then sudo mv "$(DEST)" "$$T/previous.app"; fi; \
 	sudo mv "$$T/Insomnia.app" "$(DEST)"; \
 	if sudo launchctl print system/com.gdeml.Insomnia.helper >/dev/null 2>&1; then \
-		sudo launchctl kickstart -k system/com.gdeml.Insomnia.helper || echo "warning: couldn't restart the lid helper"; \
+		sudo launchctl kickstart -k system/com.gdeml.Insomnia.helper || echo "Warning: couldn't restart the lid helper. If lid mode fails, run: sudo launchctl kickstart -k system/com.gdeml.Insomnia.helper"; \
 	fi; \
-	if [ $$q -eq 3 ]; then open "$(DEST)"; echo "Installed $(DEST) and reopened it. Lid mode is set up from this copy only."; \
-	else echo "Installed $(DEST). Open it from /Applications; lid mode is set up from this copy only."; fi
+	if [ $$q -eq 3 ]; then open "$(DEST)"; echo "Installed $(DEST) and reopened it. Lid mode works only from this copy."; \
+	else echo "Installed $(DEST). Open it from Applications. Lid mode works only from this copy."; fi
 
 # Read-only lid-mode checks: signatures, pinned helper, install location, registration, flag.
 # `make lid-verify APP_TO_VERIFY=build/Insomnia.app` checks the build instead of the installed copy. Never uses sudo.
@@ -57,7 +57,7 @@ uninstall:
 	@q=0; scripts/quit-running.sh || q=$$?; if [ $$q -ne 0 ] && [ $$q -ne 3 ]; then echo "nothing removed"; exit 1; fi
 	@if [ -x "$(DEST)/Contents/MacOS/Insomnia" ]; then "$(DEST)/Contents/MacOS/Insomnia" --unregister-helper; fi
 	@if ! /usr/sbin/ioreg -r -c IOPMrootDomain -d 1 | grep -q '"SleepDisabled" = No'; then \
-		echo "SleepDisabled is still set. If nothing else should hold it, run: sudo pmset -a disablesleep 0"; fi
+		echo "Your Mac still can't sleep (SleepDisabled is set). If no other app should be holding it, run: sudo pmset -a disablesleep 0"; fi
 	@rm -f "$$HOME/Library/Application Support/Insomnia/lid-engaged" "$$HOME/Library/Application Support/Insomnia/control.sock"
 	sudo rm -rf "$(DEST)"
 

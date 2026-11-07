@@ -9,15 +9,16 @@ let arguments = CommandLine.arguments.filter { !$0.hasPrefix("-psn_") }   // old
 func printErr(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 
 let usage = """
-    Insomnia \(HelperInfo.version): keeps your Mac awake. A wide-awake moon in your menu bar.
+    Insomnia \(HelperInfo.version)
+    Keeps your Mac awake from the menu bar. Normally you open it from Finder.
 
-    Usage (the app is normally opened from Finder):
+    Usage:
       Insomnia --gui                  Start the app from a terminal
-      Insomnia --version
-      Insomnia --helper-status        Exit 0 if the lid-mode helper is registered, 1 if not
-      Insomnia --unregister-helper    Remove the lid-mode helper registration (make uninstall)
-      Insomnia --export-icon <dir>    Write AppIcon.iconset PNGs (scripts/build.sh)
-      Insomnia --snapshot <dir>       Render the panel and menu bar glyphs to PNGs (debug builds)
+      Insomnia --version              Print the version
+      Insomnia --helper-status        Print the lid helper's status; exit 0 if registered, 1 if not
+      Insomnia --unregister-helper    Quit Insomnia and unregister the lid helper (used by make uninstall)
+      Insomnia --export-icon <dir>    Write AppIcon.iconset PNGs (used by scripts/build.sh)
+      Insomnia --snapshot <dir>       Render the panel, Settings and menu bar icons to PNGs (debug builds only)
     """
 
 let command = arguments.count > 1 ? arguments[1] : nil
@@ -46,7 +47,7 @@ case "--snapshot":
     guard let operand else { printErr("--snapshot needs a directory"); exit(2) }
     exit(MainActor.assumeIsolated { Snapshot.run(to: URL(fileURLWithPath: operand, isDirectory: true)) } ? 0 : 1)
     #else
-    printErr("--snapshot is only in debug builds (make snapshot)")
+    printErr("--snapshot only works in debug builds. Use make snapshot.")
     exit(2)
     #endif
 default:

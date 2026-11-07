@@ -91,6 +91,9 @@ final class HelperClient: HelperClienting {
         return Self.map(service.status)
     }
 
+    /// Shown under the lid switch when registering the lid helper fails.
+    static func registerError(code: Int) -> String { "Couldn't set up the lid helper (error \(code))." }
+
     static func map(_ status: SMAppService.Status) -> LidSetup {
         switch status {
         case .enabled: .ready
@@ -112,7 +115,7 @@ final class HelperClient: HelperClienting {
             if status != .requiresApproval && status != .enabled {
                 let ns = error as NSError
                 log.error("register failed: \(ns.domain, privacy: .public) \(ns.code)")
-                return (Self.map(status), "Couldn't set up lid mode (\(ns.code)).")
+                return (Self.map(status), Self.registerError(code: ns.code))
             }
         }
         return (Self.map(service.status), nil)

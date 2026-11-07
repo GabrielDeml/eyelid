@@ -12,7 +12,7 @@ enum UnpluggedAction: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
-    /// Without lid mode, "Sleep with lid closed" is the same as "Keep going": offered and shown that way.
+    /// Without lid mode, "Sleep with lid closed" is the same as "Stay awake", so it is offered and shown that way.
     static func choices(lidMode: Bool) -> [UnpluggedAction] { lidMode ? allCases : [.keepGoing, .turnOff] }
     static func shown(_ value: UnpluggedAction, lidMode: Bool) -> UnpluggedAction {
         !lidMode && value == .sleepWhenLidCloses ? .keepGoing : value
@@ -20,35 +20,18 @@ enum UnpluggedAction: String, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .keepGoing: "Keep going"
+        case .keepGoing: "Stay awake"
         case .sleepWhenLidCloses: "Sleep with lid closed"
-        case .turnOff: "Turn off"
-        }
-    }
-}
-
-/// What a safety protection does when it trips with the lid open (with the lid shut it always sleeps the Mac).
-enum TripAction: String, CaseIterable, Identifiable, Sendable {
-    /// Sleep if nobody has touched the Mac for `Engine.idleForSleep`, otherwise turn Insomnia off.
-    case sleepIfIdle
-    case sleep
-    case turnOff
-
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .sleepIfIdle: "Sleep if idle, otherwise turn off"
-        case .sleep: "Always sleep"
         case .turnOff: "Turn Insomnia off"
         }
     }
 }
 
-/// What clicking the moon does (the other button does the other thing).
+/// What clicking the menu bar icon does (right-click does the other).
 enum ClickAction: String, CaseIterable, Identifiable, Sendable {
     case openPanel, toggle
     var id: String { rawValue }
-    var title: String { self == .openPanel ? "Opens the panel" : "Turns Insomnia on or off" }
+    var title: String { self == .openPanel ? "Open the panel" : "Turn Insomnia on or off" }
 }
 
 /// Everything the user can set, in UserDefaults. SwiftUI binds to it directly; the engine is told through `onChange`.
@@ -58,7 +41,8 @@ enum ClickAction: String, CaseIterable, Identifiable, Sendable {
 final class Preferences {
     static let shared = Preferences()
 
-    nonisolated static let lowBatteryRange = 11...50
+    /// "Turn Insomnia off after" choices, in minutes (0 = never).
+    nonisolated static let durationChoices = [60, 120, 240, 480]
 
     @ObservationIgnored private let defaults: UserDefaults
     /// Called after any change. The engine reconciles.
@@ -70,20 +54,11 @@ final class Preferences {
     var keepScreenOn: Bool { didSet { save(keepScreenOn, Key.keepScreenOn) } }
     var closedLidMode: Bool { didSet { save(closedLidMode, Key.closedLidMode) } }
     var whenUnplugged: UnpluggedAction { didSet { save(whenUnplugged.rawValue, Key.whenUnplugged) } }
-    /// Minutes turning Insomnia on keeps it awake for; 0 = until turned off. (Key name predates the switch.)
+    /// Turn Insomnia off after this many minutes; 0 = never. (The key name predates the switch.)
     var powerButtonMinutes: Int { didSet { save(powerButtonMinutes, Key.powerButtonMinutes) } }
     var clickAction: ClickAction { didSet { save(clickAction.rawValue, Key.clickAction) } }
-
+    /// Everywhere except lid shut with no external display, where overheat protection always applies.
     var overheatProtection: Bool { didSet { save(overheatProtection, Key.overheatProtection) } }
-    var lowBatteryProtection: Bool { didSet { save(lowBatteryProtection, Key.lowBatteryProtection) } }
-    private var lowBatteryStore: Int
-    /// Clamped to `lowBatteryRange`: never at or below the helper's own 10% backstop.
-    var lowBatteryPercent: Int {
-        get { lowBatteryStore }
-        set { lowBatteryStore = Self.clampBattery(newValue); save(lowBatteryStore, Key.lowBatteryPercent) }
-    }
-    static func clampBattery(_ v: Int) -> Int { min(lowBatteryRange.upperBound, max(lowBatteryRange.lowerBound, v)) }
-    var tripAction: TripAction { didSet { save(tripAction.rawValue, Key.tripAction) } }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -94,12 +69,15 @@ final class Preferences {
         keepScreenOn = bool(Key.keepScreenOn, true)
         closedLidMode = bool(Key.closedLidMode, false)
         whenUnplugged = UnpluggedAction(rawValue: defaults.string(forKey: Key.whenUnplugged) ?? "") ?? .sleepWhenLidCloses
-        powerButtonMinutes = max(0, int(Key.powerButtonMinutes, 0))
+        powerButtonMinutes = Self.snapDuration(int(Key.powerButtonMinutes, 0))
         clickAction = ClickAction(rawValue: defaults.string(forKey: Key.clickAction) ?? "") ?? .openPanel
         overheatProtection = bool(Key.overheatProtection, true)
-        lowBatteryProtection = bool(Key.lowBatteryProtection, true)
-        lowBatteryStore = Self.clampBattery(int(Key.lowBatteryPercent, 12))
-        tripAction = TripAction(rawValue: defaults.string(forKey: Key.tripAction) ?? "") ?? .sleepIfIdle
+    }
+
+    /// A stored duration that isn't one of `durationChoices` (an older version's) becomes the next choice up, or the
+    /// longest one, so the picker always has a selection and a timed session stays timed.
+    nonisolated static func snapDuration(_ minutes: Int) -> Int {
+        minutes <= 0 ? 0 : durationChoices.first { $0 >= minutes } ?? durationChoices.last ?? 0
     }
 
     private func save(_ value: Any?, _ key: String) {
@@ -116,24 +94,12 @@ final class Preferences {
         static let powerButtonMinutes = "powerButtonMinutes"
         static let clickAction = "clickAction"
         static let overheatProtection = "overheatProtection"
-        static let lowBatteryProtection = "lowBatteryProtection"
-        static let lowBatteryPercent = "lowBatteryPercent"
-        static let tripAction = "tripAction"
     }
 }
 
-/// "1h 30m", "45m", "2h".
 enum DurationText {
-    static func short(minutes m: Int) -> String {
-        if m < 60 { return "\(m)m" }
-        return m % 60 == 0 ? "\(m / 60)h" : "\(m / 60)h \(m % 60)m"
-    }
-
-    /// Time left, rounded up to the minute: "1h 42m left", "1m left".
-    static func left(until end: Date, now: Date) -> String {
-        let minutes = max(1, Int((end.timeIntervalSince(now) / 60).rounded(.up)))
-        return short(minutes: minutes) + " left"
-    }
+    /// Whole hours, spelled out: "1 hour", "8 hours".
+    static func hours(minutes m: Int) -> String { m == 60 ? "1 hour" : "\(m / 60) hours" }
 
     static func clock(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .shortened)

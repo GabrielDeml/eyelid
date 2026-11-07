@@ -35,6 +35,8 @@ final class LidController: LidControlling {
     }
 
     private(set) var setup: LidSetup
+    /// `install()` is registering the lid helper right now.
+    private(set) var installing = false
     private(set) var state: State = .off
     private(set) var setupError: String?
 
@@ -117,9 +119,11 @@ final class LidController: LidControlling {
 
     func install() {
         setupError = nil
+        installing = true
         Task {
             let result = await client.install()
             setup = result.setup
+            installing = false
             setupError = result.error
             if result.setup == .needsApproval || result.setup == .ready {
                 prefs.helperRegisteredCDHash = await client.bundledCDHash()
@@ -283,7 +287,7 @@ final class LidController: LidControlling {
             startHeartbeat()
             endActivity()
             activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
-                                                             reason: "Lid mode: answering the helper's heartbeat")
+                                                             reason: "Insomnia is keeping your Mac awake with the lid closed")
             if closedWithoutDisplay { await client.pmset("displaysleepnow") }
         case .foreignFlag:
             state = .failed(.foreignFlag)
