@@ -57,7 +57,7 @@ final class Preferences {
     /// Turn Insomnia off after this many minutes; 0 = never. (The key name predates the switch.)
     var powerButtonMinutes: Int { didSet { save(powerButtonMinutes, Key.powerButtonMinutes) } }
     var clickAction: ClickAction { didSet { save(clickAction.rawValue, Key.clickAction) } }
-    /// Everywhere except lid shut with no external display, where overheat protection always applies.
+    /// Ignored while lid mode keeps the Mac awake with the lid shut and no external display: then the check always applies.
     var overheatProtection: Bool { didSet { save(overheatProtection, Key.overheatProtection) } }
 
     init(defaults: UserDefaults = .standard) {

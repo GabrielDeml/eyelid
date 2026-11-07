@@ -217,9 +217,7 @@ final class Engine {
             && lid.isEngaged
         bagSince = inBag ? min(bagSince ?? t, t) : nil
         let ours = isOn || lid.isEngaged
-        // The overheat switch applies unless the lid is shut with no external display; then the check always applies.
-        let guarded = prefs.overheatProtection || p.isClosedWithoutDisplay
-        let hot = guarded && Self.isHot(thermal: p.thermal, seriousSince: seriousSince,
+        let hot = overheatGuarded(p) && Self.isHot(thermal: p.thermal, seriousSince: seriousSince,
                                         bagSince: bagSince, now: t, closedWithoutDisplay: p.isClosedWithoutDisplay)
         if hot, !hotEpisode {
             hotEpisode = true
@@ -230,7 +228,7 @@ final class Engine {
         let low = Self.isLowBattery(p, threshold: Self.lowBatteryPercent, was: lowEpisode)
         if low, !lowEpisode {
             lowEpisode = true
-            if isOn || lid.isEngaged { letGo(.lowBattery(p.batteryPercent ?? Self.lowBatteryPercent), p) }
+            if ours { letGo(.lowBattery(p.batteryPercent ?? Self.lowBatteryPercent), p) }
         } else if !low {
             lowEpisode = false
         }
@@ -318,6 +316,15 @@ final class Engine {
         return was ? pct < threshold + batteryHysteresis : pct <= threshold
     }
 
+    /// Whether the overheat check applies. The switch decides, except when lid mode keeps the Mac awake with the lid
+    /// shut and no external display: then the check always applies. Without lid mode, a shut lid sleeps the Mac anyway,
+    /// so the switch still decides. "Wanted and ready" rather than "engaged": a trip releases the lid, and the check
+    /// must not lapse (and re-arm lid mode) because of its own release.
+    private func overheatGuarded(_ p: PowerState) -> Bool {
+        prefs.overheatProtection
+            || (p.isClosedWithoutDisplay && (lid.isEngaged || (prefs.closedLidMode && lid.isReady)))
+    }
+
     // MARK: Timers
 
     private func armTimers(now t: Date, state p: PowerState) {
@@ -327,7 +334,7 @@ final class Engine {
             guard let d, d > t else { return }
             next = next.map { min($0, d) } ?? d
         }
-        if prefs.overheatProtection || p.isClosedWithoutDisplay, !hotEpisode {
+        if overheatGuarded(p), !hotEpisode {
             consider(seriousSince?.addingTimeInterval(p.isClosedWithoutDisplay ? Self.seriousWindowClosed
                                                                                : Self.seriousWindowOpen))
             consider(bagSince?.addingTimeInterval(Self.bagWindow))

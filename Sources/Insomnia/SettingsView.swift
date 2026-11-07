@@ -104,7 +104,7 @@ struct SettingsView: View {
 
     private func overheatNote(_ p: PowerState) -> String {
         let s = "If no one is using your Mac, Insomnia puts it to sleep instead."
-        return p.hasLid ? s + " With the lid closed and no external display, this can't be turned off." : s
+        return p.hasLid ? s + " While it stays awake with the lid closed, this can't be turned off." : s
     }
 
     private func setOpenAtLogin(_ on: Bool) {

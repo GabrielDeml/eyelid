@@ -367,6 +367,27 @@ struct EngineSafetyTests {
         #expect(release != nil && sleep != nil && release! < sleep!)
     }
 
+    /// Without lid mode, a shut lid sleeps the Mac by itself: the switch still decides.
+    @Test func overheatSwitchAppliesWithTheLidClosedWithoutLidMode() {
+        let r = Rig { $0.prefs.overheatProtection = false; $0.power.idleSeconds = 600 }
+        r.engine.toggle()
+        r.power.set { $0.isLidClosed = true }
+        r.power.set { $0.thermal = .critical }
+        #expect(r.engine.isOn && r.sleeps == 0 && r.engine.notice == nil)
+    }
+
+    /// The trip releases the lid; the forced check must not lapse with it and re-engage lid mode.
+    @Test func forcedCheckSurvivesItsOwnRelease() {
+        let r = Rig { $0.prefs.overheatProtection = false; $0.prefs.closedLidMode = true }
+        r.engine.toggle()
+        r.power.set { $0.isLidClosed = true }
+        r.power.set { $0.thermal = .critical }
+        #expect(!r.engine.isOn)
+        r.engine.toggle()
+        r.engine.reconcile()
+        #expect(r.engine.isOn && r.engine.hotEpisode && r.lid.desired == false)
+    }
+
     @Test func overheatSwitchStillAppliesWithAnExternalDisplay() {
         let r = Rig { $0.prefs.overheatProtection = false; $0.power.state.externalDisplays = 1 }
         r.engine.toggle()

@@ -32,8 +32,8 @@ for two minutes, and turns itself off if someone has.
 external display, or five minutes otherwise. In lid mode with the lid closed and no external display, five minutes at
 the level below that also counts, because that usually means your Mac is in a bag.
 
-You can switch off the heat check in Settings for long jobs with the lid open. With the lid closed and no external
-display it always applies. The battery check can't be switched off.
+You can switch off the heat check in Settings for long jobs with the lid open. While Insomnia keeps your Mac awake with
+the lid closed (and no external display), it always applies. The battery check can't be switched off.
 
 Each check acts once, when its condition starts, so you can turn Insomnia back on afterwards if you mean to. The panel
 shows a short note saying what happened, and the icon shows a ! until you open the panel.

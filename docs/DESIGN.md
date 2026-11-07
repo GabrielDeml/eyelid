@@ -86,7 +86,8 @@ There are two protections and neither has a threshold to set.
 **Overheat.** The Mac counts as hot when macOS reports `.critical`, or `.serious` for 60 s with the lid closed and no
 external display (5 minutes otherwise), or `.fair` for 5 minutes while lid mode is engaged with the lid closed and no
 external display. The last one is the bag rule. Overheat protection applies when *Turn Insomnia off if your Mac gets
-hot* is on, and it always applies when the lid is closed with no external display, whatever the switch says.
+hot* is on, and it always applies when lid mode is on (engaged, or wanted with the helper ready) with the lid closed and no
+external display, whatever the switch says. Without lid mode a closed lid sleeps the Mac anyway, so the switch decides.
 
 **Low battery.** On battery at or below 12% (`Engine.lowBatteryPercent`). It clears at 15% or on AC. An unknown
 battery percentage never trips it. It can't be switched off.
@@ -126,7 +127,7 @@ settings, so a change shows up in both places. Explanations are the control's ow
    or *Works only when installed in Applications*, *Needs a signed build* or *Missing from this build*. A ready
    helper shows no row. A Mac with a battery but no lid gets a group with just *When unplugged*.
 3. *Turn Insomnia off if your Mac gets hot*, described as *If no one is using your Mac, Insomnia puts it to sleep
-   instead. With the lid closed and no external display, this can't be turned off.* The second sentence appears only on
+   instead. While it stays awake with the lid closed, this can't be turned off.* The second sentence appears only on
    a Mac with a lid. Then *Open at
    login*, which shows *Couldn't add Insomnia to Login Items (error N).* under it if registering fails.
 
@@ -246,8 +247,8 @@ turned off).
 Pass:
 1. Edges: lid opened → clear `latched`; AC→battery → unplugged edge.
 2. Expiry: `endsAt <= now` → off.
-3. Safety, as described under Safety. Overheat is checked when its switch is on or the lid is closed with no external
-   display; low battery is always checked. Each trips on entry and acts only while `isOn` or lid engaged. Timers are
+3. Safety, as described under Safety. Overheat is checked when its switch is on, or lid mode is on with the lid closed and
+   no external display; low battery is always checked. Each trips on entry and acts only while `isOn` or lid engaged. Timers are
    armed for the 60 s and 5 minute windows.
 4. Unplugged edge with *Turn Insomnia off* → off, with the unplugged notice.
 5. Lid wanted = `isOn && closedLidMode && hasLid && helperReady && !hotEpisode && !lowEpisode && !latched
