@@ -1,24 +1,25 @@
-# Insomnia design
+# Eyelid design
 
 Status: implemented. This document describes the app as it is now. Overheat and low-battery protection are fixed
 rules rather than settings, and the few settings there are live in one Settings window.
 
 ## Why
 
-Insomnia grew to ~30,400 lines: three personality tiers, an 886-line eye renderer, a Dock tile, rules, "While…",
-"Why awake?", a hotkey, stats, a socket CLI, a URL scheme, a 5-tab Settings window, two lid-mode backends and 30 test
-files. What's wanted is an on/off switch and three settings. This rewrite gets back to that.
+The first version (then called Insomnia) grew to ~30,400 lines: three personality tiers, an 886-line eye renderer, a
+Dock tile, rules, "While…", "Why awake?", a hotkey, stats, a socket CLI, a URL scheme, a 5-tab Settings window, two
+lid-mode backends and 30 test files. What's wanted is an on/off switch and three settings. This rewrite gets back to
+that.
 
 ## The product
 
-A menu bar moon. Clicking it opens a small panel, and right-clicking it turns Insomnia on or off. Settings can swap
+A menu bar moon. Clicking it opens a small panel, and right-clicking it turns Eyelid on or off. Settings can swap
 the two.
 
 ```
 ╭──────────────────────────────────────╮
 │ Awake                        (  ━━●) │   "Awake" or "Off", and the switch
 │ Until 3:40 PM                        │   only for a timed session
-│ ⚠ Your Mac got hot, so Insomnia   ✕  │   only after a safety action or an unplug
+│ ⚠ Your Mac got hot, so Eyelid   ✕  │   only after a safety action or an unplug
 │   turned off                         │
 │ ──────────────────────────────────── │
 │ Keep screen on                 (━●)  │
@@ -27,7 +28,7 @@ the two.
 │ Settings                             │
 │ When unplugged  Sleep with lid closed│   MacBooks only
 ├──────────────────────────────────────┤
-│ Settings…              Quit Insomnia │
+│ Settings…              Quit Eyelid │
 ╰──────────────────────────────────────╯
 ```
 
@@ -37,11 +38,11 @@ On a desktop Mac the panel is just the header and *Keep screen on*.
   it adds something. A timed session shows *Until 3:40 PM*. If a release failed and sleep is still off, the header
   reads *Off* with *Your Mac still can't sleep* under it. There is no mode line and no countdown; the menu bar icon
   already shows the mode.
-- **The switch** turns Insomnia on until you turn it off, or for the *Turn Insomnia off after* time in Settings.
+- **The switch** turns Eyelid on until you turn it off, or for the *Turn Eyelid off after* time in Settings.
   Return toggles it too, and so does a right-click on the moon. There are no timer buttons in the panel.
 - **Keep screen on** (default on) also holds the display awake.
-- **Stay awake with lid closed** (default off) sets the system's `SleepDisabled` flag while Insomnia is on. Turning it
-  on while Insomnia is off also turns Insomnia on, with the same *Turn Insomnia off after* limit as the main switch,
+- **Stay awake with lid closed** (default off) sets the system's `SleepDisabled` flag while Eyelid is on. Turning it
+  on while Eyelid is off also turns Eyelid on, with the same *Turn Eyelid off after* limit as the main switch,
   so the switch always means what it says. The first time, it registers the lid helper and opens System Settings ▸
   Login Items. The switch stays on with the caption *Needs your approval. Open System Settings*. The app re-checks
   every 2 s for 3 minutes, and whenever the panel or Settings opens, and lid mode engages once the helper is allowed.
@@ -51,8 +52,8 @@ On a desktop Mac the panel is just the header and *Keep screen on*.
     the lid open continues. If the lid is already shut when the power goes, the Mac sleeps, unless someone is using an
     external display. This choice is offered
     only while the lid switch is on. Otherwise it would behave like *Stay awake*, and the picker shows it that way.
-  - *Turn Insomnia off*: Insomnia turns off the moment the adapter is unplugged. Turning it on again on battery works.
-- **No Sleep Now button.** While lid mode is engaged, macOS blocks Sleep in the Apple menu. Turn Insomnia off first,
+  - *Turn Eyelid off*: Eyelid turns off the moment the adapter is unplugged. Turning it on again on battery works.
+- **No Sleep Now button.** While lid mode is engaged, macOS blocks Sleep in the Apple menu. Turn Eyelid off first,
   with one click or a right-click on the moon.
 
 ### Captions under the lid switch
@@ -75,7 +76,7 @@ The rest show only while the switch is on:
   Mac. Try Again*, *Your Mac got hot. Try Again* (the helper's heat backstop), *Couldn't turn off sleep. Try Again*,
   *Lost contact with the lid helper. Try Again* and *Something else turned sleep back on. Try Again* (all warnings,
   one per `LidController.Failure`)
-- While Insomnia is on: *Paused while your Mac is hot*, *Paused while the battery is low* (warnings) and *Paused while
+- While Eyelid is on: *Paused while your Mac is hot*, *Paused while the battery is low* (warnings) and *Paused while
   on battery* (the *Sleep with lid closed* rule)
 
 The captions are static values on `PanelState`, and `make snapshot` renders those same values, so the pictures always
@@ -110,23 +111,23 @@ blank a screen someone is looking at.
 
 **Overheat.** The Mac counts as hot when macOS reports `.critical`, or `.serious` for 60 s while shut in (5 minutes
 otherwise), or `.fair` for 5 minutes while lid mode is engaged and the Mac is unattended. The last one is the bag rule.
-Its window starts when the unattended condition starts. Overheat protection applies when *Turn Insomnia off if your Mac
+Its window starts when the unattended condition starts. Overheat protection applies when *Turn Eyelid off if your Mac
 gets hot* is on. It always applies, whatever the switch says, when lid mode is on (engaged, or wanted with the helper
 ready) and the Mac is shut in. Without lid mode a closed lid sleeps the Mac anyway, so the switch decides.
 
 **Low battery.** On battery at or below 12% (`Engine.lowBatteryPercent`). It clears at 15% or on AC. An unknown
 battery percentage never trips it. It can't be switched off.
 
-Each protection trips once, when its condition starts, so you can turn Insomnia back on deliberately afterwards. It
-acts only if Insomnia is holding the Mac awake (on, or lid mode engaged). With the lid closed and no external display
+Each protection trips once, when its condition starts, so you can turn Eyelid back on deliberately afterwards. It
+acts only if Eyelid is holding the Mac awake (on, or lid mode engaged). With the lid closed and no external display
 it sleeps the Mac at once. Otherwise it sleeps the Mac if nobody has used it for 2 minutes (HID idle time), and turns
-Insomnia off if somebody has.
+Eyelid off if somebody has.
 
 - "Sleep now" means drop the assertions, release the flag, read it back as 0, then run `pmset sleepnow` (which is
   blocked while the flag is 1).
 - While a condition is still active, lid mode stays paused and the lid caption says *Paused while your Mac is hot* or
   *Paused while the battery is low*. Plain keep-awake can be turned on again.
-- The Mac's firmware still shuts down at a critical temperature whatever Insomnia does.
+- The Mac's firmware still shuts down at a critical temperature whatever Eyelid does.
 - The helper's own backstops are not settings, and they hold whatever the app does (see Security):
   - **Battery.** At 10% or less on battery with the flag set, whoever set it, it resets the flag and sleeps the Mac
     regardless of the lid. The app's 12% rule fires first.
@@ -152,35 +153,35 @@ Insomnia off if somebody has.
     external display. Trade-off: if the app crashes while someone types at a DisplayLink screen with the lid shut, the
     helper sleeps the Mac.
 - The signal is a one-line notice in the panel and a "!" on the moon until the panel is opened. There are no
-  notifications. The notices are *Your Mac got hot, so Insomnia put it to sleep*, *Your Mac got hot, so Insomnia
-  turned off*, *Your battery fell to 12%, so Insomnia put your Mac to sleep* and *Your battery fell to 12%, so
-  Insomnia turned off*. Unplugging with *Turn Insomnia off* selected leaves the informational notice *Your Mac was
-  unplugged, so Insomnia turned off*, which doesn't add the "!".
+  notifications. The notices are *Your Mac got hot, so Eyelid put it to sleep*, *Your Mac got hot, so Eyelid
+  turned off*, *Your battery fell to 12%, so Eyelid put your Mac to sleep* and *Your battery fell to 12%, so
+  Eyelid turned off*. Unplugging with *Turn Eyelid off* selected leaves the informational notice *Your Mac was
+  unplugged, so Eyelid turned off*, which doesn't add the "!".
 
 ### Settings window
 
-One window titled *Insomnia Settings*, 480 pt wide, holding a grouped `Form` with three groups and no section headers
+One window titled *Eyelid Settings*, 480 pt wide, holding a grouped `Form` with three groups and no section headers
 or tabs. It opens from *Settings…* in the panel footer, or with ⌘, from the app menu. The panel's rows are the same
 settings, so a change shows up in both places. Explanations are the control's own description line, not separate rows.
 
-1. *Turn Insomnia off after* (Never, 1 hour, 2 hours, 4 hours or 8 hours). *Keep screen on*. *Click the menu bar icon
-   to* (Open the panel, or Turn Insomnia on or off), described as *Right-click to turn Insomnia on or off.* or
+1. *Turn Eyelid off after* (Never, 1 hour, 2 hours, 4 hours or 8 hours). *Keep screen on*. *Click the menu bar icon
+   to* (Open the panel, or Turn Eyelid on or off), described as *Right-click to turn Eyelid on or off.* or
    *Right-click to open the panel.*
-2. MacBooks only. *Stay awake with lid closed*, described as *While Insomnia is on, Sleep in the Apple menu doesn't
-   work.* Then *When unplugged* (on a Mac with a battery), described as *At 12% battery, Insomnia turns off or puts
+2. MacBooks only. *Stay awake with lid closed*, described as *While Eyelid is on, Sleep in the Apple menu doesn't
+   work.* Then *When unplugged* (on a Mac with a battery), described as *At 12% battery, Eyelid turns off or puts
    your Mac to sleep.* A *Lid helper* row appears only when the helper needs something, with its status in
    secondary text and a button where there is one: *Couldn't turn sleep back on* with **Reset with Password…**, *Not
    set up* with **Set Up…** (only while the lid switch is on; *Setting up* with no button while it registers), *Needs your approval* with **Open System Settings**,
    or *Works only when installed in Applications*, *Needs a signed build* or *Missing from this build*. A ready
    helper shows no row. A Mac with a battery but no lid gets a group with just *When unplugged*.
-3. *Turn Insomnia off if your Mac gets hot*, described as *If no one is using your Mac, Insomnia puts it to sleep
+3. *Turn Eyelid off if your Mac gets hot*, described as *If no one is using your Mac, Eyelid puts it to sleep
    instead. While it stays awake with the lid closed, this can't be turned off.* The second sentence appears only on
    a Mac with a lid. Then *Open at
-   login*, which shows *Couldn't add Insomnia to Login Items (error N).* under it if registering fails.
+   login*, which shows *Couldn't add Eyelid to Login Items (error N).* under it if registering fails.
 
-There is no glyph legend and no Quit button; *Quit Insomnia* is in the panel footer and the app menu.
+There is no glyph legend and no Quit button; *Quit Eyelid* is in the panel footer and the app menu.
 
-A stored *Turn Insomnia off after* value that isn't one of the choices (an older version allowed any number of
+A stored *Turn Eyelid off after* value that isn't one of the choices (an older version allowed any number of
 minutes) rounds up to the next choice, or down to 8 hours if it is longer, so the picker always has a selection and a
 timed session stays timed.
 
@@ -190,9 +191,9 @@ One term per concept. The root daemon is "the lid helper" everywhere a user can 
 with lid closed" in the app; "lid mode" is used only in the README, these docs and the code. The machine is "your Mac".
 Caption fragments have no closing period, unless a link follows, in which case the sentence before the link ends with
 one. Link actions are Title Case verbs (*Try Again*, *Set Up…*, *Open System Settings*, *Reset with Password…*), with
-an ellipsis when they lead to another prompt. Notices take the form "<cause>, so Insomnia <result>". Error codes go in
+an ellipsis when they lead to another prompt. Notices take the form "<cause>, so Eyelid <result>". Error codes go in
 parentheses as "(error N)". The state words "Awake" and "Off" are a deliberate pairing. "Awake" describes the Mac and "Off"
-describes Insomnia, because "Asleep" would be wrong while the Mac is plainly running.
+describes Eyelid, because "Asleep" would be wrong while the Mac is plainly running.
 
 ### Menu bar moon (template image)
 
@@ -206,11 +207,11 @@ Each mode has its own silhouette, so it reads at 16 pt without colour:
 | **Awake with lid closed** (lid mode engaged) | **solid** crescent with the eye knocked out, **open-laptop** badge |
 | **Needs attention** (safety tripped, lid mode failed or stuck, waiting for approval) | a small **"!"** under the badge (the mode stays readable) |
 
-The tooltip is the state in a sentence: *Insomnia is on until 3:40 PM*, *Insomnia is on*, *Insomnia is off*, or *Your
+The tooltip is the state in a sentence: *Eyelid is on until 3:40 PM*, *Eyelid is on*, *Eyelid is off*, or *Your
 Mac still can't sleep* when a release failed. A second line adds the current notice, or, when the "!" is showing for
 another reason, what needs attention: *The lid helper needs your approval in System Settings*, or the lid caption the
 panel would show, without its final period. The same text is the button's accessibility value, and
-the image's accessibility description names the mode ("Insomnia awake, screen on", plus ", needs attention").
+the image's accessibility description names the mode ("Eyelid awake, screen on", plus ", needs attention").
 A timer adds nothing to the glyph, and the panel doesn't repeat the glyph (the moon sits right above it). Geometry
 starts from the old `MenuBarMoon` and is checked in `make snapshot` at 1×, 2× and 8×.
 
@@ -229,7 +230,7 @@ Captions are 11 pt and hang under their row on the same edge, wrapping to at mos
 captions get a triangle or octagon icon. A caption's action is part of the same text, in the system link colour, so it
 wraps with the message; non-breaking spaces keep the link's own words together, and the pointer becomes a hand on
 macOS 15 and later. A notice sits under the header with an info or warning icon and a ✕ to dismiss it. A full-bleed
-hairline and a 36 pt footer with quiet text buttons (*Settings…*, *Quit Insomnia*) close the panel.
+hairline and a 36 pt footer with quiet text buttons (*Settings…*, *Quit Eyelid*) close the panel.
 
 Amber and indigo only tint switches and are never used as text. Warning and danger text use `warningText` and
 `dangerText`, which hold 4.5:1 at 11 pt in light and dark. There is no `.glassEffect` and no material on content. The
@@ -243,13 +244,13 @@ Personalities and quips, animated eyes, Dock tile, rules, While…, Until…, Wh
 welcome/epic cards, the 5-tab Settings window, About, Sleep Now, the ∞ chip, the timer chips and the big power button, CLI + control socket, URL scheme, sudoers fallback,
 `docs/{PRODUCT,UX,CLOSED_LID,README}.md`, `ARCHITECTURE.md`, review logs, `scripts/lid-tests.md`, the safety
 trip-action picker, the low-battery threshold and its switch, the panel's mode line and countdown, and the Settings
-glyph legend and Quit button. Raycast can come later as a 3-verb `insomnia://on|off|toggle` scheme (never lid mode),
+glyph legend and Quit button. Raycast can come later as a 3-verb `eyelid://on|off|toggle` scheme (never lid mode),
 ~30 lines.
 
 ## Architecture
 
 ```
-Sources/Insomnia/                    (3,048 lines)
+Sources/Eyelid/                    (3,048 lines)
   main.swift          argv: --gui, --version, --helper-status, --unregister-helper, --export-icon, --snapshot (DEBUG).
                       Unknown flag or a terminal launch → usage, exit 2. Else run the app.
   AppDelegate.swift   single instance; SIGTERM → normal quit; .terminateLater quit that releases lid mode first
@@ -267,9 +268,9 @@ Sources/Insomnia/                    (3,048 lines)
   Theme.swift         colour, type and metric tokens; QuietButtonStyle
   SettingsView.swift  the one-page Settings window
   Snapshot.swift      DEBUG: panel states, the Settings window, glyphs and app icon to PNG
-Sources/InsomniaHelper/   root daemon: the flag, its resets, the battery and heat backstops (see Security)
-Sources/InsomniaShared/   XPC protocol, identifiers, requirements, the installed-app pin, helper policy, IOPS/IORegistry reads
-Tests/InsomniaTests/      Engine (fakes), LidController (fake helper), helper policy, the pin, power parsing
+Sources/EyelidHelper/   root daemon: the flag, its resets, the battery and heat backstops (see Security)
+Sources/EyelidShared/   XPC protocol, identifiers, requirements, the installed-app pin, helper policy, IOPS/IORegistry reads
+Tests/EyelidTests/      Engine (fakes), LidController (fake helper), helper policy, the pin, power parsing
 ```
 
 **The helper is the root-owned safety code; change it only with this document.** The security pass (see Security)
@@ -302,9 +303,9 @@ Pass:
    engaged. Timers are armed for the 60 s and 5 minute windows. The bag rule uses *unattended*. While lid mode is
    engaged the 5 s lid poll also re-runs the pass, so idle time crossing 2 minutes is noticed. A trip sleeps the Mac
    if it is closed with no external display at all, or if nobody has used it for 2 minutes (checked once, at the
-   trip). Otherwise it turns Insomnia off. The release that follows then sleeps only an unattended Mac, so the notice
+   trip). Otherwise it turns Eyelid off. The release that follows then sleeps only an unattended Mac, so the notice
    tells the truth.
-4. Unplugged edge with *Turn Insomnia off* → off, with the unplugged notice.
+4. Unplugged edge with *Turn Eyelid off* → off, with the unplugged notice.
 5. Lid wanted = `isOn && closedLidMode && hasLid && helperReady && !hotEpisode && !lowEpisode && !latched
    && !(onBattery && whenUnplugged == .sleepWhenLidCloses)`. If lid mode drops for a guard or the unplugged rule
    while the lid is shut, the Mac sleeps if unattended (the follow-up `sleepnow` after the release, or the safety
@@ -312,7 +313,7 @@ Pass:
    `latched = true` so a DarkWake or re-plug inside a bag can't re-arm it. Opening the lid or any user action clears
    it. Publish only on change.
 6. Assertions: system = `isOn`; display = `isOn && keepScreenOn && !(lidEngaged && lidClosed && noExternalDisplay)`.
-   The assertion reason is "Insomnia is keeping your Mac awake".
+   The assertion reason is "Eyelid is keeping your Mac awake".
 7. A pending safety sleep runs after the lid release queued above.
 8. One one-shot `Timer` (RunLoop.main, `.common`) at the next deadline; re-armed on didWake and NSSystemClockDidChange.
 
@@ -358,7 +359,7 @@ Pass:
 - **`sleepNow()`**: release, read back 0, `/usr/bin/pmset sleepnow`.
 - **`.stuck`** (flag still 1 after 2 s, 15 s after a lost helper): danger caption with **Reset with Password…** (an
   osascript admin prompt running `pmset -a disablesleep 0`). Re-checked every 10 s; clears itself when the flag reads 0.
-- **Launch**: delete stale `~/Library/Application Support/Insomnia/{lid-engaged,control.sock}`. If the flag reads 1 and
+- **Launch**: delete stale `~/Library/Application Support/Eyelid/{lid-engaged,control.sock}`. If the flag reads 1 and
   `status()` says the helper owns it (its reset is pending), poll up to 15 s, then `.stuck`. A foreign flag is left alone.
 - **Quit**: release with a 2 s timeout; on timeout invalidate and let the helper reset.
 
@@ -411,11 +412,11 @@ cdhash build.sh prints, `make install`, then:
 - lid mode on → `ioreg -r -c IOPMrootDomain | grep SleepDisabled` = Yes; quit → No; `kill -9` → No within a second
 - with the lid shut and no display: `kill -9` the app, and the Mac sleeps; `kill -STOP` it, and within ~45 s the flag
   is No and the Mac sleeps
-- the pin: `/Applications/Insomnia.app/Contents/MacOS/Insomnia --helper-status` prints "helper answered" with its
-  cdhash. A *different* signed build (`ditto build/Insomnia.app` into a scratch folder, change one byte of a resource,
+- the pin: `/Applications/Eyelid.app/Contents/MacOS/Eyelid --helper-status` prints "helper answered" with its
+  cdhash. A *different* signed build (`ditto build/Eyelid.app` into a scratch folder, change one byte of a resource,
   re-sign with `codesign -f -s "Apple Development: …" -o runtime`), run with `--helper-status`, prints "helper didn't
   answer". The helper logs "serving" with the pinned app cdhash
-  (`log show --predicate 'subsystem == "com.gdeml.Insomnia.helper"' --last 5m`).
+  (`log show --predicate 'subsystem == "com.gdeml.Eyelid.helper"' --last 5m`).
 - the kernel's answer: lid mode engaged and no display, close the lid and read `AppleClamshellCausesSleep` over ssh
   (`ioreg -r -c IOPMrootDomain -d 1`): expect Yes. A real display in clamshell mode on AC: expect No. Also record the
   value on battery, and with DisplayLink, Sidecar and a BetterDisplay virtual screen.
@@ -428,7 +429,7 @@ root. So the helper must not let it hold that flag, and a flag it does hold must
 
 **Who can drive the helper.** The listener's code-signing requirement is set once at start-up, before `resume()`, and
 libxpc checks it against the caller's audit token, so PID reuse and exec races don't apply. It requires:
-- our identifier (`com.gdeml.Insomnia`)
+- our identifier (`com.gdeml.Eyelid`)
 - an Apple-issued certificate whose OU is our Team ID
 - no `get-task-allow`
 - **the cdhash of the installed app**, `cdhash H"…"`
@@ -437,10 +438,10 @@ The helper reads that cdhash once at start-up, after `InstallLocation.check` pas
 (`CodeSignature.installedAppCDHash`). /Applications itself is `root:admin 0775`: any admin process can rename the
 entries in it, so a check by path followed by a read by path could see two different bundles. So the helper never
 uses the path twice:
-1. It opens `/Applications/Insomnia.app` once with `O_DIRECTORY | O_NOFOLLOW`. /Applications itself isn't checked;
+1. It opens `/Applications/Eyelid.app` once with `O_DIRECTORY | O_NOFOLLOW`. /Applications itself isn't checked;
    it is the system's own directory.
 2. It opens `Contents` and then `MacOS` relative to that descriptor (`openat`, `O_NOFOLLOW`).
-3. From the MacOS descriptor it opens both `Insomnia` and `InsomniaHelper`.
+3. From the MacOS descriptor it opens both `Eyelid` and `EyelidHelper`.
 4. Each of the five must be root-owned, not group/other-writable and carry no ACL (`fstat` and `acl_get_fd_np`), and
    the two binaries must be regular files.
 5. It reads both signatures through the open descriptors (`/dev/fd/N`).
@@ -449,14 +450,14 @@ uses the path twice:
 
 If any step fails, or the cdhash isn't 40 hex digits, the helper runs reset-only. The cdhash goes into the requirement
 text only after all that. What this proves is the content of a root-owned, non-writable file. That is all the pin needs.
-Nothing but root can change such a file, and no other root-owned Insomnia bundle exists. `make install` moves the
-previous one aside and deletes it. The installer package replaces `/Applications/Insomnia.app` itself: its payload is
+Nothing but root can change such a file, and no other root-owned Eyelid bundle exists. `make install` moves the
+previous one aside and deletes it. The installer package replaces `/Applications/Eyelid.app` itself: its payload is
 root:wheel with no group/other write, and `relocatable="false"` (release.sh refuses a package without it) means
 Installer never upgrades a copy anywhere else, so it leaves no second root-owned bundle behind.
 
 Why it pins the cdhash: the Team ID isn't a secret on the developer's Mac. build.sh signs with the Apple Development
 identity in the login keychain, which signs without a prompt. So any process running as the user could sign its own
-client as `com.gdeml.Insomnia`, call `engage` and heartbeat forever, holding `SleepDisabled = 1` with none of the
+client as `com.gdeml.Eyelid`, call `engage` and heartbeat forever, holding `SleepDisabled = 1` with none of the
 app's overheat, bag, battery or unplug rules. With the pin, only the exact root-owned app that the installer package
 or `make install` put in place can engage. That shuts out older signed builds too. Running the same code from
 somewhere else is the same code. Consequences:
@@ -494,7 +495,7 @@ copies are all owned by the user. The pin protects only between installs. If tha
 `make install` copies with `ditto --noacl` and strips ACLs (`chmod -RN`), release.sh builds the package from a
 `ditto --noacl` copy, and `InstallLocation.check` and lid-verify reject any item that carries one. Otherwise an ACL
 added to `build/` would survive into a root-owned bundle and leave it writable by the user while every mode-bit check
-passed. A separate locked signing keychain (`INSOMNIA_SIGN_KEYCHAIN`) stops other code from signing a client
+passed. A separate locked signing keychain (`EYELID_SIGN_KEYCHAIN`) stops other code from signing a client
 silently. build.sh unlocks it only around the `codesign` steps.
 
 **Files the helper writes.** The ownership file and boot marker live in /var/run, which is `root:daemon 0775`, not
@@ -513,7 +514,20 @@ installer package's preinstall boot the daemon out and delete both, plus v1's st
 whenever either file exists. They do it after the running app has quit, so a v1 app holding the flag through the rule
 can release it first. If `SleepDisabled` is still 1 afterwards and the helper doesn't own it (no ownership file), they
 print the `sudo pmset -a disablesleep 0` hint (preinstall's goes to `/var/log/install.log`). In preinstall no step of
-this can fail the install.
+this can fail the install. The leftovers keep their old lowercase *insomnia* names: they name files v1 put on disk.
+
+**Pre-rename builds.** The app was called Insomnia until just before its first release (docs/RELEASE.md "Decisions").
+A Mac that built it from source may still have a root-owned `/Applications/Insomnia.app` (bundle ID
+`com.gdeml.Insomnia`) with its own registered helper, `com.gdeml.Insomnia.helper`, and its flag files
+`/var/run/com.gdeml.Insomnia.helper.*`. It can't drive Eyelid's helper: the requirement names `com.gdeml.Eyelid` and
+pins Eyelid's cdhash. Left in place, though, it is a second root helper that nothing updates any more. Only that
+copy's own `--unregister-helper`, run by the user who registered it, removes the registration cleanly (it quits the
+app first, which releases lid mode). `make install` and `make uninstall` run it, then delete the bundle and
+`~/Library/Application Support/Insomnia/{lid-engaged,control.sock}`, and stop if it fails. They do this before the v1
+cleanup, whose `SleepDisabled` hint only knows Eyelid's ownership file. The installer package can't run it for the
+user, so its installation check and preinstall stop and give the two commands instead. All of them act only on
+exactly `com.gdeml.Insomnia`; any other app named Insomnia is left alone. Settings aren't migrated: Eyelid's defaults
+domain is new, so a pre-rename build's settings stay behind.
 
 ## Line budget
 

@@ -1,23 +1,23 @@
 // swift-tools-version:6.0
 import PackageDescription
 
-// Three targets (docs/DESIGN.md) plus the InsomniaTests test target:
-//   Insomnia        the menu bar app                                  → Contents/MacOS/Insomnia
-//   InsomniaHelper  root launchd daemon, SMAppService.daemon + XPC    → Contents/MacOS/InsomniaHelper
-//   InsomniaShared  XPC protocol, identifiers, code-signing requirements; linked statically into both
+// Three targets (docs/DESIGN.md) plus the EyelidTests test target:
+//   Eyelid        the menu bar app                                  → Contents/MacOS/Eyelid
+//   EyelidHelper  root launchd daemon, SMAppService.daemon + XPC    → Contents/MacOS/EyelidHelper
+//   EyelidShared  XPC protocol, identifiers, code-signing requirements; linked statically into both
 let package = Package(
-    name: "Insomnia",
+    name: "Eyelid",
     platforms: [.macOS(.v14)],
     targets: [
         .target(
-            name: "InsomniaShared",
-            path: "Sources/InsomniaShared",
+            name: "EyelidShared",
+            path: "Sources/EyelidShared",
             linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("Security")]
         ),
         .executableTarget(
-            name: "Insomnia",
-            dependencies: ["InsomniaShared"],
-            path: "Sources/Insomnia",
+            name: "Eyelid",
+            dependencies: ["EyelidShared"],
+            path: "Sources/Eyelid",
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("ServiceManagement"),
@@ -25,20 +25,20 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "InsomniaHelper",
-            dependencies: ["InsomniaShared"],
-            path: "Sources/InsomniaHelper",
+            name: "EyelidHelper",
+            dependencies: ["EyelidShared"],
+            path: "Sources/EyelidHelper",
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("Security"),
             ]
         ),
         // Engine and lid controller with fakes, helper policy, power parsing. Swift Testing.
-        // `@testable import Insomnia` works because SwiftPM builds executable targets testable on macOS.
+        // `@testable import Eyelid` works because SwiftPM builds executable targets testable on macOS.
         .testTarget(
-            name: "InsomniaTests",
-            dependencies: ["Insomnia"],
-            path: "Tests/InsomniaTests"
+            name: "EyelidTests",
+            dependencies: ["Eyelid"],
+            path: "Tests/EyelidTests"
         ),
     ],
     swiftLanguageModes: [.v6]

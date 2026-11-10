@@ -1,11 +1,11 @@
 #!/bin/bash
-# Quits every running Insomnia and waits for them to exit. Its quit path releases lid mode first
+# Quits every running Eyelid and waits for them to exit. Its quit path releases lid mode first
 # (applicationShouldTerminate, up to 2 s), so `make install` / `make uninstall` and the pkg's preinstall run this before
 # touching the bundle or the helper. Never launches the app, and sends each copy its quit only once: a second
 # quit during the pending lid release would cut it short. Copies are found by process (pgrep on the app executable,
-# with or without arguments: a copy started from a terminal runs as `Insomnia --gui`) and quit with SIGTERM, which the
-# app routes through its normal quit; a copy only LaunchServices sees (bundle id) gets one quit Apple Event. Kong's
-# API client is also Insomnia.app/Contents/MacOS/Insomnia, so a process whose bundle ID reads as someone else's is left
+# with or without arguments: a copy started from a terminal runs as `Eyelid --gui`) and quit with SIGTERM, which the
+# app routes through its normal quit; a copy only LaunchServices sees (bundle id) gets one quit Apple Event. Any app
+# can have an executable named Contents/MacOS/Eyelid, so a process whose bundle ID reads as someone else's is left
 # alone. As root (the pkg's preinstall) only the copy being replaced counts, judged by the executable the kernel has
 # mapped, and there are no Apple Events (see ours() and registered()). Fails closed: if pgrep or lsof can't answer, the
 # copies count as running, and as a user a copy whose bundle ID can't be read counts as ours.
@@ -14,8 +14,8 @@
 set -uo pipefail
 
 # Test hooks: override the bundle id and process pattern.
-ID=${INSOMNIA_QUIT_TEST_ID:-com.gdeml.Insomnia}
-PATTERN=${INSOMNIA_QUIT_TEST_PATTERN:-'/Contents/MacOS/Insomnia( |$)'}
+ID=${EYELID_QUIT_TEST_ID:-com.gdeml.Eyelid}
+PATTERN=${EYELID_QUIT_TEST_PATTERN:-'/Contents/MacOS/Eyelid( |$)'}
 TIMEOUT=${1:-10}
 
 # Sets PIDS to the matching processes that are ours. Returns 0 = some, 1 = none, 2 = pgrep or lsof failed (can't
@@ -37,7 +37,7 @@ find_pids() {
 # about a process that is still alive.
 # As a user, skip a process only when its bundle ID was read and isn't ours. ps gives the path it was started as (what
 # pgrep matched); anything that isn't a path inside a bundle counts as ours.
-INSTALLED_EXE=/Applications/Insomnia.app/Contents/MacOS/Insomnia
+INSTALLED_EXE=/Applications/Eyelid.app/Contents/MacOS/Eyelid
 ours() {
     local exe id
     if (( EUID == 0 )); then
@@ -53,21 +53,21 @@ ours() {
         2>/dev/null) || return 0
     [[ -z "$id" || "$id" == "$ID" ]]
 }
-# LaunchServices' view (an Insomnia under another executable name). An osascript error adds nothing: pgrep decides.
+# LaunchServices' view (an Eyelid under another executable name). An osascript error adds nothing: pgrep decides.
 # Never as root (the pkg's preinstall), so no quit Apple Event either: root has no GUI session, and an Apple Event to
 # the user's app could hang or fail.
 registered() {
     (( EUID != 0 )) || return 1
     [[ "$(/usr/bin/osascript -e "application id \"$ID\" is running" 2>/dev/null)" == true ]]
 }
-cant_tell() { echo "Couldn't check whether Insomnia is running. Quit it from its panel, then try again." >&2; exit 1; }
+cant_tell() { echo "Couldn't check whether Eyelid is running. Quit it from its panel, then try again." >&2; exit 1; }
 
 find_pids; found=$?
 (( found == 2 )) && cant_tell
 if (( found == 1 )); then
     registered || exit 0
 fi
-echo "Quitting Insomnia…"
+echo "Quitting Eyelid…"
 SENT=" "
 for pid in $PIDS; do kill -TERM "$pid" 2>/dev/null; SENT+="$pid "; done
 if [[ -z "$PIDS" ]]; then
@@ -86,7 +86,7 @@ while :; do
         [[ "$SENT" == *" $pid "* ]] || { kill -TERM "$pid" 2>/dev/null; SENT+="$pid "; }
     done
     if (( SECONDS >= end )); then
-        echo "Insomnia didn't quit within $TIMEOUT seconds. Quit it from its panel, then try again." >&2
+        echo "Eyelid didn't quit within $TIMEOUT seconds. Quit it from its panel, then try again." >&2
         if (( EUID == 0 )); then   # under Installer the copy may belong to another logged-in user
             left=${PIDS% }
             echo "Still running for: $(/bin/ps -o user= -p "${left// /,}" 2>/dev/null | sort -u | tr '\n' ' ')" >&2

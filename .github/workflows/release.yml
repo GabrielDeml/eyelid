@@ -1,6 +1,6 @@
 # Builds the installer package for GitHub Releases (docs/RELEASE.md "CI").
 #   push of a v* tag    build, sign, notarize, smoke test, attest, then publish the release
-#   workflow_dispatch   the same build as a dry run (release.sh --dry-run): Insomnia-<version>-dryrun.pkg, only
+#   workflow_dispatch   the same build as a dry run (release.sh --dry-run): Eyelid-<version>-dryrun.pkg, only
 #                       uploaded as a workflow artifact, kept 3 days
 name: Release
 
@@ -64,7 +64,7 @@ jobs:
           [[ -s "$RUNNER_TEMP/AuthKey.p8" ]] || { echo "::error::the notary API key is empty"; exit 1; }
 
       # One .p12 with both Developer ID identities (Application and Installer). The action puts them in a temporary,
-      # unlocked keychain (signing_temp) on the search list and deletes it when the job ends. INSOMNIA_SIGN_KEYCHAIN
+      # unlocked keychain (signing_temp) on the search list and deletes it when the job ends. EYELID_SIGN_KEYCHAIN
       # stays unset. Keep only the current certificates in the .p12: two with the same name make codesign fail.
       - name: Import the signing certificates
         uses: apple-actions/import-codesign-certs@288b8ec97b82c66b6f2a6baaf7acc8dfbcbe331c # v7.2.0
@@ -98,13 +98,13 @@ jobs:
         id: smoke
         run: |
           shopt -s nullglob
-          pkgs=(dist/Insomnia-*.pkg)
+          pkgs=(dist/Eyelid-*.pkg)
           (( ${#pkgs[@]} == 1 )) || { echo "::error::want one dist/ package, found ${#pkgs[@]}: ${pkgs[*]}"; exit 1; }
           pkg=${pkgs[0]}
           before=$(stat -f '%Su:%Sg %Sp' /Applications)
           sudo installer -pkg "$pkg" -target /
-          pkgutil --pkg-info com.gdeml.Insomnia.pkg
-          scripts/lid-verify.sh --staged /Applications/Insomnia.app
+          pkgutil --pkg-info com.gdeml.Eyelid.pkg
+          scripts/lid-verify.sh --staged /Applications/Eyelid.app
           after=$(stat -f '%Su:%Sg %Sp' /Applications)
           echo "/Applications before: $before, after: $after"
           [[ "$after" == "$before" ]] || { echo "::error::the installer changed /Applications to $after"; exit 1; }
@@ -152,7 +152,7 @@ jobs:
         run: |
           version=${GITHUB_REF_NAME#v}
           # Only the plain release name is ever published (a -dryrun, -unnotarized or -dev package is refused).
-          [[ -f "dist/Insomnia-$version.pkg" ]] || { echo "::error::no dist/Insomnia-$version.pkg"; ls dist; exit 1; }
+          [[ -f "dist/Eyelid-$version.pkg" ]] || { echo "::error::no dist/Eyelid-$version.pkg"; ls dist; exit 1; }
           (cd dist && sha256sum -c SHA256SUMS.txt)
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Insomnia $version" \
-              --generate-notes "dist/Insomnia-$version.pkg" dist/SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Eyelid $version" \
+              --generate-notes "dist/Eyelid-$version.pkg" dist/SHA256SUMS.txt

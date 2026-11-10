@@ -1,27 +1,27 @@
 #!/bin/bash
-# Build the installer package for GitHub Releases: dist/Insomnia-<version>.pkg and dist/SHA256SUMS.txt
+# Build the installer package for GitHub Releases: dist/Eyelid-<version>.pkg and dist/SHA256SUMS.txt
 # (docs/RELEASE.md "Building a release"). dist/ only ever holds the last run's output.
 #
-#   scripts/release.sh                 sign, notarize, staple, verify → dist/Insomnia-<version>.pkg
-#   scripts/release.sh --dry-run       all the same steps and checks → dist/Insomnia-<version>-dryrun.pkg (CI)
-#   scripts/release.sh --no-notarize   Developer ID signed, not notarized → dist/Insomnia-<version>-unnotarized.pkg
-#   scripts/release.sh --dev           Apple Development app, unsigned pkg → dist/Insomnia-<version>-dev.pkg (test Macs)
+#   scripts/release.sh                 sign, notarize, staple, verify → dist/Eyelid-<version>.pkg
+#   scripts/release.sh --dry-run       all the same steps and checks → dist/Eyelid-<version>-dryrun.pkg (CI)
+#   scripts/release.sh --no-notarize   Developer ID signed, not notarized → dist/Eyelid-<version>-unnotarized.pkg
+#   scripts/release.sh --dev           Apple Development app, unsigned pkg → dist/Eyelid-<version>-dev.pkg (test Macs)
 #
-# Environment: INSOMNIA_SIGN_IDENTITY, INSOMNIA_INSTALLER_IDENTITY, INSOMNIA_SIGN_KEYCHAIN, NOTARY_PROFILE or
+# Environment: EYELID_SIGN_IDENTITY, EYELID_INSTALLER_IDENTITY, EYELID_SIGN_KEYCHAIN, NOTARY_PROFILE or
 # NOTARY_KEY + NOTARY_KEY_ID + NOTARY_ISSUER, RELEASE_TAG. Every step is a hard gate. Never installs anything, never
 # needs sudo.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
-APP_NAME=Insomnia
-BUNDLE_ID=com.gdeml.Insomnia
-PKG_ID=com.gdeml.Insomnia.pkg
-HELPER_PLIST=Contents/Library/LaunchDaemons/com.gdeml.Insomnia.helper.plist
+APP_NAME=Eyelid
+BUNDLE_ID=com.gdeml.Eyelid
+PKG_ID=com.gdeml.Eyelid.pkg
+HELPER_PLIST=Contents/Library/LaunchDaemons/com.gdeml.Eyelid.helper.plist
 APP="$ROOT/build/$APP_NAME.app"
 WORK="$ROOT/build/pkg"
 DIST="$ROOT/dist"
-COMPONENT=Insomnia-component.pkg
+COMPONENT=Eyelid-component.pkg
 TEMPLATE="$ROOT/pkg/Distribution.xml.in"
 PKG_SCRIPTS=("$ROOT/pkg/scripts/preinstall" "$ROOT/pkg/scripts/postinstall" "$ROOT/scripts/quit-running.sh")
 
@@ -49,7 +49,7 @@ case "$MODE" in
     no-notarize) NOTARIZE=0 SUFFIX=-unnotarized ;;
     dry-run) SUFFIX=-dryrun ;;
 esac
-KEYCHAIN="${INSOMNIA_SIGN_KEYCHAIN:-}"
+KEYCHAIN="${EYELID_SIGN_KEYCHAIN:-}"
 
 # Locks the signing keychain again if we unlocked it for productbuild. build.sh locks it after its own use.
 KEYCHAIN_UNLOCKED=0
@@ -63,7 +63,7 @@ if [[ -n "${RELEASE_TAG:-}" && "$RELEASE_TAG" != "v$VERSION" ]]; then
     die "RELEASE_TAG is '$RELEASE_TAG' but Resources/Info.plist says $VERSION: the tag must be v$VERSION"
 fi
 PKG_NAME="$APP_NAME-$VERSION$SUFFIX.pkg"
-say "Insomnia $VERSION, mode: $MODE"
+say "Eyelid $VERSION, mode: $MODE"
 
 problems=()
 for tool in swift pkgbuild productbuild pkgutil lsbom xmllint shasum lipo codesign; do
@@ -77,19 +77,19 @@ if (( SIGNED )); then
     WHERE="security find-identity -v${KEYCHAIN:+ $KEYCHAIN}"
     # The app identity, as build.sh will pick it in release mode (it checks again, but only after these checks pass).
     CODESIGN_IDS=$(security find-identity -v -p codesigning ${KEYCHAIN:+"$KEYCHAIN"} 2>/dev/null || true)
-    APP_ID="${INSOMNIA_SIGN_IDENTITY:-}"
+    APP_ID="${EYELID_SIGN_IDENTITY:-}"
     if [[ -z "$APP_ID" ]]; then
         APP_ID=$(sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' <<<"$CODESIGN_IDS")
         APP_ID=${APP_ID%%$'\n'*}
         [[ -n "$APP_ID" ]] || problems+=("no 'Developer ID Application' identity ($WHERE -p codesigning)")
     elif [[ "$APP_ID" != "Developer ID Application: "* ]]; then
-        problems+=("INSOMNIA_SIGN_IDENTITY '$APP_ID' isn't a 'Developer ID Application' identity")
+        problems+=("EYELID_SIGN_IDENTITY '$APP_ID' isn't a 'Developer ID Application' identity")
     elif ! grep -Fq -- "$APP_ID" <<<"$CODESIGN_IDS"; then
-        problems+=("INSOMNIA_SIGN_IDENTITY '$APP_ID' not found ($WHERE -p codesigning)")
+        problems+=("EYELID_SIGN_IDENTITY '$APP_ID' not found ($WHERE -p codesigning)")
     fi
     # The installer identity: basic policy, since a Developer ID Installer certificate isn't a code-signing one.
     ALL_IDS=$(security find-identity -v ${KEYCHAIN:+"$KEYCHAIN"} 2>/dev/null || true)
-    INSTALLER_ID="${INSOMNIA_INSTALLER_IDENTITY:-}"
+    INSTALLER_ID="${EYELID_INSTALLER_IDENTITY:-}"
     if [[ -z "$INSTALLER_ID" ]]; then
         INSTALLER_ID=$(sed -n 's/.*"\(Developer ID Installer: [^"]*\)".*/\1/p' <<<"$ALL_IDS")
         INSTALLER_ID=${INSTALLER_ID%%$'\n'*}
@@ -97,7 +97,7 @@ if (( SIGNED )); then
     else
         # A name or a SHA-1 hash; either way its line must be a Developer ID Installer identity.
         line=$(grep -F -- "$INSTALLER_ID" <<<"$ALL_IDS" || true)
-        not_installer="INSOMNIA_INSTALLER_IDENTITY '$INSTALLER_ID' isn't a 'Developer ID Installer' identity ($WHERE)"
+        not_installer="EYELID_INSTALLER_IDENTITY '$INSTALLER_ID' isn't a 'Developer ID Installer' identity ($WHERE)"
         [[ "$line" == *'"Developer ID Installer: '* ]] || problems+=("$not_installer")
     fi
 fi
@@ -146,29 +146,29 @@ rm -f "$DIST/$APP_NAME"-*.pkg "$DIST/SHA256SUMS.txt"
 
 # 2. Build the app -----------------------------------------------------------------------------------------------------
 if (( SIGNED )); then
-    INSOMNIA_RELEASE=1 "$ROOT/scripts/build.sh"
+    EYELID_RELEASE=1 "$ROOT/scripts/build.sh"
 else
-    env -u INSOMNIA_RELEASE "$ROOT/scripts/build.sh"
+    env -u EYELID_RELEASE "$ROOT/scripts/build.sh"
 fi
 [[ -d "$APP" ]] || die "build.sh didn't produce $APP"
 BUILT_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
 [[ "$BUILT_VERSION" == "$VERSION" ]] || die "built app is version $BUILT_VERSION, not $VERSION"
-for b in "$APP/Contents/MacOS/$APP_NAME" "$APP/Contents/MacOS/InsomniaHelper"; do
+for b in "$APP/Contents/MacOS/$APP_NAME" "$APP/Contents/MacOS/EyelidHelper"; do
     [[ "$(lipo -archs "$b")" == arm64 ]] || die "$(basename "$b") isn't arm64 only ($(lipo -archs "$b"))"
 done
 APP_INFO=$(codesign -dvvv "$APP" 2>&1)
 APP_TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$APP_INFO")
 [[ -n "$APP_TEAM" && "$APP_TEAM" != "not set" ]] || die "the built app has no Team ID"
 if (( SIGNED )); then
-    for b in "$APP" "$APP/Contents/MacOS/InsomniaHelper"; do
+    for b in "$APP" "$APP/Contents/MacOS/EyelidHelper"; do
         info=$(codesign -dvvv "$b" 2>&1)
         grep -q '^Authority=Developer ID Application: ' <<<"$info" || die "$(basename "$b") isn't Developer ID signed"
         grep -q '^Timestamp=' <<<"$info" || die "$(basename "$b") has no secure timestamp"
     done
 else
-    # build.sh signs with INSOMNIA_SIGN_IDENTITY when it is set; a dev package must not carry a Developer ID app.
+    # build.sh signs with EYELID_SIGN_IDENTITY when it is set; a dev package must not carry a Developer ID app.
     grep -q '^Authority=Apple Development: ' <<<"$APP_INFO" \
-        || die "--dev expects an Apple Development signed app (unset INSOMNIA_SIGN_IDENTITY)"
+        || die "--dev expects an Apple Development signed app (unset EYELID_SIGN_IDENTITY)"
 fi
 
 # 3. Installer scripts: ours and quit-running.sh, executable, nothing else ---------------------------------------------
@@ -201,11 +201,11 @@ PI="$EXP/PackageInfo"
 [[ "$(xp 'string(/pkg-info/@version)' "$PI")" == "$VERSION" ]] || die "PackageInfo version isn't $VERSION"
 [[ "$(xp 'string(/pkg-info/@install-location)' "$PI")" == /Applications ]] \
     || die "PackageInfo install-location isn't /Applications"
-# Installer must never "upgrade" a stray copy elsewhere (build/Insomnia.app): older pkgbuilds default to relocatable.
+# Installer must never "upgrade" a stray copy elsewhere (build/Eyelid.app): older pkgbuilds default to relocatable.
 [[ "$(xp 'string(/pkg-info/@relocatable)' "$PI")" == false ]] || die "PackageInfo isn't relocatable=\"false\""
 [[ "$(xp 'count(/pkg-info/relocate/*)' "$PI")" == 0 ]] || die "PackageInfo lists relocatable bundles"
-[[ "$(xp 'string(/pkg-info/bundle[@path="./Insomnia.app"]/@id)' "$PI")" == "$BUNDLE_ID" ]] \
-    || die "PackageInfo doesn't describe ./Insomnia.app as $BUNDLE_ID"
+[[ "$(xp 'string(/pkg-info/bundle[@path="./Eyelid.app"]/@id)' "$PI")" == "$BUNDLE_ID" ]] \
+    || die "PackageInfo doesn't describe ./Eyelid.app as $BUNDLE_ID"
 for el in strict-identifier upgrade-bundle; do
     [[ "$(xp "string(/pkg-info/$el/bundle/@id)" "$PI")" == "$BUNDLE_ID" ]] || die "PackageInfo $el isn't $BUNDLE_ID"
 done
@@ -224,8 +224,8 @@ while IFS=$'\t' read -r mode user group path; do
         continue
     fi
     [[ "$(basename "$path")" == ._* ]] && appledouble+=("$path")
-    [[ "$path" == ./Insomnia.app || "$path" == ./Insomnia.app/* || "$path" == ./._Insomnia.app ]] \
-        || bad+=("$path is outside Insomnia.app")
+    [[ "$path" == ./Eyelid.app || "$path" == ./Eyelid.app/* || "$path" == ./._Eyelid.app ]] \
+        || bad+=("$path is outside Eyelid.app")
     [[ "$user:$group" == root:wheel ]] || bad+=("$path is $user:$group, not root:wheel")
     case "$mode" in
         drwxr-xr-x|-rwxr-xr-x|-rw-r--r--|lrwxr-xr-x) ;;
@@ -234,9 +234,9 @@ while IFS=$'\t' read -r mode user group path; do
 done <<<"$BOM"
 (( root_seen )) || bad+=("the payload has no root entry '.'")
 BOM_PATHS=$(cut -f4 <<<"$BOM")
-for p in Contents/MacOS/Insomnia Contents/MacOS/InsomniaHelper Contents/Info.plist "$HELPER_PLIST" \
+for p in Contents/MacOS/Eyelid Contents/MacOS/EyelidHelper Contents/Info.plist "$HELPER_PLIST" \
          Contents/_CodeSignature/CodeResources; do
-    grep -Fqx -- "./Insomnia.app/$p" <<<"$BOM_PATHS" || bad+=("the payload lacks ./Insomnia.app/$p")
+    grep -Fqx -- "./Eyelid.app/$p" <<<"$BOM_PATHS" || bad+=("the payload lacks ./Eyelid.app/$p")
 done
 if (( ${#bad[@]} )); then
     printf '\033[31merror:\033[0m the component package payload fails its checks:\n' >&2
@@ -340,7 +340,7 @@ for f in PackageInfo Bom Payload; do
 done
 diff -rq "$PEXP/$COMPONENT/Scripts" "$EXP/Scripts" >/dev/null \
     || die "the product's $COMPONENT/Scripts differ from the checked component package"
-[[ "$(xp 'count(/installer-gui-script/installation-check[@script="checkInstalledInsomnia()"])' "$DIST_XML")" == 1 ]] \
+[[ "$(xp 'count(/installer-gui-script/installation-check[@script="checkInstalledEyelid()"])' "$DIST_XML")" == 1 ]] \
     || die "the product's Distribution lacks the installation check"
 
 # 9. Publish to dist/, last --------------------------------------------------------------------------------------------

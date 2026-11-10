@@ -5,13 +5,13 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleName</key>
-	<string>Insomnia</string>
+	<string>Eyelid</string>
 	<key>CFBundleDisplayName</key>
-	<string>Insomnia</string>
+	<string>Eyelid</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.gdeml.Insomnia</string>
+	<string>com.gdeml.Eyelid</string>
 	<key>CFBundleExecutable</key>
-	<string>Insomnia</string>
+	<string>Eyelid</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key>

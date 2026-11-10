@@ -1,8 +1,8 @@
 #!/bin/bash
-# Runs as root before Installer copies Insomnia.app into /Applications (docs/RELEASE.md, "What the installer does").
+# Runs as root before Installer copies Eyelid.app into /Applications (docs/RELEASE.md, "What the installer does").
 # Installer passes $1 = package path, $2 = install location, $3 = target volume. The distribution file only allows the
 # startup disk, so the paths below are absolute.
-#   1. Refuse to replace a different app named Insomnia (Kong's API client installs to the same path). The
+#   1. Refuse to install while a build from before the rename (Insomnia) is still in /Applications. The
 #      distribution's installation check already does this, with a proper message, for installs from the Installer
 #      app and `installer -pkg`; this repeats it for anything that bypasses the distribution. Its message only reaches
 #      /var/log/install.log.
@@ -13,19 +13,24 @@
 # Any non-zero exit stops the install before anything is copied, so only steps 1 and 2 may fail it.
 set -euo pipefail
 
-APP=/Applications/Insomnia.app
-BUNDLE_ID=com.gdeml.Insomnia
-WAS_RUNNING=com.gdeml.Insomnia.was-running
-OLD_HELPER=com.gdeml.Insomnia.old-helper-cdhash
+APP=/Applications/Eyelid.app
+PRERENAME_APP=/Applications/Insomnia.app
+PRERENAME_ID=com.gdeml.Insomnia
+WAS_RUNNING=com.gdeml.Eyelid.was-running
+OLD_HELPER=com.gdeml.Eyelid.old-helper-cdhash
 NOTES=""
 if [[ -n "${INSTALLER_TEMP:-}" && -d "$INSTALLER_TEMP" ]]; then NOTES=$INSTALLER_TEMP; fi
 
-# 1. An identifier that can't be read (a broken copy) doesn't block: the install repairs it. PlistBuddy prints
-#    "File Doesn't Exist" on stdout when there's no Info.plist, so only its success counts.
-if [[ -e "$APP" ]]; then
-    id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" 2>/dev/null) || id=""
-    if [[ -n "$id" && "$id" != "$BUNDLE_ID" ]]; then
-        echo "Another app named Insomnia ($id) is already in /Applications. Move or rename it, then install again." >&2
+# 1. Only exactly the old bundle ID counts: any other app named Insomnia is someone else's. The old copy's lid helper
+#    is registered to that bundle and only its own --unregister-helper, run by the user who registered it, removes
+#    it, so root can't clean it up here. PlistBuddy prints "File Doesn't Exist" on stdout when there's no Info.plist,
+#    so only its success counts.
+if [[ -e "$PRERENAME_APP" ]]; then
+    id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PRERENAME_APP/Contents/Info.plist" 2>/dev/null) \
+        || id=""
+    if [[ "$id" == "$PRERENAME_ID" ]]; then
+        echo "A pre-release build named Insomnia is installed. Remove it, then install again:" \
+            "$PRERENAME_APP/Contents/MacOS/Insomnia --unregister-helper; sudo rm -rf $PRERENAME_APP" >&2
         exit 1
     fi
 fi
@@ -36,17 +41,17 @@ fi
 console_uid=$(/usr/bin/stat -f %u /dev/console 2>/dev/null) || console_uid=""
 console_had_copy=0
 if [[ -n "$console_uid" && "$console_uid" != 0 ]]; then
-    for pid in $(/usr/sbin/lsof -a -d txt -t -- "$APP/Contents/MacOS/Insomnia" 2>/dev/null); do
+    for pid in $(/usr/sbin/lsof -a -d txt -t -- "$APP/Contents/MacOS/Eyelid" 2>/dev/null); do
         uid=$(/bin/ps -o uid= -p "$pid" 2>/dev/null) || continue
         if [[ "${uid// /}" == "$console_uid" ]]; then console_had_copy=1; fi
     done
 fi
-unset INSOMNIA_QUIT_TEST_ID INSOMNIA_QUIT_TEST_PATTERN
+unset EYELID_QUIT_TEST_ID EYELID_QUIT_TEST_PATTERN
 q=0
 "$(dirname "$0")/quit-running.sh" 10 || q=$?
 case $q in
     0|3) ;;
-    *)  echo "Couldn't quit Insomnia (quit-running.sh exit $q), so nothing was installed. Quit it from its panel," \
+    *)  echo "Couldn't quit Eyelid (quit-running.sh exit $q), so nothing was installed. Quit it from its panel," \
             "then install again." >&2
         exit 1 ;;
 esac
@@ -65,24 +70,24 @@ if [[ -e "$LEGACY_SUDOERS" || -e "$LEGACY_DAEMON" ]]; then
         /var/run/com.gdeml.insomnia.booted 2>/dev/null || true
     /bin/rm -rf /private/var/root/insomnia.* 2>/dev/null || true
     rd=$(/usr/sbin/ioreg -r -c IOPMrootDomain -d 1 2>/dev/null) || rd=""
-    if [[ "$rd" != *'"SleepDisabled" = No'* && ! -e /var/run/com.gdeml.Insomnia.helper.engaged ]]; then
+    if [[ "$rd" != *'"SleepDisabled" = No'* && ! -e /var/run/com.gdeml.Eyelid.helper.engaged ]]; then
         echo "Your Mac still can't sleep (SleepDisabled is set, not by the lid helper). If no other app should be" \
             "holding it, run: sudo pmset -a disablesleep 0" || true
     fi
 fi
 
-# 4. Missing notes only mean postinstall neither reopens Insomnia nor restarts the helper (the app then sets the helper
+# 4. Missing notes only mean postinstall neither reopens Eyelid nor restarts the helper (the app then sets the helper
 #    up again when it next opens). The marker holds the console uid, so postinstall can tell whether the same user is
 #    still at the console. The helper's cdhash is noted only while the running helper is still the code on
-#    disk (`codesign -v <pid>` fails otherwise): after an update that was never followed by opening Insomnia, launchd
+#    disk (`codesign -v <pid>` fails otherwise): after an update that was never followed by opening Eyelid, launchd
 #    runs and pins an older helper than the one in the bundle, and restarting would start code its pin rejects.
 if [[ -n "$NOTES" ]]; then
     if (( q == 3 && console_had_copy )); then printf '%s\n' "$console_uid" > "$NOTES/$WAS_RUNNING" || true; fi
-    helper_pid=$(/bin/launchctl print system/com.gdeml.Insomnia.helper 2>/dev/null \
+    helper_pid=$(/bin/launchctl print system/com.gdeml.Eyelid.helper 2>/dev/null \
         | /usr/bin/sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p') || helper_pid=""
-    if [[ -n "$helper_pid" && -f "$APP/Contents/MacOS/InsomniaHelper" ]] \
+    if [[ -n "$helper_pid" && -f "$APP/Contents/MacOS/EyelidHelper" ]] \
         && /usr/bin/codesign -v "$helper_pid" >/dev/null 2>&1; then
-        { /usr/bin/codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p' \
+        { /usr/bin/codesign -dvvv "$APP/Contents/MacOS/EyelidHelper" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p' \
             > "$NOTES/$OLD_HELPER"; } || true
     fi
 fi
