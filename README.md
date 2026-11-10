@@ -53,7 +53,55 @@ The lid helper has its own safeguards, which hold whatever the app does:
 Only the copy of Insomnia that `make install` put in Applications can use the lid helper. Upgrading from the first
 version removes its old password-free `pmset` rule.
 
-## Building and installing
+## Installing
+
+Download `Insomnia-<version>.pkg` from the [Releases page](https://github.com/GabrielDeml/insomnia/releases/latest)
+and open it. You need an Apple silicon Mac with macOS 14 or later, and an administrator password. Insomnia comes as an
+installer package, not an app you drag to Applications, because lid mode needs a copy in `/Applications` that only
+the system can change.
+
+If another app named Insomnia is already in `/Applications` (Kong's API client has the same name), the installer
+stops before changing anything. Move or rename that app first.
+
+Then open Insomnia from Applications. The first time you turn on lid mode, macOS shows "Background Items Added". Allow
+Insomnia in System Settings > General > Login Items & Extensions. An administrator has to approve it.
+
+### Updating
+
+Open the newer package. It quits Insomnia, which turns lid mode off, then replaces the app and reopens Insomnia if it
+was running. If it wasn't, open Insomnia once afterwards so it can set up the lid helper again. If macOS asks you to
+allow Insomnia again, allow it as above.
+
+The package won't replace a newer version with an older one; the installer says so and stops. To go back to an older
+version, uninstall first.
+
+### Checking the download
+
+This is optional. Download `SHA256SUMS.txt` from the same release, then run these in the folder that holds both
+files. The second command needs the [GitHub CLI](https://cli.github.com), signed in with `gh auth login`, and checks
+that the package was built by this repository's release workflow from that version's tag.
+
+```sh
+shasum -a 256 -c SHA256SUMS.txt
+gh attestation verify Insomnia-<version>.pkg --repo GabrielDeml/insomnia \
+    --signer-workflow GabrielDeml/insomnia/.github/workflows/release.yml --source-ref refs/tags/v<version>
+spctl -a -vvv -t install Insomnia-<version>.pkg   # should say "accepted" and "Notarized Developer ID"
+```
+
+### Uninstalling
+
+Don't just drag Insomnia to the Trash: the lid helper would stay registered. Run these instead:
+
+```sh
+/Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper   # quits Insomnia first
+sudo rm -rf /Applications/Insomnia.app
+sudo pkgutil --forget com.gdeml.Insomnia.pkg                            # only if you installed the package
+```
+
+If `pmset -g` still shows `SleepDisabled 1`, run `sudo pmset -a disablesleep 0`. If you installed with `make install`,
+you can run `make uninstall` instead.
+
+## Building from source
 
 You need Xcode 27 (macOS 27 SDK) and an *Apple Development* signing identity. Insomnia runs on macOS 14 or later.
 
@@ -73,11 +121,9 @@ time you turn on lid mode, macOS asks you to allow it in System Settings > Gener
 
 While lid mode is on, Sleep in the Apple menu doesn't work. Turn Insomnia off first.
 
-To uninstall by hand, run `/Applications/Insomnia.app/Contents/MacOS/Insomnia --unregister-helper` (it quits Insomnia
-first), then `sudo rm -rf /Applications/Insomnia.app`. If `pmset -g` still shows `SleepDisabled 1`, run
-`sudo pmset -a disablesleep 0`.
+To uninstall, see [Uninstalling](#uninstalling).
 
-Design notes are in [docs/DESIGN.md](docs/DESIGN.md).
+Design notes are in [docs/DESIGN.md](docs/DESIGN.md). How releases are built is in [docs/RELEASE.md](docs/RELEASE.md).
 
 ## License
 

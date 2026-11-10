@@ -1,0 +1,49 @@
+#!/bin/bash
+# Runs as root after Installer has copied Insomnia.app into /Applications (docs/RELEASE.md, "What the installer does").
+# Always exits 0: the new app is already in place, so a step that fails here is a warning, not a failed install.
+# Output lands in /var/log/install.log. No `set -e` for the same reason.
+#   1. Restart the lid helper if it is registered and the new helper can run under its registration.
+#   2. Reopen Insomnia for the logged-in user if preinstall quit it.
+
+LABEL=com.gdeml.Insomnia.helper
+APP=/Applications/Insomnia.app
+WAS_RUNNING=com.gdeml.Insomnia.was-running
+OLD_HELPER=com.gdeml.Insomnia.old-helper-cdhash
+NOTES=""
+if [[ -n "${INSTALLER_TEMP:-}" && -d "$INSTALLER_TEMP" ]]; then NOTES=$INSTALLER_TEMP; fi
+
+# 1. launchd runs the helper straight out of the bundle, and the install just replaced the files it was started from.
+#    - Same cdhash as the running helper preinstall noted: the restart is required. The app sees nothing to
+#      re-register, so every engage would fail until the helper restarts. `make install` does the same.
+#    - Different cdhash, or none noted: leave the old helper alone. launchd still holds the old registration, whose
+#      spawn constraint pins the old cdhash, so a restarted new helper couldn't launch. The app notices the change and
+#      registers the helper again the next time it opens (step 2 opens it if it was running).
+if /bin/launchctl print "system/$LABEL" >/dev/null 2>&1; then
+    new=$(/usr/bin/codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')
+    old=""
+    if [[ -n "$NOTES" && -f "$NOTES/$OLD_HELPER" ]]; then old=$(/bin/cat "$NOTES/$OLD_HELPER"); fi
+    if [[ -n "$new" && "$new" == "$old" ]]; then
+        if ! /bin/launchctl kickstart -k "system/$LABEL"; then
+            echo "Warning: couldn't restart Insomnia's lid helper. If lid mode fails, run:" \
+                "sudo launchctl kickstart -k system/$LABEL"
+        fi
+    elif [[ -n "$old" ]]; then
+        echo "Insomnia's lid helper changed ($old -> ${new:-unreadable}): Insomnia sets it up again when it next opens."
+    else
+        echo "Insomnia's lid helper wasn't restarted (no running helper matched the old app): Insomnia sets it up" \
+            "again when it next opens."
+    fi
+fi
+
+# 2. Installer runs as root, outside the user's session: open the app in the console user's session, as that user.
+#    Skipped when nobody is logged in. (Copies other users were running are quit but not reopened.)
+if [[ -n "$NOTES" && -f "$NOTES/$WAS_RUNNING" ]]; then
+    user=$(/usr/bin/stat -f %Su /dev/console 2>/dev/null)
+    if [[ -n "$user" && "$user" != root && "$user" != loginwindow ]]; then
+        uid=$(/usr/bin/id -u "$user" 2>/dev/null)
+        if [[ -z "$uid" ]] || ! /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/open "$APP"; then
+            echo "Warning: couldn't reopen Insomnia. Open it from Applications."
+        fi
+    fi
+fi
+exit 0

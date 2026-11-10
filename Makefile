@@ -1,9 +1,9 @@
-# Insomnia. See docs/DESIGN.md. `make` only builds; `make install` and `make uninstall` use sudo.
+# Insomnia. See docs/DESIGN.md and docs/RELEASE.md. `make` only builds; `make install` and `make uninstall` use sudo.
 APP      := build/Insomnia.app
 DEST     := /Applications/Insomnia.app
 SNAPDIR  := build/snapshots
 
-.PHONY: all app run snapshot test install uninstall clean lid-verify
+.PHONY: all app run snapshot test install uninstall clean lid-verify release pkg-dev
 
 all: app
 
@@ -72,7 +72,8 @@ lid-verify:
 	@scripts/lid-verify.sh $(if $(APP_TO_VERIFY),$(APP_TO_VERIFY),$(DEST))
 
 # Quit every running copy (its quit releases lid mode while the helper still exists; abort if it won't quit),
-# unregister the helper (it resets a flag it owns when stopped), check SleepDisabled is back to 0, then delete the app.
+# unregister the helper (it resets a flag it owns when stopped), check SleepDisabled is back to 0, then delete the app
+# and forget the installer receipt, if the pkg installed it.
 uninstall:
 	@q=0; scripts/quit-running.sh || q=$$?; if [ $$q -ne 0 ] && [ $$q -ne 3 ]; then echo "nothing removed"; exit 1; fi
 	@if [ -x "$(DEST)/Contents/MacOS/Insomnia" ]; then "$(DEST)/Contents/MacOS/Insomnia" --unregister-helper; fi
@@ -81,6 +82,15 @@ uninstall:
 		echo "Your Mac still can't sleep (SleepDisabled is set). If no other app should be holding it, run: sudo pmset -a disablesleep 0"; fi
 	@rm -f "$$HOME/Library/Application Support/Insomnia/lid-engaged" "$$HOME/Library/Application Support/Insomnia/control.sock"
 	sudo rm -rf "$(DEST)"
+	@if pkgutil --pkg-info com.gdeml.Insomnia.pkg >/dev/null 2>&1; then sudo pkgutil --forget com.gdeml.Insomnia.pkg; fi
+
+# The installer package for GitHub Releases (docs/RELEASE.md), written to dist/. Never installs anything.
+# `make release`: Developer ID signed, notarized and stapled. `make pkg-dev`: Apple Development build, unsigned pkg.
+release:
+	@scripts/release.sh
+
+pkg-dev:
+	@scripts/release.sh --dev
 
 clean:
 	rm -rf build .build

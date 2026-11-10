@@ -4,6 +4,8 @@
 #   scripts/build.sh                         sign with the first "Apple Development" identity (lid mode: helper)
 #   INSOMNIA_SIGN_IDENTITY="…" scripts/build.sh   sign with a specific identity
 #   INSOMNIA_SIGN_KEYCHAIN=~/Library/Keychains/insomnia.keychain-db   optional locked signing keychain
+#   INSOMNIA_RELEASE=1 scripts/build.sh      release build (docs/RELEASE.md): "Developer ID Application" identities
+#                                            only, signed with a secure timestamp (needs network)
 #
 # Never installs anything, never needs sudo. `make install` is the separate, explicit step.
 set -euo pipefail
@@ -23,6 +25,21 @@ die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # 1. Identity ---------------------------------------------------------------------------------------------------------
 ID="${INSOMNIA_SIGN_IDENTITY:-}"
+RELEASE="${INSOMNIA_RELEASE:-0}"
+[[ "$RELEASE" == 0 || "$RELEASE" == 1 ]] || die "INSOMNIA_RELEASE must be 1 or unset, not '$RELEASE'"
+TIMESTAMP=--timestamp=none
+if [[ "$RELEASE" == 1 ]]; then
+    # Release mode (docs/RELEASE.md): Developer ID Application only, with Apple's secure timestamp.
+    if [[ -z "$ID" ]]; then
+        ID=$(security find-identity -v -p codesigning ${INSOMNIA_SIGN_KEYCHAIN:+"$INSOMNIA_SIGN_KEYCHAIN"} \
+            | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1 || true)
+        [[ -n "$ID" ]] || die "release build: no 'Developer ID Application' signing identity found" \
+            "(security find-identity -v -p codesigning)."
+    fi
+    [[ "$ID" == "Developer ID Application: "* ]] \
+        || die "release build: '$ID' is not a 'Developer ID Application' identity. Release builds sign only with one."
+    TIMESTAMP=--timestamp
+fi
 if [[ -z "$ID" ]]; then
     ID=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
     [[ -n "$ID" ]] || die "no 'Apple Development' signing identity found (security find-identity -v -p codesigning)."
@@ -87,7 +104,7 @@ if [[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" ]]; then
     security unlock-keychain "$INSOMNIA_SIGN_KEYCHAIN"
 fi
 say "Signing helper"
-codesign --force --options runtime --timestamp=none --identifier "$HELPER_ID" "${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"}" \
+codesign --force --options runtime "$TIMESTAMP" --identifier "$HELPER_ID" "${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"}" \
     --sign "$ID" "$APP/Contents/MacOS/InsomniaHelper"
 
 # 7. Launchd plist: Team ID + the signed helper's cdhash pinned in a SpawnConstraint.
@@ -105,7 +122,7 @@ plutil -lint "$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST_NAME" >/dev/null
 
 # 8. Sign the app (no --deep; seals Info.plist and the daemon plist) ---------------------------------------------------
 say "Signing app"
-codesign --force --options runtime --timestamp=none "${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"}" --sign "$ID" "$APP"
+codesign --force --options runtime "$TIMESTAMP" "${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"}" --sign "$ID" "$APP"
 lock_keychain
 
 # 9. Verify ---------------------------------------------------------------------------------------------------------------
@@ -127,6 +144,10 @@ HELPER_TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$HELPER_INFO")
     || die "TeamIdentifier mismatch (app '$APP_TEAM', helper '$HELPER_TEAM')"
 grep -q 'flags=0x10000(runtime)' <<<"$APP_INFO" || die "app is not signed with the hardened runtime"
 grep -q 'flags=0x10000(runtime)' <<<"$HELPER_INFO" || die "helper is not signed with the hardened runtime"
+if [[ "$RELEASE" == 1 ]]; then
+    grep -q '^Timestamp=' <<<"$APP_INFO" || die "release build: the app's signature has no secure timestamp"
+    grep -q '^Timestamp=' <<<"$HELPER_INFO" || die "release build: the helper's signature has no secure timestamp"
+fi
 # The requirements each side pins at runtime (HelperInfo.clientRequirement / helperRequirement); the helper adds the
 # installed app's cdhash to the client one at start-up.
 req() { echo "identifier \"$1\" and anchor apple generic and certificate leaf[subject.OU] = \"$APP_TEAM\" and !(entitlement[\"com.apple.security.get-task-allow\"] exists)"; }

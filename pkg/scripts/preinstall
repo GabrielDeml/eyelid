@@ -1,0 +1,67 @@
+#!/bin/bash
+# Runs as root before Installer copies Insomnia.app into /Applications (docs/RELEASE.md, "What the installer does").
+# Installer passes $1 = package path, $2 = install location, $3 = target volume. The distribution file only allows the
+# startup disk, so the paths below are absolute.
+#   1. Refuse to replace a different app named Insomnia (Kong's API client installs to the same path). The
+#      distribution's installation check already does this, with a proper message, for installs from the Installer
+#      app and `installer -pkg`; this repeats it for anything that bypasses the distribution. Its message only reaches
+#      /var/log/install.log.
+#   2. Quit every running copy with quit-running.sh, shipped next to this script. Its quit releases lid mode first.
+#   3. Leave notes for postinstall in $INSTALLER_TEMP: whether the logged-in user had a copy running, and the cdhash of
+#      the helper launchd is running, if that is still the one on disk.
+# Any non-zero exit stops the install before anything is copied.
+set -euo pipefail
+
+APP=/Applications/Insomnia.app
+BUNDLE_ID=com.gdeml.Insomnia
+WAS_RUNNING=com.gdeml.Insomnia.was-running
+OLD_HELPER=com.gdeml.Insomnia.old-helper-cdhash
+NOTES=""
+if [[ -n "${INSTALLER_TEMP:-}" && -d "$INSTALLER_TEMP" ]]; then NOTES=$INSTALLER_TEMP; fi
+
+# 1. An identifier that can't be read (a broken copy) doesn't block: the install repairs it. PlistBuddy prints
+#    "File Doesn't Exist" on stdout when there's no Info.plist, so only its success counts.
+if [[ -e "$APP" ]]; then
+    id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" 2>/dev/null) || id=""
+    if [[ -n "$id" && "$id" != "$BUNDLE_ID" ]]; then
+        echo "Another app named Insomnia ($id) is already in /Applications. Move or rename it, then install again." >&2
+        exit 1
+    fi
+fi
+
+# 2. Whether the logged-in user has a copy open (only theirs is reopened; other users' copies are quit too), judged
+#    by the executable the kernel has mapped, as quit-running.sh does as root. quit-running.sh's test hooks must never
+#    redirect it during a real install.
+console_uid=$(/usr/bin/stat -f %u /dev/console 2>/dev/null) || console_uid=""
+console_had_copy=0
+if [[ -n "$console_uid" && "$console_uid" != 0 ]]; then
+    for pid in $(/usr/sbin/lsof -a -d txt -t -- "$APP/Contents/MacOS/Insomnia" 2>/dev/null); do
+        uid=$(/bin/ps -o uid= -p "$pid" 2>/dev/null) || continue
+        if [[ "${uid// /}" == "$console_uid" ]]; then console_had_copy=1; fi
+    done
+fi
+unset INSOMNIA_QUIT_TEST_ID INSOMNIA_QUIT_TEST_PATTERN
+q=0
+"$(dirname "$0")/quit-running.sh" 10 || q=$?
+case $q in
+    0|3) ;;
+    *)  echo "Couldn't quit Insomnia (quit-running.sh exit $q), so nothing was installed. Quit it from its panel," \
+            "then install again." >&2
+        exit 1 ;;
+esac
+
+# 3. Missing notes only mean postinstall neither reopens Insomnia nor restarts the helper (the app then sets the helper
+#    up again when it next opens). The helper's cdhash is noted only while the running helper is still the code on
+#    disk (`codesign -v <pid>` fails otherwise): after an update that was never followed by opening Insomnia, launchd
+#    runs and pins an older helper than the one in the bundle, and restarting would start code its pin rejects.
+if [[ -n "$NOTES" ]]; then
+    if (( q == 3 && console_had_copy )); then /usr/bin/touch "$NOTES/$WAS_RUNNING" || true; fi
+    helper_pid=$(/bin/launchctl print system/com.gdeml.Insomnia.helper 2>/dev/null \
+        | /usr/bin/sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p') || helper_pid=""
+    if [[ -n "$helper_pid" && -f "$APP/Contents/MacOS/InsomniaHelper" ]] \
+        && /usr/bin/codesign -v "$helper_pid" >/dev/null 2>&1; then
+        { /usr/bin/codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p' \
+            > "$NOTES/$OLD_HELPER"; } || true
+    fi
+fi
+exit 0

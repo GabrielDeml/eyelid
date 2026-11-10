@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The installer's distribution file (docs/RELEASE.md, "What the installer does"). scripts/release.sh fills in the
+     version and the component package's file name, then passes the result to productbuild. -->
+<installer-gui-script minSpecVersion="2">
+    <title>Insomnia</title>
+    <options customize="never" require-scripts="true" hostArchitectures="arm64"/>
+    <!-- Startup disk only: lid mode needs a root-owned /Applications/Insomnia.app. -->
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="14.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <!-- Runs for the Installer app and for `installer -pkg`, before anything is copied. Kong's API client, also called
+         Insomnia, installs to the same path; preinstall repeats that check for installs that bypass this file. A
+         newer Insomnia is refused too: Installer would skip the app but still run the scripts and record the older
+         version. -->
+    <installation-check script="checkInstalledInsomnia()"/>
+    <script><![CDATA[
+function checkInstalledInsomnia() {
+    var bundle = system.files.bundleAtPath("/Applications/Insomnia.app");
+    if (!bundle) {
+        return true;
+    }
+    var id = bundle.CFBundleIdentifier;
+    if (id && id != "com.gdeml.Insomnia") {
+        system.log("Insomnia: /Applications/Insomnia.app is " + id + ", not com.gdeml.Insomnia");
+        my.result.type = "Fatal";
+        my.result.title = "Another app named Insomnia is installed";
+        my.result.message = "Your Applications folder already has a different app called Insomnia. " +
+            "Move or rename it first, then open this installer again.";
+        return false;
+    }
+    var installed = bundle.CFBundleShortVersionString;
+    if (id && installed && system.compareVersions(installed, "__VERSION__") > 0) {
+        system.log("Insomnia: " + installed + " is installed, this package is __VERSION__");
+        my.result.type = "Fatal";
+        my.result.title = "A newer Insomnia is installed";
+        my.result.message = "Insomnia " + installed + " is already installed. To go back to __VERSION__, " +
+            "uninstall Insomnia first (see the README), then open this installer again.";
+        return false;
+    }
+    return true;
+}
+    ]]></script>
+    <pkg-ref id="com.gdeml.Insomnia.pkg"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.gdeml.Insomnia.pkg"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.gdeml.Insomnia.pkg" visible="false">
+        <pkg-ref id="com.gdeml.Insomnia.pkg"/>
+    </choice>
+    <pkg-ref id="com.gdeml.Insomnia.pkg" version="__VERSION__" onConclusion="none">__COMPONENT_PKG__</pkg-ref>
+</installer-gui-script>
