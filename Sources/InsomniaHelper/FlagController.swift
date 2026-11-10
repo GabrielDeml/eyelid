@@ -5,7 +5,7 @@ import IOKit.ps
 import IOKit.pwr_mgt
 import InsomniaShared
 
-/// Sets, clears and reads `SleepDisabled`, and keeps the ownership file. docs/CLOSED_LID.md §2.5 "Set / clear".
+/// Sets, clears and reads `SleepDisabled`, and keeps the ownership file. docs/DESIGN.md "Security".
 /// Used only on the daemon's serial queue (every call blocks for up to ~5.6 s).
 struct FlagController {
     /// IOPMrootDomain "SleepDisabled"; nil if unreadable.

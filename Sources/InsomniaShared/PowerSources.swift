@@ -2,7 +2,7 @@ import Foundation
 import IOKit
 import IOKit.ps
 
-/// Read-only IOPMrootDomain properties, for both binaries (docs/CLOSED_LID.md §1 "State readback"). No privileges,
+/// Read-only IOPMrootDomain properties, for both binaries (docs/DESIGN.md "Kept OS gotchas"). No privileges,
 /// never parses `pmset`; the service object is released before returning.
 public enum RootDomainRegistry {
     /// A Bool property of IOPMrootDomain ("SleepDisabled", "AppleClamshellState"). nil if absent or unreadable.

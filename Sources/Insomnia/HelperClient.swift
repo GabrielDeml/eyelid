@@ -8,7 +8,7 @@ import ServiceManagement
 enum LidSetup: Equatable, Sendable {
     /// Desktop Mac: no lid UI at all.
     case noLid
-    /// Not the root-owned copy in /Applications that `make install` creates (e.g. build/).
+    /// Not the root-owned copy in /Applications that the installer package or `make install` puts there (e.g. build/).
     case notInApplications
     /// Ad-hoc / unsigned build: there is no helper requirement to pin.
     case unsigned

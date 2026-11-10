@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Template for Contents/Library/LaunchDaemons/com.gdeml.Insomnia.helper.plist (docs/CLOSED_LID.md §2.3).
+<!-- Template for Contents/Library/LaunchDaemons/com.gdeml.Insomnia.helper.plist.
      scripts/build.sh fills in the Team ID and the signed helper's cdhash, then signs the app, which seals this file.
      Ad-hoc builds get no daemon plist. -->
 <plist version="1.0">

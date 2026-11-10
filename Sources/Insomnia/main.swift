@@ -16,7 +16,7 @@ let usage = """
       Insomnia --gui                  Start the app from a terminal
       Insomnia --version              Print the version
       Insomnia --helper-status        Print the lid helper's status; exit 0 if registered, 1 if not
-      Insomnia --unregister-helper    Quit Insomnia and unregister the lid helper (used by make uninstall)
+      Insomnia --unregister-helper    Quit Insomnia and unregister the lid helper (used when uninstalling)
       Insomnia --export-icon <dir>    Write AppIcon.iconset PNGs (used by scripts/build.sh)
       Insomnia --snapshot <dir>       Render the panel, Settings and menu bar icons to PNGs (debug builds only)
     """

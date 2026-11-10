@@ -1,6 +1,6 @@
 import os
 
-/// `log stream --predicate 'subsystem == "com.gdeml.Insomnia.helper"'` (docs/CLOSED_LID.md §8).
+/// `log stream --predicate 'subsystem == "com.gdeml.Insomnia.helper"'` (docs/DESIGN.md "Verify").
 enum HelperLog {
     static let subsystem = "com.gdeml.Insomnia.helper"
     static let main = Logger(subsystem: subsystem, category: "main")

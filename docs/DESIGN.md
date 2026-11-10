@@ -276,8 +276,9 @@ Tests/InsomniaTests/      Engine (fakes), LidController (fake helper), helper po
 changed it: the installed-app pin, the heat backstop, sleeping after its own resets, and atomic writes in /var/run. Any
 change gives the helper a new cdhash, so on its next launch the installed app sees the mismatch and re-registers it
 (the silent upgrade below). macOS may ask for approval again in Login Items. The helper's symbol table holds absolute
-object paths, so the cdhash is reproducible only from the same checkout path and toolchain: **build in
-`/Users/gdeml/git/Insomnia`, not a worktree**. App version stays `1.0.0` (build.sh ties it to `HelperInfo.version`;
+object paths, so its cdhash depends on the checkout path, the toolchain and the signing identity. Release builds come
+from CI on the `xcode-27` runner (docs/RELEASE.md). To compare cdhashes locally, **always build from the same checkout
+path**. App version stays `1.0.0` (build.sh ties it to `HelperInfo.version`;
 upgrades are detected by cdhash, not by this string). UserDefaults keys kept from the
 old app are `keepScreenOn`, `closedLidMode` and `helperRegisteredCDHash` (`--unregister-helper` clears `closedLidMode`).
 The new settings use `whenUnplugged`, `powerButtonMinutes` (the name predates the switch), `clickAction` and
@@ -384,21 +385,23 @@ Pass:
   `NSSupportsSuddenTermination = false`. Single instance in `willFinishLaunching`.
 - Reinstalling replaces the bundle under a running helper. Its code then no longer exists on disk, the app's peer
   requirement fails (`errSecCSNoSuchCode`, -67065) and every engage fails, even with an identical cdhash, because an
-  identical cdhash skips the silent upgrade. `make install` therefore runs `launchctl kickstart -k` on the helper after the swap.
+  identical cdhash skips the silent upgrade. `make install` and the installer package's postinstall therefore run
+  `launchctl kickstart -k` on the helper after the swap (postinstall only for an identical cdhash; see Security).
 - Accessory app: `NSApp.activate` before showing the popover; close it on `willSleep`; never set `statusItem.menu`;
   keep the item narrow (no permanent timer text).
 
 ### Build and install
 
 - `scripts/build.sh` builds signed only. An ad-hoc build is refused, because lid mode needs a signed helper.
-- `Makefile` targets are `app`, `run`, `snapshot`, `test`, `install`, `uninstall`, `lid-verify` and `clean`. Only
-  `install` and `uninstall` use sudo.
+- `Makefile` targets are `app`, `run`, `snapshot`, `test`, `install`, `uninstall`, `lid-verify`, `release`, `pkg-dev`
+  and `clean`. Only `install` and `uninstall` use sudo. `release` and `pkg-dev` build the installer package
+  (`scripts/release.sh`, docs/RELEASE.md) and never install anything.
 - `Info.plist` has no `CFBundleURLTypes`; it keeps `LSUIElement` and the sudden/automatic-termination keys.
 - `Package.swift` links IOKit, ServiceManagement and Security only (no Carbon, no UserNotifications).
-- **Upgrading with lid mode engaged:** `make install` quits the running app, which releases the flag and, with the lid
-  shut, sleeps the Mac. Install with the lid open.
-- **v1 leftovers.** `make install` and `make uninstall` remove v1's sudoers rule and safety daemon if they are present,
-  after the running app has quit (see Security).
+- **Upgrading with lid mode engaged:** `make install` and the installer package both quit the running app, which
+  releases the flag and, with the lid shut, sleeps the Mac. Install with the lid open.
+- **v1 leftovers.** `make install`, `make uninstall` and the installer package's preinstall remove v1's sudoers rule and
+  safety daemon if they are present, after the running app has quit (see Security).
 
 ### Verify
 
@@ -446,20 +449,35 @@ uses the path twice:
 
 If any step fails, or the cdhash isn't 40 hex digits, the helper runs reset-only. The cdhash goes into the requirement
 text only after all that. What this proves is the content of a root-owned, non-writable file. That is all the pin needs.
-Nothing but root can change such a file, and no other root-owned Insomnia bundle exists: `make install` deletes the
-previous one.
+Nothing but root can change such a file, and no other root-owned Insomnia bundle exists. `make install` moves the
+previous one aside and deletes it. The installer package replaces `/Applications/Insomnia.app` itself: its payload is
+root:wheel with no group/other write, and `relocatable="false"` (release.sh refuses a package without it) means
+Installer never upgrades a copy anywhere else, so it leaves no second root-owned bundle behind.
 
 Why it pins the cdhash: the Team ID isn't a secret on the developer's Mac. build.sh signs with the Apple Development
 identity in the login keychain, which signs without a prompt. So any process running as the user could sign its own
 client as `com.gdeml.Insomnia`, call `engage` and heartbeat forever, holding `SleepDisabled = 1` with none of the
-app's overheat, bag, battery or unplug rules. With the pin, only the exact root-owned app `make install` put in place
-can engage. That shuts out older signed builds too. Running the same code from somewhere else is the same code.
-Consequences:
+app's overheat, bag, battery or unplug rules. With the pin, only the exact root-owned app that the installer package
+or `make install` put in place can engage. That shuts out older signed builds too. Running the same code from
+somewhere else is the same code. Consequences:
 - A build that isn't the installed one can't talk to the helper. It couldn't use lid mode anyway (`.notInApplications`),
   and its launch check of a set flag now gets no answer, which it treats as unknown.
-- The helper must restart to pin a newly installed app. `make install` already runs `launchctl kickstart -k`, and the
-  silent upgrade re-registers a changed helper. If neither happens, engage fails until the helper restarts. Engage
-  already failed in that case, because the old helper's code was no longer on disk.
+- The helper must restart to pin a newly installed app. For an identical helper cdhash, both install paths restart it
+  with `launchctl kickstart -k`. For a changed one, the silent upgrade re-registers it when the app next opens. If
+  neither happens, engage fails until the helper restarts. Engage already failed in that case, because the old
+  helper's code was no longer on disk.
+- The two install paths differ for a changed helper. launchd still holds the old registration, whose spawn constraint
+  pins the old cdhash, so a restarted new helper can't launch. The package's postinstall knows this and leaves the old
+  helper running (it compares the cdhash preinstall noted with the new one). `make install` kickstarts whenever the
+  helper is registered: its rule came first, to fix the identical-cdhash case, and was never narrowed. Either way no
+  helper serves the new app until the app re-registers it: after postinstall the old helper still pins the old app,
+  and after `make install` the kickstart has stopped the old helper and the new one can't start. Whether that
+  kickstart then reports a failure, and `make install` prints its warning, hasn't been checked.
+  Giving `make install` postinstall's rule is an open item (docs/RELEASE.md "Not done yet").
+- The silent upgrade notices a changed helper only from the user's own settings (`helperRegisteredCDHash`), because
+  the old helper doesn't answer the new app. Another macOS user on the same Mac doesn't re-register, and lid mode
+  fails for them until the user who registered it opens the new version. Open item, to fix before v1.0.1
+  (docs/RELEASE.md "Not done yet").
 
 **Bounded even for a client that passes.** A session holds the flag only while it heartbeats (45 s deadline). The
 helper's battery and heat backstops run on their own events, not on client messages. Its sleep after a lost session or
@@ -473,11 +491,11 @@ copies are all owned by the user. The pin protects only between installs. If tha
 - build and install from a clean checkout, or from a separate account
 - check `git status` before installing
 
-`make install` copies with `ditto --noacl` and strips ACLs (`chmod -RN`), and `InstallLocation.check` and lid-verify
-reject any item that carries one. Otherwise an ACL added to `build/` would survive into a root-owned bundle and leave
-it writable by the user while every mode-bit check passed. A separate locked signing keychain
-(`INSOMNIA_SIGN_KEYCHAIN`) stops other code from signing a client silently. build.sh unlocks it only around the
-`codesign` steps.
+`make install` copies with `ditto --noacl` and strips ACLs (`chmod -RN`), release.sh builds the package from a
+`ditto --noacl` copy, and `InstallLocation.check` and lid-verify reject any item that carries one. Otherwise an ACL
+added to `build/` would survive into a root-owned bundle and leave it writable by the user while every mode-bit check
+passed. A separate locked signing keychain (`INSOMNIA_SIGN_KEYCHAIN`) stops other code from signing a client
+silently. build.sh unlocks it only around the `codesign` steps.
 
 **Files the helper writes.** The ownership file and boot marker live in /var/run, which is `root:daemon 0775`, not
 root-only. Each write goes to `<name>.tmp`: any leftover is unlinked, then the file is created with
@@ -490,11 +508,12 @@ can plant anything there, so this is hardening, not a fix for a reachable attack
 `NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1`. It also installed a root safety daemon,
 `/Library/LaunchDaemons/com.gdeml.insomnia.safety.plist`. Left behind, the sudoers rule lets any process running as
 that user set the flag with no session, no heartbeat and no app rules. The helper sees a foreign flag: it never takes
-it over, and only the boot reset and the battery backstop ever clear it. `make install` and `make uninstall` boot the
-daemon out and delete both, plus v1's staging leftovers and boot marker, whenever either file exists. They do it after
-the running app has quit, so a v1 app holding the flag through the rule can release it first. If `SleepDisabled` is
-still 1 afterwards and the helper doesn't own it (no ownership file), they print the `sudo pmset -a disablesleep 0`
-hint.
+it over, and only the boot reset and the battery backstop ever clear it. `make install`, `make uninstall` and the
+installer package's preinstall boot the daemon out and delete both, plus v1's staging leftovers and boot marker,
+whenever either file exists. They do it after the running app has quit, so a v1 app holding the flag through the rule
+can release it first. If `SleepDisabled` is still 1 afterwards and the helper doesn't own it (no ownership file), they
+print the `sudo pmset -a disablesleep 0` hint (preinstall's goes to `/var/log/install.log`). In preinstall no step of
+this can fail the install.
 
 ## Line budget
 

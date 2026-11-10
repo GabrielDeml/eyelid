@@ -5,7 +5,7 @@ import Testing
 @testable import Insomnia
 
 // The root helper's decisions (InsomniaShared.HelperPolicy) and the app's status mapping (HelperBackend.mapStatus),
-// docs/CLOSED_LID.md §2.5–§2.6. Pure: no root, no XPC, no IOKit writes.
+// docs/DESIGN.md "Safety" and "Security". Pure: no root, no XPC, no IOKit writes.
 
 @Suite("Helper policy: engage")
 struct HelperEngageTests {

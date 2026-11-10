@@ -3,6 +3,7 @@
 # (docs/RELEASE.md "Building a release"). dist/ only ever holds the last run's output.
 #
 #   scripts/release.sh                 sign, notarize, staple, verify → dist/Insomnia-<version>.pkg
+#   scripts/release.sh --dry-run       all the same steps and checks → dist/Insomnia-<version>-dryrun.pkg (CI)
 #   scripts/release.sh --no-notarize   Developer ID signed, not notarized → dist/Insomnia-<version>-unnotarized.pkg
 #   scripts/release.sh --dev           Apple Development app, unsigned pkg → dist/Insomnia-<version>-dev.pkg (test Macs)
 #
@@ -27,20 +28,27 @@ PKG_SCRIPTS=("$ROOT/pkg/scripts/preinstall" "$ROOT/pkg/scripts/postinstall" "$RO
 say()  { printf '\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,12s/^# \{0,1\}//p' "$0"; }
 xp() { xmllint --xpath "$1" "$2" 2>/dev/null || true; }   # one XPath value from an XML file, empty if none
 
 MODE=release
 case "${1:-}" in
     "") ;;
+    --dry-run) MODE=dry-run ;;
     --no-notarize) MODE=no-notarize ;;
     --dev) MODE=dev ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown option '$1'" ;;
 esac
 (( $# <= 1 )) || die "pass at most one option"
-SIGNED=1 SUFFIX=""   # only a notarized package gets the plain name
-case "$MODE" in dev) SIGNED=0 SUFFIX=-dev ;; no-notarize) SUFFIX=-unnotarized ;; esac
+# Only a release-mode package gets the plain name. A dry run is a release in every step and check (NOTARIZE), but its
+# notarized package must never pass for the published one, so its name says what it is.
+SIGNED=1 NOTARIZE=1 SUFFIX=""
+case "$MODE" in
+    dev) SIGNED=0 NOTARIZE=0 SUFFIX=-dev ;;
+    no-notarize) NOTARIZE=0 SUFFIX=-unnotarized ;;
+    dry-run) SUFFIX=-dryrun ;;
+esac
 KEYCHAIN="${INSOMNIA_SIGN_KEYCHAIN:-}"
 
 # Locks the signing keychain again if we unlocked it for productbuild. build.sh locks it after its own use.
@@ -95,7 +103,7 @@ if (( SIGNED )); then
 fi
 
 NOTARY_AUTH=()
-if [[ "$MODE" == release ]]; then
+if (( NOTARIZE )); then
     for tool in notarytool stapler; do
         xcrun --find "$tool" >/dev/null 2>&1 || problems+=("missing tool: xcrun $tool")
     done
@@ -117,9 +125,9 @@ if [[ "$MODE" == release ]]; then
     fi
 fi
 
-# A notarized package carries the plain release name, so it must come from committed code.
+# A notarized package carries the plain release name (or is a dry run of one), so it must come from committed code.
 DIRTY=$(git -C "$ROOT" status --porcelain 2>/dev/null || echo "git status failed")
-if [[ "$MODE" == release && -n "$DIRTY" ]]; then
+if (( NOTARIZE )) && [[ -n "$DIRTY" ]]; then
     problems+=("uncommitted changes in the working tree (git status): release builds come from committed code")
 fi
 
@@ -276,7 +284,7 @@ fi
 if (( KEYCHAIN_UNLOCKED )); then security lock-keychain "$KEYCHAIN"; KEYCHAIN_UNLOCKED=0; fi
 
 # 7. Notarize and staple -----------------------------------------------------------------------------------------------
-if [[ "$MODE" == release ]]; then
+if (( NOTARIZE )); then
     say "Notarizing (notarytool submit --wait, usually a few minutes)"
     rc=0
     xcrun notarytool submit "$PRODUCT" "${NOTARY_AUTH[@]}" --wait --timeout 1h --output-format json \
@@ -306,7 +314,7 @@ if (( SIGNED )); then
     grep -Eq "Developer ID Installer: .*\($APP_TEAM\)" <<<"$SIG" \
         || die "the package isn't signed with a Developer ID Installer identity of team $APP_TEAM"
     grep -q 'Signed with a trusted timestamp' <<<"$SIG" || die "the package signature has no trusted timestamp"
-    if [[ "$MODE" == release ]]; then
+    if (( NOTARIZE )); then
         GK=$(spctl -a -vvv -t install "$PRODUCT" 2>&1) || die "Gatekeeper rejects the package: $GK"
         printf '%s\n' "$GK"
         grep -q 'source=Notarized Developer ID' <<<"$GK" || die "Gatekeeper doesn't see a notarized Developer ID pkg"
@@ -344,6 +352,7 @@ printf '  %-10s %s\n' package "$DIST/$PKG_NAME" checksums "$DIST/SHA256SUMS.txt"
     "$(cut -d' ' -f1 "$DIST/SHA256SUMS.txt")" commit "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
 case "$MODE" in
     release) echo "  Signed, notarized and stapled." ;;
+    dry-run) echo "  Signed, notarized and stapled, but a dry run: don't publish it or pass it on as the release." ;;
     no-notarize) echo "  Signed but NOT notarized: for local trials only, don't publish it." ;;
     dev) echo "  Unsigned package with an Apple Development app: for test machines only, don't publish it." ;;
 esac

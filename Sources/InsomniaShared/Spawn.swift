@@ -1,10 +1,10 @@
 import Darwin
 import Foundation
 
-/// Child processes for both binaries (docs/CLOSED_LID.md §2.5, §2.7). `posix_spawn` with a fixed argv, an explicit
-/// environment, stdin from /dev/null, and POSIX_SPAWN_CLOEXEC_DEFAULT so no descriptor of ours (the sudoers watchdog
-/// pipe, sockets) leaks into the child. Synchronous: callers run it on their own serial context (the helper's state
-/// queue, the app's `LidReconciler`), never on the main thread.
+/// Child processes for both binaries. `posix_spawn` with a fixed argv, an explicit environment, stdin from /dev/null,
+/// and POSIX_SPAWN_CLOEXEC_DEFAULT so no descriptor of ours (the sudoers watchdog pipe, sockets) leaks into the child.
+/// Synchronous: callers run it on their own serial context (the helper's state queue, the app's `LidReconciler`),
+/// never on the main thread.
 public enum Spawn {
     public struct Result: Sendable, Equatable {
         /// Exit status (0…255); 128 + signal if the child was killed by a signal; -1 if it could not be spawned or

@@ -3,7 +3,7 @@
 # Always exits 0: the new app is already in place, so a step that fails here is a warning, not a failed install.
 # Output lands in /var/log/install.log. No `set -e` for the same reason.
 #   1. Restart the lid helper if it is registered and the new helper can run under its registration.
-#   2. Reopen Insomnia for the logged-in user if preinstall quit it.
+#   2. Reopen Insomnia for the logged-in user if preinstall quit it and they are still the one logged in.
 
 LABEL=com.gdeml.Insomnia.helper
 APP=/Applications/Insomnia.app
@@ -14,10 +14,13 @@ if [[ -n "${INSTALLER_TEMP:-}" && -d "$INSTALLER_TEMP" ]]; then NOTES=$INSTALLER
 
 # 1. launchd runs the helper straight out of the bundle, and the install just replaced the files it was started from.
 #    - Same cdhash as the running helper preinstall noted: the restart is required. The app sees nothing to
-#      re-register, so every engage would fail until the helper restarts. `make install` does the same.
+#      re-register, so every engage would fail until the helper restarts. `make install` restarts it too.
 #    - Different cdhash, or none noted: leave the old helper alone. launchd still holds the old registration, whose
-#      spawn constraint pins the old cdhash, so a restarted new helper couldn't launch. The app notices the change and
-#      registers the helper again the next time it opens (step 2 opens it if it was running).
+#      spawn constraint pins the old cdhash, so a restarted new helper couldn't launch. The app registers the helper
+#      again the next time it opens, but only for the macOS user whose settings remember the helper it registered:
+#      the old helper pins the old app, so it doesn't answer the new one. Other users' copies can't tell, and lid
+#      mode fails for them until that user opens Insomnia (docs/RELEASE.md "Not done yet"). Step 2 opens it if it
+#      was running.
 if /bin/launchctl print "system/$LABEL" >/dev/null 2>&1; then
     new=$(/usr/bin/codesign -dvvv "$APP/Contents/MacOS/InsomniaHelper" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')
     old=""
@@ -28,20 +31,30 @@ if /bin/launchctl print "system/$LABEL" >/dev/null 2>&1; then
                 "sudo launchctl kickstart -k system/$LABEL"
         fi
     elif [[ -n "$old" ]]; then
-        echo "Insomnia's lid helper changed ($old -> ${new:-unreadable}): Insomnia sets it up again when it next opens."
+        echo "Insomnia's lid helper changed ($old -> ${new:-unreadable}): Insomnia sets it up again when the user" \
+            "who set up lid mode next opens it."
     else
         echo "Insomnia's lid helper wasn't restarted (no running helper matched the old app): Insomnia sets it up" \
-            "again when it next opens."
+            "again when the user who set up lid mode next opens it."
     fi
 fi
 
 # 2. Installer runs as root, outside the user's session: open the app in the console user's session, as that user.
-#    Skipped when nobody is logged in. (Copies other users were running are quit but not reopened.)
+#    Only for the user preinstall saw at the console running a copy (the marker holds their uid): a fast user switch
+#    during the install must not open Insomnia for someone who wasn't running it. Skipped, and logged, when the note
+#    holds no usable uid (all digits, not 0), or someone else or nobody is at the console now. (Copies other users
+#    were running are quit but not reopened.)
 if [[ -n "$NOTES" && -f "$NOTES/$WAS_RUNNING" ]]; then
-    user=$(/usr/bin/stat -f %Su /dev/console 2>/dev/null)
-    if [[ -n "$user" && "$user" != root && "$user" != loginwindow ]]; then
-        uid=$(/usr/bin/id -u "$user" 2>/dev/null)
-        if [[ -z "$uid" ]] || ! /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/open "$APP"; then
+    was=$(/bin/cat "$NOTES/$WAS_RUNNING" 2>/dev/null)
+    now=$(/usr/bin/stat -f %u /dev/console 2>/dev/null)
+    if [[ ! "$was" =~ ^[0-9]+$ ]] || (( 10#$was == 0 )); then
+        echo "Not reopening Insomnia: preinstall's note holds no usable user id ('$was'). Open it from Applications."
+    elif [[ "$now" != "$was" ]]; then
+        echo "Not reopening Insomnia: the user at the console changed during the install (uid $was, now" \
+            "${now:-unknown}). Open it from Applications."
+    else
+        user=$(/usr/bin/id -un "$was" 2>/dev/null)
+        if [[ -z "$user" ]] || ! /bin/launchctl asuser "$was" /usr/bin/sudo -u "$user" /usr/bin/open "$APP"; then
             echo "Warning: couldn't reopen Insomnia. Open it from Applications."
         fi
     fi

@@ -7,9 +7,10 @@
 #      app and `installer -pkg`; this repeats it for anything that bypasses the distribution. Its message only reaches
 #      /var/log/install.log.
 #   2. Quit every running copy with quit-running.sh, shipped next to this script. Its quit releases lid mode first.
-#   3. Leave notes for postinstall in $INSTALLER_TEMP: whether the logged-in user had a copy running, and the cdhash of
-#      the helper launchd is running, if that is still the one on disk.
-# Any non-zero exit stops the install before anything is copied.
+#   3. Remove what the first version's ad-hoc setup left behind, as `make install` does.
+#   4. Leave notes for postinstall in $INSTALLER_TEMP: the logged-in user's uid if they had a copy running, and the
+#      cdhash of the helper launchd is running, if that is still the one on disk.
+# Any non-zero exit stops the install before anything is copied, so only steps 1 and 2 may fail it.
 set -euo pipefail
 
 APP=/Applications/Insomnia.app
@@ -50,12 +51,33 @@ case $q in
         exit 1 ;;
 esac
 
-# 3. Missing notes only mean postinstall neither reopens Insomnia nor restarts the helper (the app then sets the helper
-#    up again when it next opens). The helper's cdhash is noted only while the running helper is still the code on
+# 3. The first version's passwordless sudoers rule for `pmset -a disablesleep 0|1` and its root safety daemon
+#    (docs/DESIGN.md "Security", v1 leftovers): exactly what the Makefile's REMOVE_LEGACY removes, after the quit
+#    above so a first-version app holding the flag through the rule has released it. A cleanup that fails must not
+#    fail the install, so every step ends in `|| true`. ioreg's output is captured before matching: a pipe into
+#    `grep -q` can die of SIGPIPE under pipefail.
+LEGACY_SUDOERS=/etc/sudoers.d/zz_insomnia
+LEGACY_DAEMON=/Library/LaunchDaemons/com.gdeml.insomnia.safety.plist
+if [[ -e "$LEGACY_SUDOERS" || -e "$LEGACY_DAEMON" ]]; then
+    echo "Removing the old version's passwordless pmset rule and safety daemon" || true
+    /bin/launchctl bootout system/com.gdeml.insomnia.safety 2>/dev/null || true
+    /bin/rm -f "$LEGACY_SUDOERS" "$LEGACY_DAEMON" /etc/sudoers.d/.insomnia.* /Library/LaunchDaemons/.insomnia.* \
+        /var/run/com.gdeml.insomnia.booted 2>/dev/null || true
+    /bin/rm -rf /private/var/root/insomnia.* 2>/dev/null || true
+    rd=$(/usr/sbin/ioreg -r -c IOPMrootDomain -d 1 2>/dev/null) || rd=""
+    if [[ "$rd" != *'"SleepDisabled" = No'* && ! -e /var/run/com.gdeml.Insomnia.helper.engaged ]]; then
+        echo "Your Mac still can't sleep (SleepDisabled is set, not by the lid helper). If no other app should be" \
+            "holding it, run: sudo pmset -a disablesleep 0" || true
+    fi
+fi
+
+# 4. Missing notes only mean postinstall neither reopens Insomnia nor restarts the helper (the app then sets the helper
+#    up again when it next opens). The marker holds the console uid, so postinstall can tell whether the same user is
+#    still at the console. The helper's cdhash is noted only while the running helper is still the code on
 #    disk (`codesign -v <pid>` fails otherwise): after an update that was never followed by opening Insomnia, launchd
 #    runs and pins an older helper than the one in the bundle, and restarting would start code its pin rejects.
 if [[ -n "$NOTES" ]]; then
-    if (( q == 3 && console_had_copy )); then /usr/bin/touch "$NOTES/$WAS_RUNNING" || true; fi
+    if (( q == 3 && console_had_copy )); then printf '%s\n' "$console_uid" > "$NOTES/$WAS_RUNNING" || true; fi
     helper_pid=$(/bin/launchctl print system/com.gdeml.Insomnia.helper 2>/dev/null \
         | /usr/bin/sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p') || helper_pid=""
     if [[ -n "$helper_pid" && -f "$APP/Contents/MacOS/InsomniaHelper" ]] \

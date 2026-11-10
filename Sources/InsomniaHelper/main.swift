@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import InsomniaShared
 
-// InsomniaHelper: the root launchd daemon behind lid mode (SMAppService.daemon). docs/CLOSED_LID.md §2.5.
+// InsomniaHelper: the root launchd daemon behind lid mode (SMAppService.daemon). docs/DESIGN.md "Security".
 //
 // It does exactly one job: set SleepDisabled = 1 while a verified Insomnia.app session wants it, and put it back to 0
 // whenever that stops being true (release, crash, hang, SIGTERM, restart, boot, 10% battery, heat), sleeping a shut-in

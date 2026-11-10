@@ -28,7 +28,7 @@ root:wheel, so the pkg does what `make install` does. There is no zip or DMG dow
 | Architectures | arm64 only (`hostArchitectures="arm64"`). A universal build compiles, but build.sh's rpath/otool steps break on fat binaries and the SpawnConstraint pins only one slice's cdhash, so the helper would be blocked on Intel. | Default, revisit later |
 | Name | Keep *Insomnia*, with guards against Kong's API client of the same name (below) | **Open**: renaming is cheap now and expensive after v1.0.0 |
 | Where releases are built | GitHub Actions on the `xcode-27` runner, triggered by a `v*` tag. `scripts/release.sh` runs the same steps locally. | Decided |
-| Version | `CFBundleShortVersionString` and `HelperInfo.version` move together (build.sh already checks this); the tag must be `v` + that version | Default. Every bump changes the helper's cdhash, which re-registers the helper. Splitting the two needs a Sources change, so it waits for the security pass. |
+| Version | `CFBundleShortVersionString` and `HelperInfo.version` move together (build.sh already checks this); the tag must be `v` + that version | Default. Every bump changes the helper's cdhash, which re-registers the helper (only for the user who set it up; Not done yet). Splitting the two needs a Sources change; open (Not done yet). |
 | Downgrades | Refused by the installation check with a message. (Installer alone would skip the app but still run the scripts and record the older version.) Uninstall first to roll back. | Default |
 | Reopen after install | Only if Insomnia was running before the install | Default |
 | Notarization login | CI: App Store Connect Team API key. Local: a `notarytool store-credentials` keychain profile. | Decided |
@@ -57,10 +57,20 @@ determine if the software can be installed". To be confirmed on a VM.
    `/Applications/Insomnia.app/Contents/MacOS/Insomnia` mapped as its executable (argv can name any path), it opens no
    path taken from argv, it sends no Apple Events, and if `lsof` can't answer for a live process it gives up (the
    install stops). If a copy won't quit, the error names the user it belongs to. As a user (`make install`), it skips a
-   process whose bundle ID reads as someone else's.
-3. Notes for postinstall in `$INSTALLER_TEMP`: a marker if the logged-in user had a copy running, and the helper's
-   cdhash, but only while the helper launchd runs is still the code on disk (`codesign -v <pid>`). After an update
-   that nobody followed by opening Insomnia, launchd still runs and pins an older helper than the bundle's.
+   process whose bundle ID reads as someone else's. With the lid shut, the quit puts an unattended Mac to sleep
+   partway through the install (the app's quit-time `sleepnow`), so install with the lid open (README "Updating");
+   preinstall doesn't check.
+3. v1 leftovers (docs/DESIGN.md "Security"): if `/etc/sudoers.d/zz_insomnia` or
+   `/Library/LaunchDaemons/com.gdeml.insomnia.safety.plist` exists, remove exactly what the Makefile's
+   `REMOVE_LEGACY` removes: boot out `com.gdeml.insomnia.safety`, delete both files, v1's staging leftovers
+   (`/etc/sudoers.d/.insomnia.*`, `/Library/LaunchDaemons/.insomnia.*`, `/private/var/root/insomnia.*`) and its boot
+   marker (`/var/run/com.gdeml.insomnia.booted`). After the quit, so a v1 app holding the flag through the rule has
+   released it. Every step ignores its own failure: a cleanup that fails never stops the install. If `SleepDisabled`
+   is still 1 and the helper doesn't own it, the `sudo pmset -a disablesleep 0` hint goes to the install log.
+4. Notes for postinstall in `$INSTALLER_TEMP`: a marker holding the logged-in user's uid if they had a copy running,
+   and the helper's cdhash, but only while the helper launchd runs is still the code on disk (`codesign -v <pid>`).
+   After an update that nobody followed by opening Insomnia, launchd still runs and pins an older helper than the
+   bundle's.
 
 **Payload.** Built with `pkgbuild --component` on an attribute-free copy of `build/Insomnia.app` (step 4 below),
 `--install-location /Applications`:
@@ -79,12 +89,17 @@ determine if the software can be installed". To be confirmed on a VM.
      not tidying: the install removed the code the running helper was started from, and the app sees nothing to
      re-register, so every engage would fail until the helper restarts.
    - Different cdhash, or none noted: leave it. launchd still holds the old registration, whose spawn constraint pins
-     the old cdhash, so a restarted new helper couldn't launch. The app sees the change and registers the helper again
-     when it next opens.
+     the old cdhash, so a restarted new helper couldn't launch. The app registers the helper again when it next opens,
+     but only for the macOS user whose settings remember the helper they registered (`helperRegisteredCDHash`): the
+     old helper pins the old app, so it doesn't answer the new one. For any other user lid mode fails until that user
+     opens the new version (Not done yet). Every version bump takes this branch.
    Failures and the decision are logged to `/var/log/install.log`.
-2. If the marker exists, reopen Insomnia for the console user (`launchctl asuser` + `sudo -u`). Skipped when nobody is
-   logged in. Copies other users had open (fast user switching) are quit but not reopened, and Insomnia is never opened
-   for someone who wasn't running it.
+   `make install` differs here: it kickstarts whenever the helper is registered, changed or not (docs/DESIGN.md
+   "Security"; Not done yet).
+2. If the marker exists, reopen Insomnia for the console user (`launchctl asuser` + `sudo -u`), but only if the uid in
+   the marker is all digits, not 0, and still the uid that owns `/dev/console`. Otherwise it is skipped and logged:
+   nobody is logged in, or a fast user switch happened during the install. Copies other users had open (fast user
+   switching) are quit but not reopened, and Insomnia is never opened for someone who wasn't running it.
 
 **The user then** opens Insomnia (first install) and turns on lid mode. macOS shows "Background Items Added" and asks
 for approval in System Settings > General > Login Items & Extensions, as it does today. A pkg can't pre-approve this;
@@ -92,16 +107,20 @@ only MDM can. Installing and approving both need an admin.
 
 **Uninstall** (README): `Insomnia --unregister-helper`, `sudo rm -rf /Applications/Insomnia.app`,
 `sudo pkgutil --forget com.gdeml.Insomnia.pkg`, then check `SleepDisabled`. `make uninstall` also forgets the receipt.
+The README also lists how to remove v1's leftovers by hand, for a Mac that never installed a newer version over v1.
 
 ## Building a release: `scripts/release.sh`
 
 ```
 scripts/release.sh                 sign, notarize, staple, verify → dist/Insomnia-<version>.pkg
+scripts/release.sh --dry-run       all the same steps and checks → dist/Insomnia-<version>-dryrun.pkg (CI)
 scripts/release.sh --no-notarize   Developer ID signed, not notarized → dist/Insomnia-<version>-unnotarized.pkg
 scripts/release.sh --dev           Apple Development app, unsigned pkg → dist/Insomnia-<version>-dev.pkg (test Macs)
 ```
 
-Only a notarized package gets the plain name. Each run first empties `dist/` of packages and checksums.
+Only the default mode's package gets the plain name. `--dry-run` is the default mode in every step and check, signed,
+notarized and stapled; only its name differs, so a dry run's package can never pass for the published one. CI uses it
+for `workflow_dispatch`. Each run first empties `dist/` of packages and checksums.
 
 Environment:
 
@@ -117,7 +136,8 @@ Environment:
 Steps, each a hard gate:
 
 1. Read the version from `Resources/Info.plist`; check `RELEASE_TAG` if set. Check every precondition before the
-   build: tools, identities, notary credentials, and, in the default mode, a working tree without uncommitted changes.
+   build: tools, identities, notary credentials, and, in the default and `--dry-run` modes, a working tree without
+   uncommitted changes.
 2. `INSOMNIA_RELEASE=1 scripts/build.sh`; in `--dev`, a plain build that must come out Apple Development signed.
 3. Copy the pkg scripts and `scripts/quit-running.sh` into `build/pkg/scripts`, executable, nothing else.
 4. Copy the app without extended attributes (`ditto --noextattr --noqtn …`), check its signature, and run
@@ -135,9 +155,9 @@ Steps, each a hard gate:
    always fetch and print `notarytool log`, require `Accepted`. Then `xcrun stapler staple` and `stapler validate`.
 8. Verify the product: its Distribution (arm64, local system only, the installation check, the pkg-ref version), that
    it embeds exactly the component package checked in step 5, `pkgutil --check-signature` (Developer ID Installer,
-   trusted timestamp), except in `--dev`, and
-   `spctl -a -vvv -t install` (`Notarized Developer ID`) in the default mode only. Gatekeeper always rejects a pkg
-   that isn't notarized, so `--no-notarize` only prints its verdict.
+   trusted timestamp), except in `--dev`, and `spctl -a -vvv -t install` (`Notarized Developer ID`) in the default and
+   `--dry-run` modes only. Gatekeeper always rejects a pkg that isn't notarized, so `--no-notarize` only prints its
+   verdict.
 9. Only now move the product (built as `build/pkg/unverified.pkg`) to `dist/` under its name, and write
    `dist/SHA256SUMS.txt`.
 
@@ -159,8 +179,9 @@ change with the identity (the designated requirement is hashed into the signatur
 
 ## CI: `.github/workflows/release.yml`
 
-- **Triggers:** a pushed `v*` tag builds and publishes. `workflow_dispatch` builds, signs and notarizes but only uploads
-  a workflow artifact (a dry run).
+- **Triggers:** a pushed `v*` tag builds and publishes. `workflow_dispatch` is a dry run: `scripts/release.sh
+  --dry-run` builds, signs and notarizes `Insomnia-<version>-dryrun.pkg`, which is only uploaded as a workflow
+  artifact.
 - **Job `build`** on `runs-on: xcode-27` (macOS 27, arm64, free on public repos; `macos-latest` only has Xcode 26),
   `environment: release`:
   1. Checkout with `persist-credentials: false`.
@@ -172,15 +193,19 @@ change with the identity (the designated requirement is hashed into the signatur
      a file, so the action leaves no copy of its own), then import the `.p12` into a temporary keychain with
      `apple-actions/import-codesign-certs` (pinned by SHA). `INSOMNIA_SIGN_KEYCHAIN` stays unset: the keychain is
      already unlocked and on the search list.
-  5. `scripts/release.sh` with `RELEASE_TAG` (empty for `workflow_dispatch`).
+  5. `scripts/release.sh` for a tag push, with `RELEASE_TAG`; `scripts/release.sh --dry-run` for `workflow_dispatch`
+     (`RELEASE_TAG` empty).
   6. An `if: always()` step deletes both files and locks the keychain: nothing after this signs.
-  7. Smoke test on the throwaway runner: `sudo installer -pkg dist/Insomnia-<version>.pkg -target /`, then
+  7. Smoke test on the throwaway runner: take the one package in `dist/` (the step fails unless exactly one
+     `dist/Insomnia-*.pkg` exists, so it doesn't hard-code the mode's name), `sudo installer -pkg <it> -target /`, then
      `scripts/lid-verify.sh --staged /Applications/Insomnia.app` (signatures, daemon plist, root ownership), and fail if
      the install changed the owner or mode of `/Applications` (warn if the image's isn't `root:admin drwxrwxr-x`).
   8. Tag builds only: attest the stapled pkg (`actions/attest`, which makes the same SLSA build provenance that
      `actions/attest-build-provenance` v4 now wraps). A dry run's package must not verify as a release. Upload
-     `dist/` as an artifact (kept 14 days).
-- **Job `publish`** (tags only) on `ubuntu-latest` with `contents: write` and no Apple secrets:
+     `dist/` as an artifact, kept 14 days for a tag and 3 days for a dry run. The repo is public, so anyone signed in
+     to GitHub can download a run's artifacts.
+- **Job `publish`** (tags only) on `ubuntu-latest` with `contents: write` and no Apple secrets: fail unless the
+  artifact holds `Insomnia-<version>.pkg` under its plain name, check `SHA256SUMS.txt`, then
   `gh release create "$TAG" --verify-tag --generate-notes` with the pkg and `SHA256SUMS.txt`.
 - **Hardening:** top-level `permissions: {}`; every action pinned to a full commit SHA; no caches; never
   `pull_request_target` or `workflow_run`; secrets only in the `release` environment.
@@ -219,7 +244,9 @@ GitHub (repo settings):
 1. Land everything that changes the helper first, so the public helper stays put.
 2. Set the version in `Resources/Info.plist` (`CFBundleShortVersionString`, and bump `CFBundleVersion`) and in
    `HelperInfo.version`; commit to `main`.
-3. Optional dry run: run the workflow by hand (`workflow_dispatch`) and install the artifact on a test Mac.
+3. Optional dry run: run the workflow by hand (`workflow_dispatch`) and install the artifact on a test Mac. Its
+   package is `Insomnia-<version>-dryrun.pkg`, notarized like a release. Anyone signed in to GitHub can download it
+   for 3 days, so never pass it around as the release.
 4. `git tag v1.0.0 && git push origin v1.0.0`, then approve the `release` environment when asked.
 
 Before the certificates expire (their `notAfter`, see one-time setup step 2): renew both and replace the `.p12` secrets
@@ -234,17 +261,26 @@ On macOS VMs (14, 15, 26, 27), with the pkg downloaded in a browser:
   re-registers when opened; does approval come back?), each with Insomnia running and not running.
 - Upgrade from a `make install` build; downgrade (refused); uninstall; install with Kong's Insomnia present (refused),
   in the Installer app and with `installer -pkg`.
+- Upgrade over a v1 ad-hoc install with `/etc/sudoers.d/zz_insomnia` and the `com.gdeml.insomnia.safety` daemon
+  present: both are gone afterwards, `SleepDisabled` is 0, and the install log has the removal line.
 - Two users with fast user switching, both running Insomnia.
+- Second user after a changed helper: user A sets up lid mode, then user B upgrades to a version with a new helper
+  and opens it before A does. Expected today: lid mode fails for B until A opens the new version (Not done yet).
+  Then A opens it, and lid mode works for both.
 - `ls -ld /Applications` before and after.
 
 Lid mode itself needs a real MacBook.
 
 ## Not done yet
 
+- **Fix before v1.0.1:** after an upgrade that changes the helper's cdhash, only the macOS user whose settings hold
+  `helperRegisteredCDHash` re-registers the helper (postinstall step 1). Another user's copy sees `.enabled`, gets no
+  answer from the old helper and has no saved value, so it treats the change as unknown and lid mode fails for them
+  until that user opens the new version. The fix belongs in the app (`HelperClient.upgradeIfNeeded`). This only
+  happens on an upgrade, and it is the newly installed app that re-registers, so a fix shipped in v1.0.1 already
+  covers the upgrade from v1.0.0.
 - Rename (open decision above).
 - Splitting the app version from `HelperInfo.version`.
-- Stale comments that still say only `make install` creates the root-owned copy
-  (`Sources/InsomniaShared/HelperInfo.swift:13`). Left alone while the security pass is editing Sources.
-- `make install` restarts the helper even when its cdhash changed, which the pkg now avoids (postinstall step 1).
-  Left for the security pass, which is changing that target.
+- `make install` restarts the helper even when its cdhash changed, which postinstall avoids (docs/DESIGN.md
+  "Security" says why they differ). Give `make install` postinstall's rule, or record that the kickstart is harmless.
 - Homebrew tap.

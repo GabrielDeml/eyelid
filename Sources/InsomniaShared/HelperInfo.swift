@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import Security
 
-/// Identifiers and constants shared by the app and the helper. docs/CLOSED_LID.md §2.
+/// Identifiers and constants shared by the app and the helper. docs/DESIGN.md "Security".
 public enum HelperInfo {
     /// launchd Label == MachServices key == helper code-signing identifier.
     public static let label = "com.gdeml.Insomnia.helper"
@@ -10,8 +10,8 @@ public enum HelperInfo {
     /// File name inside Contents/Library/LaunchDaemons/ (SMAppService.daemon(plistName:)).
     public static let plistName = "com.gdeml.Insomnia.helper.plist"
     public static let appBundleID = "com.gdeml.Insomnia"
-    /// The only location the helper may be registered from or run out of (CLOSED_LID.md §2.3): installed by
-    /// `make install`, owned by root, not group/other-writable.
+    /// The only location the helper may be registered from or run out of (docs/DESIGN.md "Security"): installed by
+    /// the installer package or `make install`, owned by root, not group/other-writable.
     public static let installedAppPath = "/Applications/Insomnia.app"
     /// Bundle-relative paths that must exist for setup (otherwise HelperStatus.notFound).
     public static let bundledHelperPath = "Contents/MacOS/InsomniaHelper"
@@ -65,7 +65,7 @@ public enum HelperInfo {
 
     /// Apple-issued certificate of our team, our identifier, and not debuggable (an Xcode-style build with
     /// get-task-allow could be driven by same-user code through task_for_pid). Verified on this Mac: a team-signed
-    /// copy with get-task-allow fails this requirement; the plain build passes (CLOSED_LID.md "Verified on this Mac").
+    /// copy with get-task-allow fails this requirement; the plain build passes.
     private static func requirement(identifier: String, teamID: String) -> String {
         "identifier \"\(identifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
             + " and !(entitlement[\"com.apple.security.get-task-allow\"] exists)"
@@ -73,16 +73,16 @@ public enum HelperInfo {
 }
 
 /// Facts about the running process's own code signature. The Team ID is never hard-coded: whoever signs the build
-/// owns the trust relationship (docs/CLOSED_LID.md §2.2). Read once, off the main thread, and cache the result.
+/// owns the trust relationship (docs/DESIGN.md "Security"). Read once, off the main thread, and cache the result.
 public enum CodeSignature {
     public struct SelfInfo: Sendable, Equatable {
-        /// Team ID from our signature; nil for ad-hoc / unsigned builds (→ sudoers backend).
+        /// Team ID from our signature; nil for ad-hoc / unsigned builds.
         public let teamID: String?
         /// Hex cdhash of the code the kernel is running (csops CS_OPS_CDHASH); the on-disk value only if csops is
         /// unavailable. This is what the helper reports in status().
         public let cdhash: String?
         /// false when the file at our path is no longer the code we are running (replaced since launch).
-        /// The helper then logs and exits non-zero so launchd starts the new binary (CLOSED_LID.md §2.5).
+        /// The helper then logs and exits non-zero so launchd starts the new binary.
         public let matchesDisk: Bool
 
         /// Nothing could be read: no Team ID, no cdhash. The helper treats it as "serve nothing" (reset-only).
@@ -169,8 +169,8 @@ public enum CodeSignature {
     private static func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
 }
 
-/// Install-location safety (CLOSED_LID.md §2.3). launchd runs the helper as root straight out of the bundle, so the
-/// bundle must not be writable by anyone but root. Used by the app before register() and by the helper at start-up.
+/// Install-location safety (docs/DESIGN.md "Security"). launchd runs the helper as root straight out of the bundle, so
+/// the bundle must not be writable by anyone but root. Used by the app before register() and by the helper at start-up.
 public enum InstallLocation {
     public enum Problem: Equatable, Sendable {
         /// Not at HelperInfo.installedAppPath (e.g. build/, ~/Applications, a second copy).

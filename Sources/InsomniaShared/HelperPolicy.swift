@@ -1,6 +1,6 @@
 import Foundation
 
-/// Files the root helper keeps in /var/run (root-owned, emptied at every boot). docs/CLOSED_LID.md §2.5.
+/// Files the root helper keeps in /var/run (root-owned, emptied at every boot). docs/DESIGN.md "Security".
 public enum HelperPaths {
     /// Written + fsynced before SleepDisabled is set to 1, deleted after a verified 0. A restarted helper that finds it
     /// knows the flag it sees is its own (restart reset).
@@ -13,7 +13,7 @@ public enum HelperPaths {
 /// IOKit (Tests/InsomniaTests/HelperPolicyTests.swift): engage, heartbeat, status ownership, the reset after a session
 /// is dropped (release, crash, hang), SIGTERM, and the start-up reset. The daemon (Sources/InsomniaHelper) gathers
 /// the inputs and carries out the result; its timers, XPC plumbing and pmset calls are covered by the device tests
-/// (docs/CLOSED_LID.md §8: T1–T3, T10, T17). docs/CLOSED_LID.md §2.5 state machine.
+/// (docs/DESIGN.md "Verify"). What it decides: docs/DESIGN.md "Safety" (the helper's backstops) and "Security".
 public enum HelperPolicy {
     public enum EngageDecision: Equatable, Sendable {
         /// This connection is already in the engaged set: re-arm its deadline, reply `.ok`.

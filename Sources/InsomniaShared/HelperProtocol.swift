@@ -1,7 +1,7 @@
 import Foundation
 
 // MARK: - XPC contract between Insomnia.app (client) and InsomniaHelper (root launchd daemon).
-// docs/CLOSED_LID.md §2. Change only together with the docs; any change here changes both binaries' cdhash,
+// docs/DESIGN.md "Security". Change only together with the docs; any change here changes both binaries' cdhash,
 // so an installed helper is re-registered automatically (HelperStatus.versionMismatch).
 
 /// Exported by the helper on the Mach service `HelperInfo.machServiceName`.
@@ -45,7 +45,7 @@ public enum HelperResult: Int32, Sendable {
     /// never re-applied without a new engage.
     case overridden = 5
     /// engage from a different uid while another user's sessions hold the flag (fast user switching). Refused so one
-    /// user's session can't keep the flag at 1 after the other releases (CLOSED_LID.md §2.5).
+    /// user's session can't keep the flag at 1 after the other releases.
     case otherUser = 6
     /// The helper's heat backstop (docs/DESIGN.md "Safety"): `.critical`, or `.serious` for
     /// HelperInfo.thermalSeriousWindow with the Mac shut in. Engage refused, or every session dropped, the flag reset,

@@ -11,6 +11,7 @@ The switch at the top of the panel turns Insomnia on. It stays on until you turn
 On a MacBook, *Stay awake with lid closed* (lid mode) keeps your Mac running with the lid shut. *When unplugged*
 decides what happens on battery: *Stay awake* changes nothing; *Sleep with lid closed* pauses lid mode until you plug
 back in, so closing the lid puts your Mac to sleep; and *Turn Insomnia off* turns Insomnia off as soon as you unplug.
+While lid mode is on, Sleep in the Apple menu doesn't work. Turn Insomnia off first.
 
 ## The icon
 
@@ -50,8 +51,8 @@ The lid helper has its own safeguards, which hold whatever the app does:
 - it turns sleep back on if Insomnia quits, crashes or hangs, or your Mac restarts, and in the same case puts it to
   sleep when Insomnia can't
 
-Only the copy of Insomnia that `make install` put in Applications can use the lid helper. Upgrading from the first
-version removes its old password-free `pmset` rule.
+Only the root-owned copy in `/Applications`, put there by the installer package or by `make install`, can use the lid
+helper. Installing this version either way removes the first version's old password-free `pmset` rule.
 
 ## Installing
 
@@ -68,9 +69,13 @@ Insomnia in System Settings > General > Login Items & Extensions. An administrat
 
 ### Updating
 
-Open the newer package. It quits Insomnia, which turns lid mode off, then replaces the app and reopens Insomnia if it
-was running. If it wasn't, open Insomnia once afterwards so it can set up the lid helper again. If macOS asks you to
-allow Insomnia again, allow it as above.
+Open the newer package with the lid open. It quits Insomnia, which turns lid mode off, so with the lid closed your Mac
+may go to sleep partway through the install. It then replaces the app and reopens Insomnia if it was running. If it
+wasn't, open Insomnia once afterwards so it can set up the lid helper again. If macOS asks you to allow Insomnia
+again, allow it as above.
+
+If more than one person on this Mac uses Insomnia, the one who set up lid mode should open it first after an update.
+Until they do, lid mode may not work for the others.
 
 The package won't replace a newer version with an older one; the installer says so and stops. To go back to an older
 version, uninstall first.
@@ -101,6 +106,15 @@ sudo pkgutil --forget com.gdeml.Insomnia.pkg                            # only i
 If `pmset -g` still shows `SleepDisabled 1`, run `sudo pmset -a disablesleep 0`. If you installed with `make install`,
 you can run `make uninstall` instead.
 
+Installing this version, with the package or `make install`, already removed the first version's password-free
+`pmset` rule and safety daemon. If you used the first version and never installed a newer one over it, remove them
+yourself:
+
+```sh
+sudo launchctl bootout system/com.gdeml.insomnia.safety
+sudo rm -f /etc/sudoers.d/zz_insomnia /Library/LaunchDaemons/com.gdeml.insomnia.safety.plist
+```
+
 ## Building from source
 
 You need Xcode 27 (macOS 27 SDK) and an *Apple Development* signing identity. Insomnia runs on macOS 14 or later.
@@ -113,13 +127,11 @@ make install    # root-owned copy in /Applications; asks for your password
 make uninstall
 ```
 
-Lid mode needs `make install`. It sets the system's `SleepDisabled` flag, which is what `sudo pmset -a disablesleep 1`
-does, and that needs root. Insomnia includes a small helper, the lid helper, that does only this. launchd runs it as
-root straight out of the app bundle, so Insomnia sets it up only from a root-owned copy in `/Applications`. The first
-time you turn on lid mode, macOS asks you to allow it in System Settings > General > Login Items & Extensions. A
-"Background Items Added" notification is expected.
-
-While lid mode is on, Sleep in the Apple menu doesn't work. Turn Insomnia off first.
+If you build from source, lid mode needs `make install`. It sets the system's `SleepDisabled` flag, which is what
+`sudo pmset -a disablesleep 1` does, and that needs root. Insomnia includes a small helper, the lid helper, that does
+only this. launchd runs it as root straight out of the app bundle, so Insomnia sets it up only from a root-owned copy
+in `/Applications`. The first time you turn on lid mode, macOS asks you to allow it in System Settings > General >
+Login Items & Extensions. A "Background Items Added" notification is expected.
 
 To uninstall, see [Uninstalling](#uninstalling).
 

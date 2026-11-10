@@ -3,7 +3,7 @@ import Foundation
 import IOKit.ps
 import InsomniaShared
 
-/// The helper's whole state, confined to one serial queue (docs/CLOSED_LID.md §2.5). Decisions come from the pure
+/// The helper's whole state, confined to one serial queue (docs/DESIGN.md "Security"). Decisions come from the pure
 /// `HelperPolicy`; this class gathers the inputs and carries them out. Every timer here exists only while it has work:
 /// per-session deadlines while engaged, the reset retry while a reset failed, the backstop poll on battery ≤ 15%, the
 /// heat window while a session exists and the thermal state is `.serious`.

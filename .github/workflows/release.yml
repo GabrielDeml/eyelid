@@ -1,6 +1,7 @@
 # Builds the installer package for GitHub Releases (docs/RELEASE.md "CI").
 #   push of a v* tag    build, sign, notarize, smoke test, attest, then publish the release
-#   workflow_dispatch   the same build as a dry run: the package is only uploaded as a workflow artifact
+#   workflow_dispatch   the same build as a dry run (release.sh --dry-run): Insomnia-<version>-dryrun.pkg, only
+#                       uploaded as a workflow artifact, kept 3 days
 name: Release
 
 on:
@@ -71,14 +72,16 @@ jobs:
           p12-filepath: ${{ runner.temp }}/developer-id.p12
           p12-password: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
 
-      # RELEASE_TAG is set only for a tag push; release.sh then requires it to be v + the bundle version.
+      # RELEASE_TAG is set only for a tag push; release.sh then requires it to be v + the bundle version. Anything else
+      # is a dry run: every release step and check, but the package is named -dryrun, so it can't pass for the release.
       - name: Build, sign, notarize and package
         env:
           NOTARY_KEY: ${{ runner.temp }}/AuthKey.p8
           NOTARY_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.ASC_API_ISSUER_ID }}
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
-        run: scripts/release.sh
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then scripts/release.sh; else scripts/release.sh --dry-run; fi
 
       # Nothing after this signs. Locked, not deleted: the import action's own post step deletes the keychain and fails
       # the job if it is already gone.
@@ -89,12 +92,15 @@ jobs:
           security lock-keychain signing_temp.keychain || true
 
       # Install the package on this throwaway runner the way a user would, then check what landed: signatures, the
-      # daemon plist, root ownership. Installer must leave /Applications itself alone.
+      # daemon plist, root ownership. Installer must leave /Applications itself alone. The name depends on the mode
+      # (release.sh decides it), so take the one package in dist/.
       - name: Smoke test the installer
         id: smoke
         run: |
-          pkg="dist/Insomnia-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist).pkg"
-          [[ -f "$pkg" ]] || { echo "::error::release.sh didn't write $pkg"; exit 1; }
+          shopt -s nullglob
+          pkgs=(dist/Insomnia-*.pkg)
+          (( ${#pkgs[@]} == 1 )) || { echo "::error::want one dist/ package, found ${#pkgs[@]}: ${pkgs[*]}"; exit 1; }
+          pkg=${pkgs[0]}
           before=$(stat -f '%Su:%Sg %Sp' /Applications)
           sudo installer -pkg "$pkg" -target /
           pkgutil --pkg-info com.gdeml.Insomnia.pkg
@@ -122,7 +128,8 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
-          retention-days: 14
+          # Anyone signed in to GitHub can download a public repo's artifacts: keep a dry run's only briefly.
+          retention-days: ${{ github.event_name == 'push' && 14 || 3 }}
 
   publish:
     # Tag pushes only. A workflow_dispatch run stays a dry run even when started from a tag.
@@ -144,6 +151,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version=${GITHUB_REF_NAME#v}
+          # Only the plain release name is ever published (a -dryrun, -unnotarized or -dev package is refused).
+          [[ -f "dist/Insomnia-$version.pkg" ]] || { echo "::error::no dist/Insomnia-$version.pkg"; ls dist; exit 1; }
           (cd dist && sha256sum -c SHA256SUMS.txt)
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Insomnia $version" \
               --generate-notes "dist/Insomnia-$version.pkg" dist/SHA256SUMS.txt
