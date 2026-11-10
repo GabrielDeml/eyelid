@@ -69,9 +69,11 @@ determine if the software can be installed". To be confirmed on a VM.
    `/Library/LaunchDaemons/com.gdeml.insomnia.safety.plist` exists, remove exactly what the Makefile's
    `REMOVE_LEGACY` removes: boot out `com.gdeml.insomnia.safety`, delete both files, v1's staging leftovers
    (`/etc/sudoers.d/.insomnia.*`, `/Library/LaunchDaemons/.insomnia.*`, `/private/var/root/insomnia.*`) and its boot
-   marker (`/var/run/com.gdeml.insomnia.booted`). After the quit, so a v1 app holding the flag through the rule has
-   released it. Every step ignores its own failure: a cleanup that fails never stops the install. If `SleepDisabled`
-   is still 1 and the helper doesn't own it, the `sudo pmset -a disablesleep 0` hint goes to the install log.
+   marker (`/var/run/com.gdeml.insomnia.booted`). After the quit, but that quits only Eyelid: as root a process counts
+   by its path alone, which can't tell a v1 copy from someone else's app, so a v1 copy still running loses its rule
+   (`make install` quits it as the user first). Every step ignores its own failure: a cleanup that fails never stops
+   the install. If `SleepDisabled` is still 1 and the helper doesn't own it, the `sudo pmset -a disablesleep 0` hint
+   goes to the install log.
 4. Notes for postinstall in `$INSTALLER_TEMP`: a marker holding the logged-in user's uid if they had a copy running,
    and the helper's cdhash, but only while the helper launchd runs is still the code on disk (`codesign -v <pid>`).
    After an update that nobody followed by opening Eyelid, launchd still runs and pins an older helper than the

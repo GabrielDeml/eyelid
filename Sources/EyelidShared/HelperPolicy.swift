@@ -37,7 +37,7 @@ public enum HelperPolicy {
                               onBattery: Bool, batteryPercent: Int?, flag: Bool?, ownsFlag: Bool,
                               hot: Bool = false) -> EngageDecision {
         if alreadyEngaged { return .alreadyEngaged }
-        // Fast user switching: one uid owns the engaged set (Decision 39).
+        // Fast user switching: one uid owns the engaged set.
         if let engagedUID, engagedUID != requesterUID { return .refuse(.otherUser) }
         if backstopTrips(onBattery: onBattery, batteryPercent: batteryPercent, flag: true) { return .refuse(.backstop) }
         if hot { return .refuse(.hot) }
@@ -66,7 +66,7 @@ public enum HelperPolicy {
         return .ok
     }
 
-    /// Root battery backstop (§2.5): on battery, at or below HelperInfo.backstopPercent, with the flag at 1 (whoever
+    /// Root battery backstop: on battery, at or below HelperInfo.backstopPercent, with the flag at 1 (whoever
     /// set it). An unknown percentage never trips it.
     public static func backstopTrips(onBattery: Bool, batteryPercent: Int?, flag: Bool?) -> Bool {
         guard onBattery, flag == true, let p = batteryPercent else { return false }

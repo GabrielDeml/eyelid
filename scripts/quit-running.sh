@@ -9,13 +9,24 @@
 # alone. As root (the pkg's preinstall) only the copy being replaced counts, judged by the executable the kernel has
 # mapped, and there are no Apple Events (see ours() and registered()). Fails closed: if pgrep or lsof can't answer, the
 # copies count as running, and as a user a copy whose bundle ID can't be read counts as ours.
-# Usage: scripts/quit-running.sh [timeout seconds, default 10]
+# --insomnia quits the app's old name instead (bundle ID com.gdeml.Insomnia: v1 and pre-rename builds, wherever they
+# run), so `make install` / `make uninstall` remove what those set up only after their quit has released the flag. The
+# same bundle-ID check leaves any other app named Insomnia alone. Refused as root, where a process counts by its path
+# alone and /Applications/Insomnia.app may be someone else's app.
+# Usage: scripts/quit-running.sh [--insomnia] [timeout seconds, default 10]
 # Exit 0 = nothing was running, 3 = it was running and has quit, 1 = it is still running (or that can't be told).
 set -uo pipefail
 
+NAME=Eyelid
+ID=com.gdeml.Eyelid
+if [[ "${1:-}" == --insomnia ]]; then
+    (( EUID != 0 )) || { echo "--insomnia can't be used as root" >&2; exit 1; }
+    NAME=Insomnia ID=com.gdeml.Insomnia
+    shift
+fi
 # Test hooks: override the bundle id and process pattern.
-ID=${EYELID_QUIT_TEST_ID:-com.gdeml.Eyelid}
-PATTERN=${EYELID_QUIT_TEST_PATTERN:-'/Contents/MacOS/Eyelid( |$)'}
+ID=${EYELID_QUIT_TEST_ID:-$ID}
+PATTERN=${EYELID_QUIT_TEST_PATTERN:-"/Contents/MacOS/$NAME( |\$)"}
 TIMEOUT=${1:-10}
 
 # Sets PIDS to the matching processes that are ours. Returns 0 = some, 1 = none, 2 = pgrep or lsof failed (can't
@@ -60,14 +71,14 @@ registered() {
     (( EUID != 0 )) || return 1
     [[ "$(/usr/bin/osascript -e "application id \"$ID\" is running" 2>/dev/null)" == true ]]
 }
-cant_tell() { echo "Couldn't check whether Eyelid is running. Quit it from its panel, then try again." >&2; exit 1; }
+cant_tell() { echo "Couldn't check whether ${NAME} is running. Quit it from its panel, then try again." >&2; exit 1; }
 
 find_pids; found=$?
 (( found == 2 )) && cant_tell
 if (( found == 1 )); then
     registered || exit 0
 fi
-echo "Quitting Eyelid…"
+echo "Quitting ${NAME}…"
 SENT=" "
 for pid in $PIDS; do kill -TERM "$pid" 2>/dev/null; SENT+="$pid "; done
 if [[ -z "$PIDS" ]]; then
@@ -86,7 +97,7 @@ while :; do
         [[ "$SENT" == *" $pid "* ]] || { kill -TERM "$pid" 2>/dev/null; SENT+="$pid "; }
     done
     if (( SECONDS >= end )); then
-        echo "Eyelid didn't quit within $TIMEOUT seconds. Quit it from its panel, then try again." >&2
+        echo "${NAME} didn't quit within $TIMEOUT seconds. Quit it from its panel, then try again." >&2
         if (( EUID == 0 )); then   # under Installer the copy may belong to another logged-in user
             left=${PIDS% }
             echo "Still running for: $(/bin/ps -o user= -p "${left// /,}" 2>/dev/null | sort -u | tr '\n' ' ')" >&2

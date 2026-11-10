@@ -23,7 +23,8 @@ snapshot:
 	@"$$(swift build --show-bin-path)/Eyelid" --snapshot "$(SNAPDIR)"
 
 # v1's ad-hoc setup left a passwordless sudoers rule for `pmset -a disablesleep 0|1` and a root safety daemon
-# (docs/DESIGN.md "Security", v1 leftovers). install and uninstall remove both, after the running app has quit.
+# (docs/DESIGN.md "Security", v1 leftovers). install and uninstall remove both after QUIT_OLD, so a v1 app holding the
+# flag through the rule has released it.
 LEGACY_SUDOERS := /etc/sudoers.d/zz_insomnia
 LEGACY_DAEMON  := /Library/LaunchDaemons/com.gdeml.insomnia.safety.plist
 REMOVE_LEGACY   = if [ -e $(LEGACY_SUDOERS) ] || [ -e $(LEGACY_DAEMON) ]; then \
@@ -37,12 +38,18 @@ REMOVE_LEGACY   = if [ -e $(LEGACY_SUDOERS) ] || [ -e $(LEGACY_DAEMON) ]; then \
 	fi; \
 fi
 
+# Quits every running copy of the old app (bundle ID com.gdeml.Insomnia: v1 or a pre-rename build), wherever it runs.
+# v1's ad-hoc builds never ran from /Applications, so nothing below would quit them. Its bundle-ID check leaves any
+# other app named Insomnia alone. Exit 3 means it was running and has quit.
+QUIT_OLD = scripts/quit-running.sh --insomnia || [ $$? -eq 3 ]
+
 # Builds from before the rename were called Insomnia: /Applications/Insomnia.app, bundle ID com.gdeml.Insomnia, helper
 # com.gdeml.Insomnia.helper (docs/DESIGN.md "Security", pre-rename builds). Only a copy with exactly that bundle ID is
-# touched: any other app named Insomnia is someone else's. Its own --unregister-helper quits it (its quit releases lid
-# mode) and unregisters its helper, which resets a flag it owns when stopped. If that fails the old copy stays and
-# the caller stops, so no old helper is left registered to a deleted bundle. Runs before REMOVE_LEGACY, whose
-# SleepDisabled hint only knows the new helper's ownership file. Settings aren't migrated: the defaults domain is new.
+# touched: any other app named Insomnia is someone else's. QUIT_OLD has already quit it (its quit releases lid mode);
+# its own --unregister-helper unregisters its helper, which resets a flag it owns when stopped. If that fails the old
+# copy stays and the caller stops, so no old helper is left registered to a deleted bundle. Runs before REMOVE_LEGACY,
+# whose SleepDisabled hint only knows the new helper's ownership file. Settings aren't migrated: the defaults domain is
+# new.
 PRERENAME_APP := /Applications/Insomnia.app
 PRERENAME_ID  := com.gdeml.Insomnia
 PRERENAME_SUPPORT = $$HOME/Library/Application Support/Insomnia
@@ -78,6 +85,7 @@ install: app
 	scripts/lid-verify.sh --staged "$$T/Eyelid.app" || { echo "the staged copy failed verification; nothing installed"; exit 1; }; \
 	q=0; scripts/quit-running.sh || q=$$?; \
 	if [ $$q -ne 0 ] && [ $$q -ne 3 ]; then echo "nothing installed"; exit 1; fi; \
+	$(QUIT_OLD) || { echo "nothing installed"; exit 1; }; \
 	$(REMOVE_PRERENAME) || { echo "nothing installed"; exit 1; }; \
 	$(REMOVE_LEGACY); \
 	if [ -e "$(DEST)" ]; then sudo mv "$(DEST)" "$$T/previous.app"; fi; \
@@ -93,17 +101,19 @@ install: app
 lid-verify:
 	@scripts/lid-verify.sh $(if $(APP_TO_VERIFY),$(APP_TO_VERIFY),$(DEST))
 
-# Quit every running copy (its quit releases lid mode while the helper still exists; abort if it won't quit),
-# unregister the helper (it resets a flag it owns when stopped), remove a pre-rename Insomnia build and v1's leftovers,
-# check SleepDisabled is back to 0, then delete the app and forget the installer receipt, if the pkg installed it.
+# Quit every running copy, Eyelid's and the old Insomnia's (its quit releases lid mode while the helper still exists;
+# abort if it won't quit), remove a pre-rename Insomnia build, unregister the helper (it resets a flag it owns when
+# stopped), remove v1's leftovers, check SleepDisabled is back to 0, then delete the app and forget the installer
+# receipt, if the pkg installed it.
 uninstall:
 	@q=0; scripts/quit-running.sh || q=$$?; if [ $$q -ne 0 ] && [ $$q -ne 3 ]; then echo "nothing removed"; exit 1; fi
-	@if [ -x "$(DEST)/Contents/MacOS/Eyelid" ]; then "$(DEST)/Contents/MacOS/Eyelid" --unregister-helper; fi
+	@$(QUIT_OLD) || { echo "nothing removed"; exit 1; }
 	@$(REMOVE_PRERENAME) || { echo "nothing removed"; exit 1; }
+	@if [ -x "$(DEST)/Contents/MacOS/Eyelid" ]; then "$(DEST)/Contents/MacOS/Eyelid" --unregister-helper; fi
 	@$(REMOVE_LEGACY)
 	@if ! /usr/sbin/ioreg -r -c IOPMrootDomain -d 1 | grep -q '"SleepDisabled" = No'; then \
 		echo "Your Mac still can't sleep (SleepDisabled is set). If no other app should be holding it, run: sudo pmset -a disablesleep 0"; fi
-	@rm -f "$$HOME/Library/Application Support/Eyelid/lid-engaged" "$$HOME/Library/Application Support/Eyelid/control.sock"
+	@rm -f "$(PRERENAME_SUPPORT)/lid-engaged" "$(PRERENAME_SUPPORT)/control.sock"
 	sudo rm -rf "$(DEST)"
 	@if pkgutil --pkg-info com.gdeml.Eyelid.pkg >/dev/null 2>&1; then sudo pkgutil --forget com.gdeml.Eyelid.pkg; fi
 

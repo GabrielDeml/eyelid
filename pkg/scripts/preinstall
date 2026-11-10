@@ -57,10 +57,11 @@ case $q in
 esac
 
 # 3. The first version's passwordless sudoers rule for `pmset -a disablesleep 0|1` and its root safety daemon
-#    (docs/DESIGN.md "Security", v1 leftovers): exactly what the Makefile's REMOVE_LEGACY removes, after the quit
-#    above so a first-version app holding the flag through the rule has released it. A cleanup that fails must not
-#    fail the install, so every step ends in `|| true`. ioreg's output is captured before matching: a pipe into
-#    `grep -q` can die of SIGPIPE under pipefail.
+#    (docs/DESIGN.md "Security", v1 leftovers): exactly what the Makefile's REMOVE_LEGACY removes. The quit above
+#    reached only Eyelid (as root a process counts by its path alone, so a first-version copy can't be told from
+#    someone else's app), so a first-version app still running loses its rule and the SleepDisabled hint below is the
+#    fallback. A cleanup that fails must not fail the install, so every step ends in `|| true`. ioreg's output is
+#    captured before matching: a pipe into `grep -q` can die of SIGPIPE under pipefail.
 LEGACY_SUDOERS=/etc/sudoers.d/zz_insomnia
 LEGACY_DAEMON=/Library/LaunchDaemons/com.gdeml.insomnia.safety.plist
 if [[ -e "$LEGACY_SUDOERS" || -e "$LEGACY_DAEMON" ]]; then

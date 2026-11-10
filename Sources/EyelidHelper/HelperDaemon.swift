@@ -330,7 +330,7 @@ final class HelperDaemon: @unchecked Sendable {
         resetRetry = nil
     }
 
-    /// Someone cleared the flag while we owned it (§2.5 "External override"): respected, never re-applied.
+    /// Someone else cleared the flag while we owned it (an external override): respected, never re-applied.
     private func handleOverride() {
         HelperLog.flag.notice("SleepDisabled was cleared by something else; dropping \(self.sessions.count, privacy: .public) session(s)")
         dropAll(.overridden)

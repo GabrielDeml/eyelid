@@ -359,8 +359,9 @@ Pass:
 - **`sleepNow()`**: release, read back 0, `/usr/bin/pmset sleepnow`.
 - **`.stuck`** (flag still 1 after 2 s, 15 s after a lost helper): danger caption with **Reset with Password…** (an
   osascript admin prompt running `pmset -a disablesleep 0`). Re-checked every 10 s; clears itself when the flag reads 0.
-- **Launch**: delete stale `~/Library/Application Support/Eyelid/{lid-engaged,control.sock}`. If the flag reads 1 and
-  `status()` says the helper owns it (its reset is pending), poll up to 15 s, then `.stuck`. A foreign flag is left alone.
+- **Launch**: delete v1's stale `~/Library/Application Support/Insomnia/{lid-engaged,control.sock}` (old names: v1
+  put them there). If the flag reads 1 and `status()` says the helper owns it (its reset is pending), poll up to 15 s,
+  then `.stuck`. A foreign flag is left alone.
 - **Quit**: release with a 2 s timeout; on timeout invalidate and let the helper reset.
 
 ### Kept OS gotchas (all load-bearing)
@@ -402,7 +403,7 @@ Pass:
 - **Upgrading with lid mode engaged:** `make install` and the installer package both quit the running app, which
   releases the flag and, with the lid shut, sleeps the Mac. Install with the lid open.
 - **v1 leftovers.** `make install`, `make uninstall` and the installer package's preinstall remove v1's sudoers rule and
-  safety daemon if they are present, after the running app has quit (see Security).
+  safety daemon if they are present, after the running app has quit (`make` also quits a running v1; see Security).
 
 ### Verify
 
@@ -511,10 +512,14 @@ can plant anything there, so this is hardening, not a fix for a reachable attack
 that user set the flag with no session, no heartbeat and no app rules. The helper sees a foreign flag: it never takes
 it over, and only the boot reset and the battery backstop ever clear it. `make install`, `make uninstall` and the
 installer package's preinstall boot the daemon out and delete both, plus v1's staging leftovers and boot marker,
-whenever either file exists. They do it after the running app has quit, so a v1 app holding the flag through the rule
-can release it first. If `SleepDisabled` is still 1 afterwards and the helper doesn't own it (no ownership file), they
-print the `sudo pmset -a disablesleep 0` hint (preinstall's goes to `/var/log/install.log`). In preinstall no step of
-this can fail the install. The leftovers keep their old lowercase *insomnia* names: they name files v1 put on disk.
+whenever either file exists. `make install` and `make uninstall` do it after quitting Eyelid and any running copy of
+the old app wherever it runs (`quit-running.sh --insomnia`, as the user; its bundle-ID check leaves other apps named
+Insomnia alone), so a v1 app holding the flag through the rule can release it first. The package quits only Eyelid:
+as root a process counts by its path alone, which can't tell a v1 copy from someone else's app, so a v1 copy still
+running loses its rule and the hint is the fallback. If `SleepDisabled` is still 1 afterwards and the helper doesn't
+own it (no ownership file), they print the `sudo pmset -a disablesleep 0` hint (preinstall's goes to
+`/var/log/install.log`). In preinstall no step of this can fail the install. The leftovers keep their old lowercase
+*insomnia* names: they name files v1 put on disk.
 
 **Pre-rename builds.** The app was called Insomnia until just before its first release (docs/RELEASE.md "Decisions").
 A Mac that built it from source may still have a root-owned `/Applications/Insomnia.app` (bundle ID

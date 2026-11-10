@@ -52,7 +52,8 @@ The lid helper has its own safeguards, which hold whatever the app does:
   sleep when Eyelid can't
 
 Only the root-owned copy in `/Applications`, put there by the installer package or by `make install`, can use the lid
-helper. Installing this version either way removes the first version's old password-free `pmset` rule.
+helper. Installing this version either way removes the first version's old password-free `pmset` rule. If the first
+version is running, quit it before you open the package (`make install` quits it for you).
 
 ## Installing
 
@@ -63,7 +64,7 @@ the system can change.
 
 Until shortly before its first release this app was called Insomnia. If you built that version from source, the
 installer stops before changing anything and tells you to remove it first (see
-[Building from source](#building-from-source)).
+[Building from source](#building-from-source)), then open the package again.
 
 Then open Eyelid from Applications. The first time you turn on lid mode, macOS shows "Background Items Added". Allow
 Eyelid in System Settings > General > Login Items & Extensions. An administrator has to approve it.
@@ -108,8 +109,8 @@ If `pmset -g` still shows `SleepDisabled 1`, run `sudo pmset -a disablesleep 0`.
 you can run `make uninstall` instead.
 
 Installing this version, with the package or `make install`, already removed the first version's password-free
-`pmset` rule and safety daemon. If you used the first version and never installed a newer one over it, remove them
-yourself:
+`pmset` rule and safety daemon. If you used the first version and never installed a newer one over it, quit it from
+its menu, then remove them yourself:
 
 ```sh
 sudo launchctl bootout system/com.gdeml.insomnia.safety

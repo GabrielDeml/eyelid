@@ -178,9 +178,9 @@ final class LidController: LidControlling {
             forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
         ) { _ in MainActor.assumeIsolated { [weak self] in self?.poweringOff = true } }
         await refreshSetup()
-        // Leftovers of the old app (its user-side marker and CLI socket); the helper never used them.
+        // v1's leftovers (its user-side marker and CLI socket, under its old name); the helper never used them.
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Eyelid")
+            .appendingPathComponent("Insomnia")
         for name in ["lid-engaged", "control.sock"] {
             if let url = support?.appendingPathComponent(name) { try? FileManager.default.removeItem(at: url) }
         }
