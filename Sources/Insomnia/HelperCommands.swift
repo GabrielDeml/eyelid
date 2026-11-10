@@ -12,13 +12,34 @@ import ServiceManagement
 /// so run them from /Applications/Insomnia.app/Contents/MacOS/Insomnia.
 @MainActor
 enum HelperCommands {
-    /// `--helper-status`: prints the SMAppService status; exit 0 if registered (enabled or awaiting approval), 1 if
-    /// not. scripts/build.sh uses the exit code to refuse an ad-hoc build over a registered helper (Decision 38).
+    /// `--helper-status`: prints the SMAppService status and, if registered, whether the helper answers this copy over
+    /// XPC (it answers only the installed app it pinned: docs/DESIGN.md "Security"). Exit 0 if registered (enabled or
+    /// awaiting approval), 1 if not; the XPC answer never changes the exit code.
     static func status() -> Int32 {
         let status = SMAppService.daemon(plistName: HelperInfo.plistName).status
         print(describe(status))
         if status == .requiresApproval { printError("Approve it in System Settings > General > Login Items & Extensions.") }
+        if status == .enabled {
+            if let answer = wait({ await HelperClient().query() }) {
+                print("helper answered: version \(answer.version), cdhash \(answer.cdhash), sleep disabled: \(answer.sleepDisabled ? "yes" : "no")")
+            } else {
+                print("helper didn't answer (not running, or this isn't the installed copy it trusts)")
+            }
+        }
         return isRegistered(status) ? 0 : 1
+    }
+
+    /// Runs `work` off the main thread and blocks until it finishes. Headless only: the XPC replies and the call's
+    /// timeout arrive on other queues, so nothing here needs the main thread.
+    private static func wait<T: Sendable>(_ work: @escaping @Sendable () async -> T?) -> T? {
+        let box = Waiter<T>()
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            box.set(await work())
+            done.signal()
+        }
+        done.wait()
+        return box.value
     }
 
     /// `--unregister-helper`: asks a running GUI instance to quit (its Release runs) and waits up to 5 s, then
@@ -99,6 +120,13 @@ enum HelperCommands {
 
     private static func printError(_ s: String) {
         FileHandle.standardError.write(Data((s + "\n").utf8))
+    }
+
+    private final class Waiter<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: T?
+        func set(_ v: T?) { lock.lock(); result = v; lock.unlock() }
+        var value: T? { lock.lock(); defer { lock.unlock() }; return result }
     }
 
     /// Completion state shared with SMAppService's callback queue.

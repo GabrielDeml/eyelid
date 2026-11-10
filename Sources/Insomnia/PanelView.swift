@@ -115,6 +115,7 @@ extension PanelState {
         case .foreignFlag: Caption(text: "Another app has already turned off sleep", tone: .warning)
         case .otherUser: Caption(text: "In use by another user on this Mac", tone: .warning)
         case .lowBattery: Caption(text: "Battery too low. Plug in your Mac.", tone: .warning, link: tryAgain)
+        case .hot: Caption(text: "Your Mac got hot.", tone: .warning, link: tryAgain)
         case .setFailed: Caption(text: "Couldn't turn off sleep.", tone: .warning, link: tryAgain)
         case .lost: Caption(text: "Lost contact with the lid helper.", tone: .warning, link: tryAgain)
         case .overridden: Caption(text: "Something else turned sleep back on.", tone: .warning, link: tryAgain)

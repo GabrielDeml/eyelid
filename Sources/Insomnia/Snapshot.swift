@@ -155,6 +155,7 @@ private final class ReadyClient: HelperClienting {
     func heartbeat() async -> Int32 { -1 }
     func query() async -> HelperAnswer? { nil }
     func flag() async -> Bool? { nil }
+    func isUnattendedNow() async -> Bool { false }
     func pmset(_ verb: String) async {}
     func resetWithPassword() async -> Bool { false }
 }

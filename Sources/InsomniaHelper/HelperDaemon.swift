@@ -5,7 +5,8 @@ import InsomniaShared
 
 /// The helper's whole state, confined to one serial queue (docs/CLOSED_LID.md §2.5). Decisions come from the pure
 /// `HelperPolicy`; this class gathers the inputs and carries them out. Every timer here exists only while it has work:
-/// per-session deadlines while engaged, the reset retry while a reset failed, the backstop poll on battery ≤ 15%.
+/// per-session deadlines while engaged, the reset retry while a reset failed, the backstop poll on battery ≤ 15%, the
+/// heat window while a session exists and the thermal state is `.serious`.
 final class HelperDaemon: @unchecked Sendable {
     let queue = DispatchQueue(label: "com.gdeml.Insomnia.helper.state")
     let selfInfo: CodeSignature.SelfInfo
@@ -14,10 +15,16 @@ final class HelperDaemon: @unchecked Sendable {
     // State (queue only).
     private var sessions: [ObjectIdentifier: HelperSession] = [:]
     private var ownsFlag = false
+    /// What follows the next successful reset of our flag (kept across a failed reset for its retry).
+    private var afterReset = HelperPolicy.AfterReset.nothing
     private var resetRetry: DispatchSourceTimer?
     private var backstopPoll: DispatchSourceTimer?
+    /// Uptime (ns) since the thermal state has been `.serious` or worse; nil below. Tracked all the time.
+    private var seriousSince: UInt64?
+    private var heatWindow: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
     private var powerSource: CFRunLoopSource?
+    private var thermalObserver: NSObjectProtocol?
 
     init(selfInfo: CodeSignature.SelfInfo) {
         self.selfInfo = selfInfo
@@ -27,7 +34,7 @@ final class HelperDaemon: @unchecked Sendable {
 
     // MARK: Start-up (main thread, before the listener is resumed)
 
-    /// SIGTERM handling, boot / restart reset, battery backstop. Runs in every mode, including reset-only.
+    /// SIGTERM handling, boot / restart reset, battery and heat backstops. Runs in every mode, including reset-only.
     func startUp() {
         signal(SIGTERM, SIG_IGN)
         let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: queue)
@@ -50,6 +57,14 @@ final class HelperDaemon: @unchecked Sendable {
             HelperLog.backstop.error("IOPSNotificationCreateRunLoopSource failed; backstop checks only on engage")
         }
         queue.async { self.checkBackstop(reason: "start") }
+
+        // Thermal changes drive the heat backstop; engage and heartbeat sample it too, in case a note is missed.
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: nil
+        ) { [unowned self] _ in
+            self.queue.async { self.checkHeat(reason: "thermal state changed") }
+        }
+        queue.async { self.checkHeat(reason: "start") }
     }
 
     private func startReset() {
@@ -61,10 +76,11 @@ final class HelperDaemon: @unchecked Sendable {
         case .bootReset:
             if let current { flag.writeBootMarker(current) }
             // The setting persists across reboots; nobody can still want it (Amphetamine/MDM re-apply their own).
-            startUpReset(context: "boot reset")
+            startUpReset(context: "boot reset", then: .nothing)
         case .restartReset:
-            // The previous helper instance died holding the flag; no session survives a restart.
-            startUpReset(context: "restart reset")
+            // The previous helper instance died holding the flag; no session survives a restart, and the app that
+            // held it may be gone or stopped too: sleep a shut-in Mac.
+            startUpReset(context: "restart reset", then: .sleepIfShutIn)
         case .none:
             break
         }
@@ -74,7 +90,7 @@ final class HelperDaemon: @unchecked Sendable {
     /// safe. Ownership is recorded on disk BEFORE trying, so if this instance dies or the reset keeps failing, the
     /// next start in the same boot takes the restart-reset path instead of forgetting the flag. The file is deleted
     /// only after a verified 0 (resetOwnedFlag).
-    private func startUpReset(context: String) {
+    private func startUpReset(context: String, then: HelperPolicy.AfterReset) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard HelperPolicy.startUpResets(flag: flag.read()) else {
             flag.deleteOwnershipFile()
@@ -85,7 +101,7 @@ final class HelperDaemon: @unchecked Sendable {
             HelperLog.flag.error("\(context, privacy: .public): couldn't write the ownership file; resetting anyway")
         }
         ownsFlag = true   // so a failed reset is retried like our own
-        resetOwnedFlag(context: context)
+        resetOwnedFlag(context: context, then: then)
     }
 
     /// The start-up self-check failed (the binary on disk isn't the one running): run only the reset step, which only
@@ -103,6 +119,7 @@ final class HelperDaemon: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         HelperLog.main.notice("SIGTERM (\(self.sessions.count, privacy: .public) session(s), owns flag: \(self.ownsFlag, privacy: .public))")
         dropAll(.notEngaged)
+        afterReset = .nothing   // shutdown, logout, unregister: never sleep on the way out
         let wasOwned = ownsFlag
         var cleared = false
         if wasOwned, flag.set(false) {
@@ -127,6 +144,8 @@ final class HelperDaemon: @unchecked Sendable {
 
     func engage(_ session: HelperSession, _ reply: @escaping @Sendable (Int32, Bool) -> Void) {
         dispatchPrecondition(condition: .onQueue(queue))
+        // A trip drops any sessions (this one included) before the decision; while hot, engage is refused.
+        let hot = checkHeat(reason: "engage")
         var now = flag.read()
         if ownsFlag && now == false && !sessions.isEmpty {
             handleOverride()
@@ -135,7 +154,7 @@ final class HelperDaemon: @unchecked Sendable {
         let battery = PowerSourceReading.current()
         let decision = HelperPolicy.engage(alreadyEngaged: session.engaged, engagedUID: engagedUID,
                                            requesterUID: session.uid, onBattery: !battery.isOnAC,
-                                           batteryPercent: battery.percent, flag: now, ownsFlag: ownsFlag)
+                                           batteryPercent: battery.percent, flag: now, ownsFlag: ownsFlag, hot: hot)
         switch decision {
         case .alreadyEngaged:
             armDeadline(session)
@@ -158,7 +177,8 @@ final class HelperDaemon: @unchecked Sendable {
                 HelperLog.flag.notice("engaged: SleepDisabled = 1 (pid \(session.pid, privacy: .public), uid \(session.uid, privacy: .public))")
                 reply(HelperResult.ok.rawValue, true)
             } else {
-                resetOwnedFlag(context: "failed engage")
+                // Nothing new to do after it, but keep what a pending reset (crash, backstop) still owes.
+                resetOwnedFlag(context: "failed engage", then: afterReset)
                 reply(HelperResult.setFailed.rawValue, flag.read() ?? false)
             }
         }
@@ -168,13 +188,15 @@ final class HelperDaemon: @unchecked Sendable {
     func release(_ session: HelperSession, _ reply: @escaping @Sendable (Int32, Bool) -> Void) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard session.engaged else {
-            reply(HelperResult.notEngaged.rawValue, flag.read() ?? false)
+            // Dropped earlier: say why, as heartbeat does (.hot / .backstop: the reset is already done).
+            reply((session.dropReason ?? .notEngaged).rawValue, flag.read() ?? false)
             return
         }
         remove(session, reason: .notEngaged)
         var result = HelperResult.ok
+        // The app follows an explicit release with its own sleep: only it can tell a bag from someone at a display.
         if HelperPolicy.resetsAfterDrop(remainingSessions: sessions.count, ownsFlag: ownsFlag),
-           !resetOwnedFlag(context: "release") { result = .setFailed }
+           !resetOwnedFlag(context: "release", then: .nothing) { result = .setFailed }
         reply(result.rawValue, flag.read() ?? false)
     }
 
@@ -184,6 +206,8 @@ final class HelperDaemon: @unchecked Sendable {
                                               flag: session.engaged ? flag.read() : nil, ownsFlag: ownsFlag)
         switch decision {
         case .ok:
+            // A trip drops this session too (reason .hot), replies first, then resets and sleeps.
+            if tripsOnHeartbeat(reply: { reply(HelperResult.hot.rawValue) }) { return }
             armDeadline(session)
             reply(HelperResult.ok.rawValue)
         case .overridden:
@@ -201,7 +225,7 @@ final class HelperDaemon: @unchecked Sendable {
         HelperLog.xpc.notice("session lost (pid \(session.pid, privacy: .public)); dropping it")
         remove(session, reason: .notEngaged)
         if HelperPolicy.resetsAfterDrop(remainingSessions: sessions.count, ownsFlag: ownsFlag) {
-            resetOwnedFlag(context: "connection lost")
+            resetOwnedFlag(context: "connection lost", then: .sleepIfShutIn)
         }
     }
 
@@ -212,7 +236,9 @@ final class HelperDaemon: @unchecked Sendable {
         session.dropReason = nil
         sessions[ObjectIdentifier(session)] = session
         cancelResetRetry()   // we own the flag again and it's wanted
+        afterReset = .nothing
         armDeadline(session)
+        armHeatWindow()
     }
 
     private func remove(_ session: HelperSession, reason: HelperResult) {
@@ -221,6 +247,7 @@ final class HelperDaemon: @unchecked Sendable {
         session.deadline?.cancel()
         session.deadline = nil
         sessions.removeValue(forKey: ObjectIdentifier(session))
+        if sessions.isEmpty { cancelHeatWindow() }
     }
 
     private func dropAll(_ reason: HelperResult) {
@@ -253,21 +280,31 @@ final class HelperDaemon: @unchecked Sendable {
         remove(session, reason: .notEngaged)
         session.connection?.invalidate()
         if HelperPolicy.resetsAfterDrop(remainingSessions: sessions.count, ownsFlag: ownsFlag) {
-            resetOwnedFlag(context: "heartbeat timeout")
+            resetOwnedFlag(context: "heartbeat timeout", then: .sleepIfShutIn)
         }
     }
 
     // MARK: Flag reset
 
-    /// Clears a flag we own. Success: forget ownership, delete the file. Failure: keep both, retry every 5 s, log.
+    /// Clears a flag we own, then does `then` (docs/DESIGN.md "Safety", sleep after its own resets). Success: forget
+    /// ownership, delete the file. Failure: keep both, remember `then`, retry every 5 s, log.
     @discardableResult
-    private func resetOwnedFlag(context: String) -> Bool {
+    private func resetOwnedFlag(context: String, then: HelperPolicy.AfterReset) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
+        afterReset = then
         if flag.set(false) {
             ownsFlag = false
             flag.deleteOwnershipFile()
             cancelResetRetry()
             HelperLog.flag.notice("\(context, privacy: .public): SleepDisabled = 0")
+            let after = afterReset
+            afterReset = .nothing
+            let shutIn = HelperPolicy.isShutIn(lidClosed: RootDomainRegistry.lidClosed(),
+                                               lidCloseSleeps: RootDomainRegistry.lidCloseSleeps())
+            if HelperPolicy.sleeps(after: after, shutIn: shutIn) {
+                HelperLog.flag.notice("\(context, privacy: .public): sleeping the Mac (lid shut: \(shutIn, privacy: .public))")
+                SystemSleeper.sleepNow()
+            }
             return true
         }
         HelperLog.flag.fault("\(context, privacy: .public): couldn't clear SleepDisabled; retrying every 5 s")
@@ -282,7 +319,7 @@ final class HelperDaemon: @unchecked Sendable {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             guard self.sessions.isEmpty, self.ownsFlag else { self.cancelResetRetry(); return }
-            self.resetOwnedFlag(context: "reset retry")
+            self.resetOwnedFlag(context: "reset retry", then: self.afterReset)
         }
         resetRetry = timer
         timer.resume()
@@ -298,8 +335,71 @@ final class HelperDaemon: @unchecked Sendable {
         HelperLog.flag.notice("SleepDisabled was cleared by something else; dropping \(self.sessions.count, privacy: .public) session(s)")
         dropAll(.overridden)
         ownsFlag = false
+        afterReset = .nothing
         cancelResetRetry()
         flag.deleteOwnershipFile()
+    }
+
+    // MARK: Heat backstop (our own flag only)
+
+    /// Samples the thermal state, keeps `seriousSince` and the window timer, and trips if the condition holds while a
+    /// session holds our flag. Returns whether the condition holds right now (engage refuses then).
+    @discardableResult
+    private func checkHeat(reason: String) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let hot = heatCondition()
+        if hot, !sessions.isEmpty, ownsFlag { trip(reason: reason, reply: nil) }
+        armHeatWindow()
+        return hot
+    }
+
+    /// The heartbeat's variant: `reply` goes out after the sessions are dropped and before the (slow) reset.
+    private func tripsOnHeartbeat(reply: @escaping () -> Void) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard heatCondition(), !sessions.isEmpty, ownsFlag else { armHeatWindow(); return false }
+        trip(reason: "heartbeat", reply: reply)
+        return true
+    }
+
+    private func heatCondition() -> Bool {
+        let thermal = ProcessInfo.processInfo.thermalState
+        let now = DispatchTime.now().uptimeNanoseconds
+        if thermal.rawValue >= ProcessInfo.ThermalState.serious.rawValue {
+            seriousSince = seriousSince.map { min($0, now) } ?? now
+        } else {
+            seriousSince = nil
+        }
+        let seriousFor = seriousSince.map { TimeInterval(now - $0) / 1_000_000_000 }
+        let shutIn = HelperPolicy.isShutIn(lidClosed: RootDomainRegistry.lidClosed(),
+                                           lidCloseSleeps: RootDomainRegistry.lidCloseSleeps())
+        return HelperPolicy.heatTrips(thermal: thermal, seriousFor: seriousFor, shutIn: shutIn)
+    }
+
+    private func trip(reason: String, reply: (() -> Void)?) {
+        HelperLog.backstop.fault("heat backstop (\(reason, privacy: .public), thermal \(ProcessInfo.processInfo.thermalState.rawValue, privacy: .public)): dropping \(self.sessions.count, privacy: .public) session(s), resetting")
+        dropAll(.hot)
+        reply?()
+        resetOwnedFlag(context: "heat backstop", then: .sleepIfShutIn)
+    }
+
+    /// While a session exists and the state is `.serious`, a one-shot just after the end of the window re-checks. Once
+    /// the window is over (the Mac wasn't shut in then), heartbeats (every 10 s) and thermal changes re-check instead:
+    /// the helper doesn't watch the lid, so a lid closing later is seen within one heartbeat.
+    private func armHeatWindow() {
+        cancelHeatWindow()
+        guard !sessions.isEmpty, let since = seriousSince else { return }
+        let end = since + UInt64(HelperInfo.thermalSeriousWindow * 1_000_000_000) + 500_000_000
+        guard end > DispatchTime.now().uptimeNanoseconds else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: DispatchTime(uptimeNanoseconds: end), leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in self?.checkHeat(reason: "serious window") }
+        heatWindow = timer
+        timer.resume()
+    }
+
+    private func cancelHeatWindow() {
+        heatWindow?.cancel()
+        heatWindow = nil
     }
 
     // MARK: Battery backstop (any setter; also in reset-only mode)
@@ -312,14 +412,14 @@ final class HelperDaemon: @unchecked Sendable {
                                          flag: flag.read()) else { return }
         HelperLog.backstop.fault("battery at \(battery.percent ?? -1, privacy: .public)% with SleepDisabled = 1 (\(reason, privacy: .public)): resetting and sleeping")
         dropAll(.backstop)
-        if flag.set(false) {
-            ownsFlag = false
-            cancelResetRetry()
-            flag.deleteOwnershipFile()
-        } else if ownsFlag {
-            scheduleResetRetry()
+        if ownsFlag {
+            // Sleeps once the reset succeeds, now or on a later retry (sleeping is blocked while the flag is 1).
+            resetOwnedFlag(context: "battery backstop", then: .sleep)
+        } else {
+            // Someone else's flag: cleared once, never retried, never taken over.
+            _ = flag.set(false)
+            SystemSleeper.sleepNow()
         }
-        SystemSleeper.sleepNow()
     }
 
     private func setBackstopPoll(_ on: Bool) {

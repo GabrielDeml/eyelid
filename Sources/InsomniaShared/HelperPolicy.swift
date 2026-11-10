@@ -32,12 +32,15 @@ public enum HelperPolicy {
     ///   - flag: IOPMrootDomain SleepDisabled now; nil if unreadable.
     ///   - ownsFlag: the helper set the flag (sessions hold it, or its reset is pending a retry).
     /// The caller has already handled an external override (ownsFlag && flag == 0 → drop all `.overridden`).
+    ///   - hot: the heat backstop's condition holds right now (`heatTrips`); the caller has already dropped any sessions.
     public static func engage(alreadyEngaged: Bool, engagedUID: UInt32?, requesterUID: UInt32,
-                              onBattery: Bool, batteryPercent: Int?, flag: Bool?, ownsFlag: Bool) -> EngageDecision {
+                              onBattery: Bool, batteryPercent: Int?, flag: Bool?, ownsFlag: Bool,
+                              hot: Bool = false) -> EngageDecision {
         if alreadyEngaged { return .alreadyEngaged }
         // Fast user switching: one uid owns the engaged set (Decision 39).
         if let engagedUID, engagedUID != requesterUID { return .refuse(.otherUser) }
         if backstopTrips(onBattery: onBattery, batteryPercent: batteryPercent, flag: true) { return .refuse(.backstop) }
+        if hot { return .refuse(.hot) }
         if engagedUID != nil { return flag == false ? .setFlag : .join }
         switch flag {
         case .some(true): return ownsFlag ? .join : .refuse(.foreignFlag)
@@ -68,6 +71,41 @@ public enum HelperPolicy {
     public static func backstopTrips(onBattery: Bool, batteryPercent: Int?, flag: Bool?) -> Bool {
         guard onBattery, flag == true, let p = batteryPercent else { return false }
         return p <= HelperInfo.backstopPercent
+    }
+
+    /// Shut in, as the helper sees it (docs/DESIGN.md "Shut in, and unattended"): lid closed and macOS would sleep the
+    /// Mac if not for the flag. The helper can't see displays or input, so an unknown kernel answer counts as yes.
+    public static func isShutIn(lidClosed: Bool?, lidCloseSleeps: Bool?) -> Bool {
+        lidClosed == true && lidCloseSleeps != false
+    }
+
+    /// Heat backstop (its own flag only). `.critical` trips with any lid state: while the flag is 1, macOS's own
+    /// thermal emergency sleep is blocked too. `.serious` trips after HelperInfo.thermalSeriousWindow, only shut in.
+    /// - Parameter seriousFor: how long the state has been `.serious` or worse (uptime); nil if it isn't.
+    public static func heatTrips(thermal: ProcessInfo.ThermalState, seriousFor: TimeInterval?, shutIn: Bool) -> Bool {
+        if thermal.rawValue >= ProcessInfo.ThermalState.critical.rawValue { return true }
+        guard shutIn, let seriousFor else { return false }
+        return seriousFor >= HelperInfo.thermalSeriousWindow
+    }
+
+    /// What follows a successful reset of the helper's own flag. Kept for the 5 s retry if the reset fails, so a retry
+    /// that succeeds still does it; cleared by a new session, an override or SIGTERM.
+    public enum AfterReset: Equatable, Sendable {
+        /// Explicit release (the app follows up itself), failed engage, boot reset.
+        case nothing
+        /// Connection lost, heartbeat deadline, heat backstop, restart reset: nobody else can follow up.
+        case sleepIfShutIn
+        /// Battery backstop: sleep regardless of the lid.
+        case sleep
+    }
+
+    /// Whether to put the Mac to sleep now, after a reset that succeeded.
+    public static func sleeps(after: AfterReset, shutIn: Bool) -> Bool {
+        switch after {
+        case .nothing: false
+        case .sleepIfShutIn: shutIn
+        case .sleep: true
+        }
     }
 
     /// The 60 s re-check timer runs only on battery at or below HelperInfo.backstopPollPercent (zero idle cost above).

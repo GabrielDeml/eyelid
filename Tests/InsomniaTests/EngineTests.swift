@@ -388,12 +388,99 @@ struct EngineSafetyTests {
         #expect(r.engine.isOn && r.engine.hotEpisode && r.lid.desired == false)
     }
 
-    @Test func overheatSwitchStillAppliesWithAnExternalDisplay() {
-        let r = Rig { $0.prefs.overheatProtection = false; $0.power.state.externalDisplays = 1 }
+    /// Clamshell mode (a real display on power): macOS keeps the Mac awake by itself, so the switch still decides.
+    @Test func overheatSwitchStillAppliesInClamshellMode() {
+        let r = Rig {
+            $0.prefs.overheatProtection = false
+            $0.power.state.externalDisplays = 1
+            $0.power.state.lidCloseSleeps = false
+        }
         r.engine.toggle()
         r.power.set { $0.isLidClosed = true }
         r.power.set { $0.thermal = .critical }
         #expect(r.engine.isOn && r.sleeps == 0)
+    }
+
+    /// A display the kernel doesn't count as clamshell mode (virtual, DisplayLink, AirPlay) must not switch the
+    /// forced check off: any app can add one.
+    @Test func aVirtualDisplayDoesNotSwitchOffTheForcedCheck() {
+        let r = Rig {
+            $0.prefs.overheatProtection = false
+            $0.prefs.closedLidMode = true
+            $0.power.state.externalDisplays = 1
+            $0.power.state.lidCloseSleeps = true
+            $0.power.idleSeconds = 600
+        }
+        r.engine.toggle()
+        r.power.set { $0.isLidClosed = true }
+        #expect(r.lid.isEngaged)
+        r.power.set { $0.thermal = .critical }
+        #expect(!r.engine.isOn && r.sleeps == 1)
+    }
+
+    /// The serious window is the shut-in one (60 s) with a non-clamshell display, too.
+    @Test func seriousWithAVirtualDisplayUsesTheShutInWindow() {
+        let r = Rig {
+            $0.prefs.closedLidMode = true
+            $0.power.state.externalDisplays = 1
+            $0.power.state.lidCloseSleeps = true
+        }
+        r.engine.toggle()
+        r.power.set { $0.isLidClosed = true }
+        r.power.set { $0.thermal = .serious }
+        r.advance(59)
+        #expect(r.engine.isOn)
+        r.advance(1)
+        // Someone is typing at the display: Insomnia turns off rather than sleeping the Mac under them.
+        #expect(!r.engine.isOn && r.sleeps == 0)
+        #expect(r.engine.notice?.text == "Your Mac got hot, so Insomnia turned off")
+    }
+
+    /// Bag rule with a non-clamshell display: someone using it isn't a bag; nobody using it for 2 minutes is.
+    @Test func bagRuleWithADisplayWaitsForNoInput() {
+        let r = Rig {
+            $0.prefs.closedLidMode = true
+            $0.power.state.externalDisplays = 1
+            $0.power.state.lidCloseSleeps = true
+        }
+        r.engine.toggle()
+        r.power.set { $0.isLidClosed = true }
+        r.power.set { $0.thermal = .fair }
+        r.advance(3600)
+        #expect(r.engine.isOn)
+        r.power.idleSeconds = 120
+        r.engine.reconcile()   // the 5 s poll's pass: the window starts now
+        r.advance(299)
+        #expect(r.engine.isOn)
+        r.advance(1)
+        #expect(!r.engine.isOn && r.sleeps == 1)
+    }
+
+    /// A real display in clamshell mode never arms the bag rule, input or not.
+    @Test func noBagRuleInClamshellMode() {
+        let r = Rig {
+            $0.prefs.closedLidMode = true
+            $0.power.state.externalDisplays = 1
+            $0.power.state.lidCloseSleeps = false
+            $0.power.idleSeconds = 3600
+        }
+        r.engine.toggle()
+        r.power.set { $0.isLidClosed = true }
+        r.power.set { $0.thermal = .fair }
+        r.advance(3600)
+        #expect(r.engine.isOn)
+    }
+
+    /// With no display at all the kernel's answer doesn't matter: shut in, even if it says no (or nothing).
+    @Test func noDisplayIsShutInWhateverTheKernelSays() {
+        for answer in [false, nil] as [Bool?] {
+            let r = Rig { $0.prefs.closedLidMode = true; $0.power.state.lidCloseSleeps = answer }
+            r.engine.toggle()
+            r.power.set { $0.isLidClosed = true }
+            r.power.set { $0.thermal = .fair }
+            r.advance(300)
+            #expect(!r.engine.isOn && r.sleeps == 1)
+        }
     }
 
     @Test func activeUserMeansTurnOffNotSleep() {
@@ -495,5 +582,30 @@ struct PreferencesTests {
             #expect(Preferences(defaults: defaults).powerButtonMinutes == read)
             #expect(defaults.integer(forKey: Preferences.Key.powerButtonMinutes) == stored)
         }
+    }
+}
+
+@Suite("Power state: shut in and unattended")
+struct PowerStateTests {
+    private func state(closed: Bool = true, displays: Int = 0, sleeps: Bool? = nil, lid: Bool = true) -> PowerState {
+        PowerState(hasLid: lid, isLidClosed: closed, externalDisplays: displays, lidCloseSleeps: sleeps)
+    }
+
+    @Test func shutInTruthTable() {
+        #expect(state().isShutIn)
+        #expect(state(sleeps: false).isShutIn)            // no display: the kernel can't remove it
+        #expect(state(displays: 1, sleeps: true).isShutIn) // a display macOS doesn't do clamshell mode for
+        #expect(!state(displays: 1, sleeps: false).isShutIn) // clamshell mode
+        #expect(!state(displays: 1, sleeps: nil).isShutIn)   // unknown with a display: the old rule
+        #expect(!state(closed: false).isShutIn)
+        #expect(!state(lid: false).isShutIn)
+    }
+
+    @Test func unattendedNeedsNoInputOnlyWithADisplay() {
+        #expect(state().isUnattended(idleSeconds: 0))
+        #expect(!state(displays: 1, sleeps: true).isUnattended(idleSeconds: 119))
+        #expect(state(displays: 1, sleeps: true).isUnattended(idleSeconds: 120))
+        #expect(!state(displays: 1, sleeps: false).isUnattended(idleSeconds: 3600))
+        #expect(!state(closed: false).isUnattended(idleSeconds: 3600))
     }
 }

@@ -13,17 +13,14 @@ enum RootDomain {
     static let clamshellStateBit: UInt = 1 << 0
     static let clamshellSleepBit: UInt = 1 << 1
 
-    private static let clamshellStateKey = "AppleClamshellState"        // kAppleClamshellStateKey
-    private static let clamshellCausesSleepKey = "AppleClamshellCausesSleep"  // kAppleClamshellCausesSleepKey
-
     /// IOPMrootDomain "SleepDisabled". nil if unreadable.
     static func sleepDisabled() -> Bool? { RootDomainRegistry.bool(HelperInfo.sleepDisabledKey) }
 
     /// IOPMrootDomain "AppleClamshellState"; true = lid closed. nil on desktops (no lid).
-    static func clamshellClosed() -> Bool? { RootDomainRegistry.bool(clamshellStateKey) }
+    static func clamshellClosed() -> Bool? { RootDomainRegistry.lidClosed() }
 
-    /// IOPMrootDomain "AppleClamshellCausesSleep". Diagnostics only.
-    static func clamshellCausesSleep() -> Bool? { RootDomainRegistry.bool(clamshellCausesSleepKey) }
+    /// IOPMrootDomain "AppleClamshellCausesSleep": macOS would sleep the Mac when its lid closes (PowerState.isShutIn).
+    static func clamshellCausesSleep() -> Bool? { RootDomainRegistry.lidCloseSleeps() }
 
     /// Decodes a clamshell interest message argument. Pure; unit-tested.
     static func decodeClamshell(_ bits: UInt) -> (closed: Bool, causesSleep: Bool) {

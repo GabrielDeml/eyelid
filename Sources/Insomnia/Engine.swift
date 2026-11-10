@@ -18,7 +18,7 @@ protocol LidControlling: AnyObject {
     var needsAttention: Bool { get }
     var onChange: (() -> Void)? { get set }
     func setDesired(_ on: Bool)
-    /// Lid shut with no external display (used for `displaysleepnow` and for sleeping after a release).
+    /// Lid shut with no external display at all (only for `displaysleepnow`; every follow-up sleep reads fresh).
     func update(closedWithoutDisplay: Bool)
     /// Release (if engaged), read back 0, then `pmset sleepnow`.
     func sleepNow()
@@ -39,12 +39,13 @@ final class Engine {
         var isWarning: Bool
     }
 
-    /// Lid open: when a safety check trips, sleep only if nobody has touched the Mac for this long, otherwise turn off.
-    static let idleForSleep: TimeInterval = 120
-    /// How long `.serious` must last before overheat protection trips: lid closed (in a bag) / otherwise.
+    /// Unless the Mac is closed with no external display: when a safety check trips, sleep only if nobody has touched
+    /// the Mac for this long, otherwise turn off.
+    static let idleForSleep: TimeInterval = PowerState.unattendedAfter
+    /// How long `.serious` must last before overheat protection trips: shut in / otherwise.
     static let seriousWindowClosed: TimeInterval = 60
     static let seriousWindowOpen: TimeInterval = 300
-    /// The bag rule: `.fair` for this long while lid mode is engaged with the lid shut and no external display.
+    /// The bag rule: `.fair` for this long while lid mode is engaged and the Mac is unattended.
     static let bagWindow: TimeInterval = 300
     /// The low-battery protection clears this many points above its threshold (no flapping).
     static let batteryHysteresis = 3
@@ -75,7 +76,7 @@ final class Engine {
     private(set) var lowEpisode = false
 
     @ObservationIgnored private var seriousSince: Date?
-    /// Since when the bag condition holds: lid mode engaged, lid shut, no external display, at least `.fair`.
+    /// Since when the bag condition holds: lid mode engaged, the Mac unattended (PowerState.isUnattended), at least `.fair`.
     @ObservationIgnored private var bagSince: Date?
     /// Lid mode was dropped while the lid was shut (a guard or the unplugged rule): don't re-engage until the lid
     /// opens or the user acts, so a DarkWake or re-plug inside a bag can't re-arm SleepDisabled.
@@ -213,12 +214,12 @@ final class Engine {
         // 3. Safety. Each protection trips once on entering its condition, and acts only if we hold the Mac.
         // min(…, t): a clock set back restarts a window instead of pushing it into the future.
         seriousSince = p.thermal.rawValue >= ProcessInfo.ThermalState.serious.rawValue ? min(seriousSince ?? t, t) : nil
-        let inBag = p.thermal.rawValue >= ProcessInfo.ThermalState.fair.rawValue && p.isClosedWithoutDisplay
-            && lid.isEngaged
+        let inBag = p.thermal.rawValue >= ProcessInfo.ThermalState.fair.rawValue && lid.isEngaged
+            && p.isUnattended(idleSeconds: power.idleSeconds)
         bagSince = inBag ? min(bagSince ?? t, t) : nil
         let ours = isOn || lid.isEngaged
         let hot = overheatGuarded(p) && Self.isHot(thermal: p.thermal, seriousSince: seriousSince,
-                                        bagSince: bagSince, now: t, closedWithoutDisplay: p.isClosedWithoutDisplay)
+                                        bagSince: bagSince, now: t, shutIn: p.isShutIn)
         if hot, !hotEpisode {
             hotEpisode = true
             if ours { letGo(.hot, p) }
@@ -278,7 +279,8 @@ final class Engine {
         return Notice(text: text, isWarning: true)
     }
 
-    /// A safety check tripped. Lid shut with no external display: sleep. Otherwise sleep only if nobody is using the Mac.
+    /// A safety check tripped. Closed with no external display at all: sleep. Otherwise sleep only if nobody is using
+    /// the Mac (checked now, once). The release this causes sleeps only an unattended Mac, so the notice is right.
     private func letGo(_ trip: Trip, _ p: PowerState) {
         let sleep = p.isClosedWithoutDisplay || power.idleSeconds >= Self.idleForSleep
         turnOff()
@@ -301,10 +303,10 @@ final class Engine {
     // MARK: Pure rules (unit-tested)
 
     static func isHot(thermal: ProcessInfo.ThermalState, seriousSince: Date?, bagSince: Date?, now: Date,
-                      closedWithoutDisplay: Bool) -> Bool {
+                      shutIn: Bool) -> Bool {
         if thermal.rawValue >= ProcessInfo.ThermalState.critical.rawValue { return true }
         if let s = seriousSince,
-           now.timeIntervalSince(s) >= (closedWithoutDisplay ? seriousWindowClosed : seriousWindowOpen) { return true }
+           now.timeIntervalSince(s) >= (shutIn ? seriousWindowClosed : seriousWindowOpen) { return true }
         if let b = bagSince, now.timeIntervalSince(b) >= bagWindow { return true }
         return false
     }
@@ -316,13 +318,13 @@ final class Engine {
         return was ? pct < threshold + batteryHysteresis : pct <= threshold
     }
 
-    /// Whether the overheat check applies. The switch decides, except when lid mode keeps the Mac awake with the lid
-    /// shut and no external display: then the check always applies. Without lid mode, a shut lid sleeps the Mac anyway,
-    /// so the switch still decides. "Wanted and ready" rather than "engaged": a trip releases the lid, and the check
-    /// must not lapse (and re-arm lid mode) because of its own release.
+    /// Whether the overheat check applies. The switch decides, except when lid mode keeps a shut-in Mac awake
+    /// (PowerState.isShutIn): then the check always applies. Without lid mode, a shut lid sleeps the Mac anyway, so the
+    /// switch still decides. "Wanted and ready" rather than "engaged": a trip releases the lid, and the check must not
+    /// lapse (and re-arm lid mode) because of its own release.
     private func overheatGuarded(_ p: PowerState) -> Bool {
         prefs.overheatProtection
-            || (p.isClosedWithoutDisplay && (lid.isEngaged || (prefs.closedLidMode && lid.isReady)))
+            || (p.isShutIn && (lid.isEngaged || (prefs.closedLidMode && lid.isReady)))
     }
 
     // MARK: Timers
@@ -335,8 +337,7 @@ final class Engine {
             next = next.map { min($0, d) } ?? d
         }
         if overheatGuarded(p), !hotEpisode {
-            consider(seriousSince?.addingTimeInterval(p.isClosedWithoutDisplay ? Self.seriousWindowClosed
-                                                                               : Self.seriousWindowOpen))
+            consider(seriousSince?.addingTimeInterval(p.isShutIn ? Self.seriousWindowClosed : Self.seriousWindowOpen))
             consider(bagSince?.addingTimeInterval(Self.bagWindow))
         }
         if next != deadlineDate || (next != nil && deadline?.isValid != true) {
@@ -353,10 +354,14 @@ final class Engine {
             }
         }
 
-        // Fallback for a missed clamshell notification while lid mode holds the Mac.
+        // Fallback for a missed clamshell notification while lid mode holds the Mac, and the clock for "unattended":
+        // HID idle time crossing PowerState.unattendedAfter isn't an event, so re-run the pass too.
         if lid.isEngaged, lidPoll == nil {
             let timer = Timer(timeInterval: Self.lidPollInterval, repeats: true) { _ in
-                MainActor.assumeIsolated { [weak self] in self?.power.refreshLid() }
+                MainActor.assumeIsolated { [weak self] in
+                    self?.power.refreshLid()
+                    self?.reconcile()
+                }
             }
             RunLoop.main.add(timer, forMode: .common)
             lidPoll = timer

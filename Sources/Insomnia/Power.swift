@@ -15,11 +15,26 @@ struct PowerState: Equatable, Sendable {
     /// false on desktops: no lid UI at all.
     var hasLid = false
     var isLidClosed = false
+    /// Online displays that aren't built in (CoreGraphics), virtual ones included.
     var externalDisplays = 0
+    /// IOPMrootDomain "AppleClamshellCausesSleep": macOS would sleep the Mac when its lid closes. False in clamshell
+    /// mode (a real display on power); a virtual, DisplayLink or AirPlay display leaves it true. nil if unreadable.
+    var lidCloseSleeps: Bool?
+
+    /// HID idle time after which a shut-in Mac with a display counts as unattended (docs/DESIGN.md "Shut in, and
+    /// unattended"); also the safety trip's "nobody is using it" test.
+    static let unattendedAfter: TimeInterval = 120
 
     var isOnBattery: Bool { hasBattery && !isOnAC }
-    /// Lid shut with no external display: the "in a bag" case.
+    /// Lid shut with no external display at all: `displaysleepnow` can't blank another screen.
     var isClosedWithoutDisplay: Bool { hasLid && isLidClosed && externalDisplays == 0 }
+    /// Lid shut and only lid mode keeps the Mac awake: no external display, or one the kernel doesn't count as
+    /// clamshell mode. The kernel's answer only ever adds "shut in" when a display is present.
+    var isShutIn: Bool { hasLid && isLidClosed && (externalDisplays == 0 || lidCloseSleeps == true) }
+    /// Shut in, and no external display at all or nobody has used the Mac for `unattendedAfter`: the "in a bag" case.
+    func isUnattended(idleSeconds: TimeInterval) -> Bool {
+        isShutIn && (externalDisplays == 0 || idleSeconds >= Self.unattendedAfter)
+    }
 }
 
 @MainActor
@@ -29,7 +44,7 @@ protocol PowerSource: AnyObject {
     var onChange: (() -> Void)? { get set }
     /// Seconds since the last keyboard / mouse / trackpad input.
     var idleSeconds: TimeInterval { get }
-    /// Re-reads the lid from IORegistry (the engine's 5 s fallback poll while lid mode is engaged).
+    /// Re-reads the lid, the kernel's clamshell answer and the displays (the engine's 5 s poll while lid mode is engaged).
     func refreshLid()
 }
 
@@ -62,8 +77,11 @@ final class Power: PowerSource {
             ipsSource = source
         }
         if state.hasLid {
-            clamshell = RootDomain.observeClamshell { closed, _ in
-                Power.shared.update { $0.isLidClosed = closed }
+            clamshell = RootDomain.observeClamshell { closed, causesSleep in
+                Power.shared.update {
+                    $0.isLidClosed = closed
+                    $0.lidCloseSleeps = causesSleep
+                }
             }
         }
         let center = NotificationCenter.default
@@ -74,7 +92,12 @@ final class Power: PowerSource {
         })
         observers.append(center.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil,
                                             queue: .main) { _ in
-            MainActor.assumeIsolated { Power.shared.update { $0.externalDisplays = Power.countExternalDisplays() } }
+            MainActor.assumeIsolated {
+                Power.shared.update {
+                    $0.externalDisplays = Power.countExternalDisplays()
+                    $0.lidCloseSleeps = RootDomain.clamshellCausesSleep()
+                }
+            }
         })
         let workspace = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
@@ -84,28 +107,30 @@ final class Power: PowerSource {
         }
     }
 
-    var idleSeconds: TimeInterval {
-        // kCGAnyInputEventType (~0): any HID event.
+    var idleSeconds: TimeInterval { Self.hidIdleSeconds() }
+
+    /// Seconds since the last keyboard / mouse / trackpad input. kCGAnyInputEventType (~0): any HID event.
+    nonisolated static func hidIdleSeconds() -> TimeInterval {
         CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)
     }
 
     func refreshLid() {
-        update { s in
-            let closed = RootDomain.clamshellClosed()
-            s.hasLid = closed != nil
-            s.isLidClosed = closed ?? false
-        }
+        update { s in s.applyLid() }
     }
 
     private func refreshAll() {
         update { s in
             s.applyPowerSources()
             s.thermal = ProcessInfo.processInfo.thermalState
-            let closed = RootDomain.clamshellClosed()
-            s.hasLid = closed != nil
-            s.isLidClosed = closed ?? false
-            s.externalDisplays = Power.countExternalDisplays()
+            s.applyLid()
         }
+    }
+
+    /// Everything a follow-up sleep decides on, read now (HelperClient.isUnattendedNow; off the main actor).
+    nonisolated static func lidSnapshot() -> PowerState {
+        var s = PowerState()
+        s.applyLid()
+        return s
     }
 
     private func update(_ body: (inout PowerState) -> Void) {
@@ -116,7 +141,7 @@ final class Power: PowerSource {
         onChange?()
     }
 
-    private static func countExternalDisplays() -> Int {
+    nonisolated static func countExternalDisplays() -> Int {
         var count: UInt32 = 0
         guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return 0 }
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
@@ -131,5 +156,15 @@ private extension PowerState {
         hasBattery = r.hasBattery
         batteryPercent = r.percent
         isOnAC = r.isOnAC
+        // AC changes clamshell mode; the kernel also sends a clamshell message, this catches a missed one.
+        lidCloseSleeps = RootDomain.clamshellCausesSleep()
+    }
+
+    mutating func applyLid() {
+        let closed = RootDomain.clamshellClosed()
+        hasLid = closed != nil
+        isLidClosed = closed ?? false
+        lidCloseSleeps = RootDomain.clamshellCausesSleep()
+        externalDisplays = Power.countExternalDisplays()
     }
 }

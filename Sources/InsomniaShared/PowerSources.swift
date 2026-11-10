@@ -15,6 +15,15 @@ public enum RootDomainRegistry {
         // CFBoolean bridges to NSNumber; some kernels publish these as numbers. Both read as Bool.
         return (value as? NSNumber)?.boolValue
     }
+
+    /// `kAppleClamshellStateKey`: true = lid closed. nil on desktops (no lid).
+    public static let clamshellStateKey = "AppleClamshellState"
+    /// `kAppleClamshellCausesSleepKey`: xnu's shouldSleepOnClamshellClosed(), i.e. whether macOS would sleep the Mac
+    /// when its lid closes. False in clamshell mode (a real display on power). Can be stale (docs/DESIGN.md gotchas).
+    public static let clamshellCausesSleepKey = "AppleClamshellCausesSleep"
+
+    public static func lidClosed() -> Bool? { bool(clamshellStateKey) }
+    public static func lidCloseSleeps() -> Bool? { bool(clamshellCausesSleepKey) }
 }
 
 /// One IOPS read, for the app's PowerMonitor and the helper's battery backstop. The parsing is separate so it can
@@ -53,7 +62,8 @@ public struct PowerSourceReading: Equatable, Sendable {
 
         var percent: Int?
         if let current = battery["Current Capacity"] as? Int, let max = battery["Max Capacity"] as? Int, max > 0 {
-            percent = Swift.min(100, Swift.max(0, Int((Double(current) / Double(max) * 100).rounded())))
+            // Clamp as a Double: Int(_:) traps on a value out of range, and the helper (root) reads this too.
+            percent = Int(Swift.min(100, Swift.max(0, (Double(current) / Double(max) * 100).rounded())))
         }
         // "AC Power" / "Battery Power" / "UPS Power". Prefer the system-wide providing type; fall back to the battery's state.
         let state = providingType ?? (battery["Power Source State"] as? String)

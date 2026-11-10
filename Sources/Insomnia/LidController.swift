@@ -6,8 +6,9 @@ import os
 import ServiceManagement
 
 /// Lid mode: sets the system's `SleepDisabled` flag through the root helper while the engine wants it, and gives it
-/// back. The helper owns every safety reset (connection lost, 45 s without a heartbeat, crash, boot, 10% battery);
-/// this side says "on" while it is alive, and verifies "off" by reading the flag back.
+/// back. The helper owns every safety reset (connection lost, 45 s without a heartbeat, crash, boot, 10% battery, heat)
+/// and sleeps a shut-in Mac after the ones nobody else can follow up; this side says "on" while it is alive, verifies
+/// "off" by reading the flag back, and follows its own releases with a sleep when the Mac is unattended.
 /// All engage/release work runs one step at a time in `work()`.
 @MainActor
 @Observable
@@ -19,6 +20,8 @@ final class LidController: LidControlling {
         case otherUser
         /// The helper refused or dropped lid mode at its own 10% battery backstop.
         case lowBattery
+        /// The helper refused or dropped lid mode at its own heat backstop (and slept a shut-in Mac).
+        case hot
         case setFailed
         /// The helper connection dropped or stopped answering (the helper resets the flag itself).
         case lost
@@ -50,7 +53,13 @@ final class LidController: LidControlling {
     @ObservationIgnored private let runsTimers: Bool
 
     @ObservationIgnored private var desired = false
+    /// Only for the `displaysleepnow` edge; every follow-up sleep asks `client.isUnattendedNow()` instead.
     @ObservationIgnored private var closedWithoutDisplay = false
+    /// `asleepNanos()` when the last loss was noticed: the helper may sleep the Mac for the same loss.
+    @ObservationIgnored private var lossMark: UInt64 = 0
+    /// Logout, restart or shutdown is under way: the quit-time sleep would stall it.
+    @ObservationIgnored private var poweringOff = false
+    @ObservationIgnored private var powerOffObserver: NSObjectProtocol?
     @ObservationIgnored private var sleepRequested = false
     @ObservationIgnored private var verifyAfterLoss = false
     @ObservationIgnored private var working = false
@@ -157,12 +166,17 @@ final class LidController: LidControlling {
             return first
         }
         await client.abandon()
-        if released, closedWithoutDisplay, await client.flag() == false { await client.pmset("sleepnow") }
+        if released, !poweringOff, await client.flag() == false, await client.isUnattendedNow() {
+            await client.pmset("sleepnow")
+        }
     }
 
     // MARK: Launch, setup and recovery
 
     func start() async {
+        powerOffObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { [weak self] in self?.poweringOff = true } }
         await refreshSetup()
         // Leftovers of the old app (its user-side marker and CLI socket); the helper never used them.
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
@@ -173,6 +187,8 @@ final class LidController: LidControlling {
         if setup == .ready, let registered = await client.upgradeIfNeeded(savedCDHash: prefs.helperRegisteredCDHash) {
             prefs.helperRegisteredCDHash = registered
             await refreshSetup()
+            // A changed helper may need approval again: notice it as soon as it's given, as after install().
+            if setup == .needsApproval { pollForApproval() }
         }
         // The flag is ours with no session: the helper's reset is pending (it retries every 5 s). Wait for it.
         if setup != .noLid, await client.flag() == true, let answer = await client.query(), answer.ownsFlag {
@@ -246,9 +262,13 @@ final class LidController: LidControlling {
             if verifyAfterLoss {
                 verifyAfterLoss = false
                 if await waitForFlag(off: lostWait) {
-                    // The helper's reset doesn't sleep the Mac, and clearing the flag with the lid shut doesn't
-                    // reliably either (the backstop already slept it at low battery).
-                    if closedWithoutDisplay, state != .failed(.lowBattery) { await client.pmset("sleepnow") }
+                    // Clearing the flag with the lid shut doesn't reliably sleep the Mac. The helper sleeps it itself
+                    // after its own resets (and its backstops already did); this covers the rest (its crash or SIGTERM,
+                    // an override). Skip if the Mac has slept since the loss: the helper's sleep for the same loss.
+                    if state != .failed(.lowBattery), state != .failed(.hot), Self.asleepNanos() <= lossMark + 1_000_000_000,
+                       await client.isUnattendedNow() {
+                        await client.pmset("sleepnow")
+                    }
                 } else {
                     if case .failed(let reason) = state { stuckAfter = reason }
                     state = .stuck
@@ -268,7 +288,7 @@ final class LidController: LidControlling {
                 continue
             }
             if !desired, state == .engaged {
-                await release(thenSleep: closedWithoutDisplay)
+                await release(thenSleep: true)
                 continue
             }
             return
@@ -297,6 +317,8 @@ final class LidController: LidControlling {
             startRecheck()
         case .backstop:
             state = .failed(.lowBattery)
+        case .hot:
+            state = .failed(.hot)
         default:
             // setFailed, or no answer (the helper may still finish: the invalidation makes it reset).
             log.error("engage failed: \(rc)")
@@ -312,18 +334,20 @@ final class LidController: LidControlling {
         changed()
     }
 
+    /// `thenSleep`: follow with `sleepnow` if the Mac is unattended right then (read fresh, after the flag reads 0).
     private func release(thenSleep: Bool) async {
         state = .releasing
         stopHeartbeat()
         endActivity()
         changed()
         let rc = await client.release()
-        let answered = rc == HelperResult.ok.rawValue || rc == HelperResult.notEngaged.rawValue
+        // Dropped just before (deadline, battery or heat backstop): the helper has reset the flag itself.
+        let answered = [HelperResult.ok, .notEngaged, .backstop, .hot].map(\.rawValue).contains(rc)
         if !answered { await client.abandon() }
         if await waitForFlag(off: answered ? stuckWait : lostWait) {
             state = .off
             // Clearing the flag with the lid shut doesn't reliably sleep the Mac.
-            if thenSleep { await client.pmset("sleepnow") }
+            if thenSleep, await client.isUnattendedNow() { await client.pmset("sleepnow") }
         } else {
             log.error("release failed (\(rc)); SleepDisabled still reads 1")
             await client.abandon()
@@ -341,6 +365,7 @@ final class LidController: LidControlling {
         stopHeartbeat()
         endActivity()
         state = .failed(reason)
+        lossMark = Self.asleepNanos()
         verifyAfterLoss = true
         kick()
         changed()
@@ -378,6 +403,7 @@ final class LidController: LidControlling {
             switch HelperResult(rawValue: rc) {
             case .overridden: lost(.overridden)
             case .backstop: lost(.lowBattery)
+            case .hot: lost(.hot)
             default: lost(.lost)
             }
         }
@@ -406,11 +432,13 @@ final class LidController: LidControlling {
             guard retryable() else { stopRecheck(); return }
             guard await client.flag() == false, retryable() else { return }
             let wasStuck = state == .stuck
+            let reason = stuckAfter
             // A failure that ended stuck stays a failure (sticky until the user acts); a plain stuck release is over.
-            if wasStuck, let reason = stuckAfter { state = .failed(reason) } else { state = .off }
+            if wasStuck, let reason { state = .failed(reason) } else { state = .off }
             stuckAfter = nil
             stopRecheck()
-            if wasStuck, !desired, closedWithoutDisplay { await client.pmset("sleepnow") }
+            // Sleep once it clears if lid mode isn't wanted any more, or a failure keeps it off while still wanted.
+            if wasStuck, !desired || reason != nil, await client.isUnattendedNow() { await client.pmset("sleepnow") }
             kick()
             changed()
         }
@@ -428,4 +456,16 @@ final class LidController: LidControlling {
 
     /// Always asynchronous relative to the engine's call into us: every caller is inside a Task.
     private func changed() { onChange?() }
+
+    /// Nanoseconds this Mac has spent asleep since boot (mach_continuous_time − mach_absolute_time): grows only across
+    /// a sleep. The absolute clock is read first, so the difference can't go below zero on a Mac that hasn't slept
+    /// since boot (the two clocks are then equal); it saturates anyway, and converts in Double so it can't overflow.
+    nonisolated static func asleepNanos() -> UInt64 {
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        let awake = mach_absolute_time()
+        let total = mach_continuous_time()
+        guard total > awake, timebase.denom > 0 else { return 0 }
+        return UInt64(Double(total - awake) * Double(timebase.numer) / Double(timebase.denom))
+    }
 }

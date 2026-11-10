@@ -37,7 +37,8 @@ for b in "$APP" "$HELPER"; do
 done
 codesign --verify --strict --deep "$APP" 2>/dev/null && ok "bundle seal valid" || bad "bundle seal invalid"
 if [[ -n "$TEAM" && "$TEAM" != "not set" ]]; then
-    # The exact requirements each side pins at runtime (HelperInfo.clientRequirement / helperRequirement).
+    # The requirements each side pins at runtime (HelperInfo.clientRequirement / helperRequirement). The helper adds
+    # `and cdhash H"<installed app>"` to the client one at start-up (docs/DESIGN.md "Security").
     req() { echo "identifier \"$1\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM\" and !(entitlement[\"com.apple.security.get-task-allow\"] exists)"; }
     codesign --verify -R="$(req com.gdeml.Insomnia)" "$APP" 2>/dev/null && ok "app passes the client requirement" \
         || bad "app fails the client requirement"
@@ -58,10 +59,10 @@ else
     bad "no daemon plist (not built by scripts/build.sh)"
 fi
 
-echo "Install location (root-owned, no group/other write)"
+echo "Install location (root-owned, no group/other write, no ACLs)"
 if [[ "$APP" == "/Applications/Insomnia.app" || $STAGED -eq 1 ]]; then
-    bad_items=$(find "$APP" \( ! -user root -o -perm -g+w -o -perm -o+w \) -print 2>/dev/null | head -5)
-    [[ -z "$bad_items" ]] && ok "every item owned by root, not group/other-writable" || bad "unsafe items: $bad_items"
+    bad_items=$(find "$APP" \( ! -user root -o -perm -g+w -o -perm -o+w -o -acl \) -print 2>/dev/null | head -5)
+    [[ -z "$bad_items" ]] && ok "every item owned by root, not group/other-writable, no ACL" || bad "unsafe items: $bad_items"
 else
     info "not /Applications/Insomnia.app: lid-mode setup is refused from here (expected for build/)"
 fi
@@ -70,7 +71,9 @@ if [[ $STAGED -eq 1 ]]; then exit $fail; fi
 
 echo "Registration"
 STATUS=$("$APP/Contents/MacOS/Insomnia" --helper-status 2>/dev/null); rc=$?
-info "SMAppService: ${STATUS:-?} (exit $rc)"
+info "SMAppService: $(head -1 <<<"${STATUS:-?}") (exit $rc)"
+# The second line says whether the helper answers this copy (it answers only the installed app it pinned).
+[[ -n "$(sed -n 2p <<<"$STATUS")" ]] && info "$(sed -n 2p <<<"$STATUS")"
 
 echo "Power state"
 ioreg -r -c IOPMrootDomain -d 1 | grep -E '"(SleepDisabled|AppleClamshellState)"' | sed 's/^ */  · /'

@@ -20,12 +20,13 @@ public protocol HelperProtocol {
     func engage(withReply reply: @escaping @Sendable (_ result: Int32, _ sleepDisabled: Bool) -> Void)
 
     /// Removes this connection from the engaged set. When the set becomes empty and the helper owns the flag,
-    /// sets SleepDisabled = 0 and reads it back. Idempotent. A `.notEngaged` reply (the helper already dropped the
-    /// session, e.g. its deadline fired just before) with `sleepDisabled == false` is success for the client.
+    /// sets SleepDisabled = 0 and reads it back. Idempotent. A session the helper already dropped gets its drop reason
+    /// (`.notEngaged` after its deadline, `.backstop`, `.hot`, `.overridden`); with `sleepDisabled == false` that is
+    /// success for the client.
     func release(withReply reply: @escaping @Sendable (_ result: Int32, _ sleepDisabled: Bool) -> Void)
 
     /// Proof of life, every HelperInfo.heartbeatInterval while engaged. `.ok` == this session is still engaged;
-    /// anything else (`.notEngaged`, `.backstop`, `.overridden`) means the helper dropped it and lid mode is gone.
+    /// anything else (`.notEngaged`, `.backstop`, `.overridden`, `.hot`) means the helper dropped it and lid mode is gone.
     func heartbeat(withReply reply: @escaping @Sendable (_ result: Int32) -> Void)
 }
 
@@ -46,4 +47,8 @@ public enum HelperResult: Int32, Sendable {
     /// engage from a different uid while another user's sessions hold the flag (fast user switching). Refused so one
     /// user's session can't keep the flag at 1 after the other releases (CLOSED_LID.md §2.5).
     case otherUser = 6
+    /// The helper's heat backstop (docs/DESIGN.md "Safety"): `.critical`, or `.serious` for
+    /// HelperInfo.thermalSeriousWindow with the Mac shut in. Engage refused, or every session dropped, the flag reset,
+    /// and a shut-in Mac put to sleep.
+    case hot = 7
 }

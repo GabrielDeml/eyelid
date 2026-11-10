@@ -28,18 +28,30 @@ If your Mac gets hot, or its battery drops to 12% while it's unplugged, Insomnia
 closed and no external display, it puts your Mac to sleep. Otherwise it puts your Mac to sleep if nobody has used it
 for two minutes, and turns itself off if someone has.
 
-"Hot" means macOS reports a critical thermal state, or a serious one that lasts a minute with the lid closed and no
-external display, or five minutes otherwise. In lid mode with the lid closed and no external display, five minutes at
-the level below that also counts, because that usually means your Mac is in a bag.
+"Hot" means macOS reports a critical thermal state, or a serious one that lasts a minute while lid mode is what keeps
+your closed Mac awake, or five minutes otherwise. While lid mode is what keeps your closed Mac awake, five minutes at
+the level below that also counts if there's no external display, or nobody has used your Mac for two minutes, because
+that usually means it's in a bag.
+
+"Lid mode is what keeps it awake" means the lid is closed and macOS wouldn't keep your Mac awake by itself. macOS does
+that only for a real display on power (clamshell mode). A virtual, DisplayLink, Sidecar or AirPlay screen doesn't
+count, because any app can add one.
 
 You can switch off the heat check in Settings for long jobs with the lid open. While Insomnia keeps your Mac awake with
-the lid closed (and no external display), it always applies. The battery check can't be switched off.
+the lid closed, it always applies. The battery check can't be switched off.
 
 Each check acts once, when its condition starts, so you can turn Insomnia back on afterwards if you mean to. The panel
 shows a short note saying what happened, and the icon shows a ! until you open the panel.
 
-Lid mode has one more safeguard. The lid helper puts your Mac to sleep at 10% battery, and turns sleep back on if
-Insomnia quits, crashes or hangs, or your Mac restarts.
+The lid helper has its own safeguards, which hold whatever the app does:
+- it puts your Mac to sleep at 10% battery
+- it turns lid mode off if your Mac gets very hot, and puts it to sleep if lid mode was what kept it awake with the
+  lid closed
+- it turns sleep back on if Insomnia quits, crashes or hangs, or your Mac restarts, and in the same case puts it to
+  sleep when Insomnia can't
+
+Only the copy of Insomnia that `make install` put in Applications can use the lid helper. Upgrading from the first
+version removes its old password-free `pmset` rule.
 
 ## Building and installing
 

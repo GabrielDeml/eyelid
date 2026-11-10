@@ -48,7 +48,8 @@ On a desktop Mac the panel is just the header and *Keep screen on*.
 - **When unplugged** (MacBooks only, default *Sleep with lid closed*):
   - *Stay awake*: nothing changes.
   - *Sleep with lid closed*: no lid mode while on battery, so closing the lid sleeps the Mac. Keeping it awake with
-    the lid open continues. If the lid is already shut when the power goes, the Mac sleeps. This choice is offered
+    the lid open continues. If the lid is already shut when the power goes, the Mac sleeps, unless someone is using an
+    external display. This choice is offered
     only while the lid switch is on. Otherwise it would behave like *Stay awake*, and the picker shows it that way.
   - *Turn Insomnia off*: Insomnia turns off the moment the adapter is unplugged. Turning it on again on battery works.
 - **No Sleep Now button.** While lid mode is engaged, macOS blocks Sleep in the Apple menu. Turn Insomnia off first,
@@ -71,8 +72,9 @@ The rest show only while the switch is on:
   still isn't
 - *Needs your approval. Open System Settings* (warning)
 - *Another app has already turned off sleep*, *In use by another user on this Mac*, *Battery too low. Plug in your
-  Mac. Try Again*, *Couldn't turn off sleep. Try Again*, *Lost contact with the lid helper. Try Again* and *Something
-  else turned sleep back on. Try Again* (all warnings, one per `LidController.Failure`)
+  Mac. Try Again*, *Your Mac got hot. Try Again* (the helper's heat backstop), *Couldn't turn off sleep. Try Again*,
+  *Lost contact with the lid helper. Try Again* and *Something else turned sleep back on. Try Again* (all warnings,
+  one per `LidController.Failure`)
 - While Insomnia is on: *Paused while your Mac is hot*, *Paused while the battery is low* (warnings) and *Paused while
   on battery* (the *Sleep with lid closed* rule)
 
@@ -83,11 +85,34 @@ show the app's real text.
 
 There are two protections and neither has a threshold to set.
 
-**Overheat.** The Mac counts as hot when macOS reports `.critical`, or `.serious` for 60 s with the lid closed and no
-external display (5 minutes otherwise), or `.fair` for 5 minutes while lid mode is engaged with the lid closed and no
-external display. The last one is the bag rule. Overheat protection applies when *Turn Insomnia off if your Mac gets
-hot* is on, and it always applies when lid mode is on (engaged, or wanted with the helper ready) with the lid closed and no
-external display, whatever the switch says. Without lid mode a closed lid sleeps the Mac anyway, so the switch decides.
+**Shut in, and unattended.** The closed-lid rules key on two conditions (`PowerState`).
+
+*Shut in* means the lid is closed and only lid mode is keeping the Mac awake. That is the case with no external display
+at all, or with one the kernel doesn't count as clamshell mode: IOPMrootDomain's `AppleClamshellCausesSleep` is true.
+Clamshell mode (a real display on power) sets it false, and macOS keeps such a Mac awake without lid mode. A virtual
+display doesn't: on this Mac a `CGVirtualDisplay` left it Yes. So `isShutIn = lidClosed && (externalDisplays == 0 ||
+causesSleep == true)`. The kernel's answer can only add "shut in" when CoreGraphics reports a display. It can never
+remove it when there is none, so a missing or stale value leaves the old rule.
+
+The app used to stop at "no external display", and any app can add a virtual display (BetterDisplay, DeskPad, AirPlay,
+Sidecar, or malware through `CGVirtualDisplay`). One display was enough to silently switch off every closed-lid rule
+while the Mac sat in a bag.
+
+*Unattended* means shut in, and either no external display at all or nobody has touched the keyboard, mouse or
+trackpad for 2 minutes (`PowerState.unattendedAfter`, HID idle time). A DisplayLink dock, Sidecar or an AirPlay screen
+with the lid closed is shut in, because macOS doesn't do clamshell mode for those. That is exactly why people use lid
+mode with them. Someone typing at one is not a bag. A bag has no input, and same-user code can't fake HID input without
+Accessibility (`caffeinate -u` didn't reset the idle time on this Mac). Watching a video on an AirPlay screen with the
+lid shut and no input for 2 minutes does count as unattended; that is the trade-off.
+
+The display count alone still decides `displaysleepnow`: it runs only with no external display at all, so it can never
+blank a screen someone is looking at.
+
+**Overheat.** The Mac counts as hot when macOS reports `.critical`, or `.serious` for 60 s while shut in (5 minutes
+otherwise), or `.fair` for 5 minutes while lid mode is engaged and the Mac is unattended. The last one is the bag rule.
+Its window starts when the unattended condition starts. Overheat protection applies when *Turn Insomnia off if your Mac
+gets hot* is on. It always applies, whatever the switch says, when lid mode is on (engaged, or wanted with the helper
+ready) and the Mac is shut in. Without lid mode a closed lid sleeps the Mac anyway, so the switch decides.
 
 **Low battery.** On battery at or below 12% (`Engine.lowBatteryPercent`). It clears at 15% or on AC. An unknown
 battery percentage never trips it. It can't be switched off.
@@ -102,8 +127,30 @@ Insomnia off if somebody has.
 - While a condition is still active, lid mode stays paused and the lid caption says *Paused while your Mac is hot* or
   *Paused while the battery is low*. Plain keep-awake can be turned on again.
 - The Mac's firmware still shuts down at a critical temperature whatever Insomnia does.
-- The helper's own backstop is not a setting. At 10% or less on battery with the flag set, it resets the flag and
-  sleeps the Mac regardless of the lid. The app's 12% rule fires first.
+- The helper's own backstops are not settings, and they hold whatever the app does (see Security):
+  - **Battery.** At 10% or less on battery with the flag set, whoever set it, it resets the flag and sleeps the Mac
+    regardless of the lid. The app's 12% rule fires first.
+  - **Heat** (its own flag only). It trips on `.critical` with any lid state, because while the flag is 1 macOS's own
+    thermal emergency sleep is blocked too, even in clamshell mode. It also trips on `.serious` for 2 minutes
+    (`HelperInfo.thermalSeriousWindow`) while the Mac is shut in; the app's 60 s rule fires first. The helper tracks
+    the thermal state itself (ProcessInfo's thermal notification) and checks on every change, on every engage and
+    heartbeat, and at the end of the 2-minute window (a one-shot timer while a session exists). No client message is
+    needed to trigger it. A trip drops every session (heartbeat reply `.hot`, sent before the reset), resets the flag,
+    and sleeps the Mac if it is shut in. While the condition holds, engage is refused with `.hot`. The helper has no
+    bag rule; that stays the app's, because only the app can see displays and input.
+  - **Sleep after its own resets.** Clearing the flag with the lid shut doesn't reliably sleep the Mac. So when the
+    helper resets the flag for a reason the app can't follow up on, it sleeps the Mac if it is shut in. Those reasons
+    are: the app crashed, was killed or quit without releasing (connection lost); no heartbeat for 45 s (a hang, or
+    `kill -STOP`); the heat backstop; and the restart reset after the helper itself died holding the flag. For the
+    battery backstop it always sleeps. Without this, a stopped app left a Mac in a bag awake, still holding its
+    idle-sleep assertion, with no safety logic running. The helper's shut-in test is `AppleClamshellState &&
+    AppleClamshellCausesSleep != false`: it can't see displays or input, so it treats an unknown answer as shut in.
+    Each reset carries what to do after it (`HelperPolicy.AfterReset`: nothing, sleep if shut in, sleep), and a failed
+    reset keeps that for its 5 s retry, so a retry that succeeds still sleeps. Adding a session, an override or SIGTERM
+    clears it. An explicit release doesn't sleep, nor do a failed engage, SIGTERM (shutdown, logout, unregister) or the
+    boot reset. After an explicit release the app follows up itself, because only it knows whether someone is using an
+    external display. Trade-off: if the app crashes while someone types at a DisplayLink screen with the lid shut, the
+    helper sleeps the Mac.
 - The signal is a one-line notice in the panel and a "!" on the moon until the panel is opened. There are no
   notifications. The notices are *Your Mac got hot, so Insomnia put it to sleep*, *Your Mac got hot, so Insomnia
   turned off*, *Your battery fell to 12%, so Insomnia put your Mac to sleep* and *Your battery fell to 12%, so
@@ -202,7 +249,7 @@ glyph legend and Quit button. Raycast can come later as a 3-verb `insomnia://on|
 ## Architecture
 
 ```
-Sources/Insomnia/                    (2,926 lines, rewritten)
+Sources/Insomnia/                    (3,048 lines)
   main.swift          argv: --gui, --version, --helper-status, --unregister-helper, --export-icon, --snapshot (DEBUG).
                       Unknown flag or a terminal launch → usage, exit 2. Else run the app.
   AppDelegate.swift   single instance; SIGTERM → normal quit; .terminateLater quit that releases lid mode first
@@ -220,16 +267,18 @@ Sources/Insomnia/                    (2,926 lines, rewritten)
   Theme.swift         colour, type and metric tokens; QuietButtonStyle
   SettingsView.swift  the one-page Settings window
   Snapshot.swift      DEBUG: panel states, the Settings window, glyphs and app icon to PNG
-Sources/InsomniaHelper/   UNCHANGED (root daemon)
-Sources/InsomniaShared/   UNCHANGED
-Tests/InsomniaTests/      967 lines: Engine (fakes), LidController (fake helper), helper policy, power parsing
+Sources/InsomniaHelper/   root daemon: the flag, its resets, the battery and heat backstops (see Security)
+Sources/InsomniaShared/   XPC protocol, identifiers, requirements, the installed-app pin, helper policy, IOPS/IORegistry reads
+Tests/InsomniaTests/      Engine (fakes), LidController (fake helper), helper policy, the pin, power parsing
 ```
 
-**Helper and InsomniaShared stay byte-for-byte unchanged.** They are the root-owned safety code, proven on this Mac,
-and an identical helper build keeps cdhash `414e57d4…`, so the existing registration and approval carry over with no
-new prompt. That holds only when built from this checkout path with the current toolchain/SDK (the helper's symbol
-table holds absolute object paths): **build in `/Users/gdeml/git/Insomnia`, not a worktree**, and check the cdhash before
-`make install`. App version stays `1.0.0` (build.sh ties it to `HelperInfo.version`). UserDefaults keys kept from the
+**The helper is the root-owned safety code; change it only with this document.** The security pass (see Security)
+changed it: the installed-app pin, the heat backstop, sleeping after its own resets, and atomic writes in /var/run. Any
+change gives the helper a new cdhash, so on its next launch the installed app sees the mismatch and re-registers it
+(the silent upgrade below). macOS may ask for approval again in Login Items. The helper's symbol table holds absolute
+object paths, so the cdhash is reproducible only from the same checkout path and toolchain: **build in
+`/Users/gdeml/git/Insomnia`, not a worktree**. App version stays `1.0.0` (build.sh ties it to `HelperInfo.version`;
+upgrades are detected by cdhash, not by this string). UserDefaults keys kept from the
 old app are `keepScreenOn`, `closedLidMode` and `helperRegisteredCDHash` (`--unregister-helper` clears `closedLidMode`).
 The new settings use `whenUnplugged`, `powerButtonMinutes` (the name predates the switch), `clickAction` and
 `overheatProtection`. Values left behind by earlier builds under `lowBatteryProtection`, `lowBatteryPercent` and
@@ -247,13 +296,18 @@ turned off).
 Pass:
 1. Edges: lid opened → clear `latched`; AC→battery → unplugged edge.
 2. Expiry: `endsAt <= now` → off.
-3. Safety, as described under Safety. Overheat is checked when its switch is on, or lid mode is on with the lid closed and
-   no external display; low battery is always checked. Each trips on entry and acts only while `isOn` or lid engaged. Timers are
-   armed for the 60 s and 5 minute windows.
+3. Safety, as described under Safety. Overheat is checked when its switch is on, or lid mode is on and the Mac is shut
+   in (`PowerState.isShutIn`); low battery is always checked. Each trips on entry and acts only while `isOn` or lid
+   engaged. Timers are armed for the 60 s and 5 minute windows. The bag rule uses *unattended*. While lid mode is
+   engaged the 5 s lid poll also re-runs the pass, so idle time crossing 2 minutes is noticed. A trip sleeps the Mac
+   if it is closed with no external display at all, or if nobody has used it for 2 minutes (checked once, at the
+   trip). Otherwise it turns Insomnia off. The release that follows then sleeps only an unattended Mac, so the notice
+   tells the truth.
 4. Unplugged edge with *Turn Insomnia off* → off, with the unplugged notice.
 5. Lid wanted = `isOn && closedLidMode && hasLid && helperReady && !hotEpisode && !lowEpisode && !latched
    && !(onBattery && whenUnplugged == .sleepWhenLidCloses)`. If lid mode drops for a guard or the unplugged rule
-   while the lid is shut, the Mac sleeps (the helper's release does it, or the safety action does), and
+   while the lid is shut, the Mac sleeps if unattended (the follow-up `sleepnow` after the release, or the safety
+   action), and
    `latched = true` so a DarkWake or re-plug inside a bag can't re-arm it. Opening the lid or any user action clears
    it. Publish only on change.
 6. Assertions: system = `isOn`; display = `isOn && keepScreenOn && !(lidEngaged && lidClosed && noExternalDisplay)`.
@@ -272,16 +326,34 @@ Pass:
 - **State** is one of `.off`, `.engaging`, `.engaged`, `.releasing`, `.failed(reason)` or `.stuck`. One serial task
   does all engage/release work. Engage = new `.privileged` connection + `engage`; release = `release` + readback of
   IORegistry `SleepDisabled`. Every XPC call races its reply against the error handler and a timeout (2 s status, 5 s
-  engage/release) and resumes once. An engage or release that isn't `.ok` or times out → invalidate the connection
+  engage/release) and resumes once. A release answered with a drop reason (`.notEngaged`, `.backstop`, `.hot`: the helper dropped the session just before and reset the flag itself) counts as done. Any other engage or release that isn't `.ok`, or times out → invalidate the connection
   (the helper resets on invalidation), then poll the flag.
 - **Heartbeat** every 10 s (`.common` mode) + an App Nap activity while engaged. Any reply other than `.ok`, or a lost
   connection → invalidate, read back, `.failed`.
 - **`.failed` is sticky** until a user action (toggling the lid switch or the main switch, a right-click on the moon,
   or a caption's *Try Again*). The reasons are a foreign flag (*Another app has already turned off sleep*; retried
-  automatically when the flag reads 0, checked every 10 s), another user, the helper's battery backstop, a failed set,
-  a lost helper, and an override. A user's `sudo pmset -a disablesleep 0` is never re-applied.
-- **Lid shut, no external display, engaged** → `pmset displaysleepnow`. 5 s clamshell poll while engaged as a fallback
-  for a missed interest notification.
+  automatically when the flag reads 0, checked every 10 s), another user, the helper's battery backstop, the helper's
+  heat backstop (heartbeat reply `.hot`), a failed set, a lost helper, and an override. A user's
+  `sudo pmset -a disablesleep 0` is never re-applied.
+- **Lid shut, no external display, engaged** → `pmset displaysleepnow` (the cached `update(closedWithoutDisplay:)`
+  value; it can never blank another screen).
+- **Every follow-up `sleepnow` reads fresh.** That covers releasing lid mode, quitting, a stuck flag that clears, and a
+  lost session. Each one runs after the flag reads 0 and asks `HelperClienting.isUnattendedNow()`, which re-reads the
+  lid, `AppleClamshellCausesSleep`, the display count and HID idle time at that moment. A cached value can be seconds
+  old, because a dock unplug changes AC, the displays and the kernel's answer in some order. It can also be a whole
+  sleep old, if this app was the one that hung.
+- **After a lost session** the app sleeps an unattended Mac once the flag reads 0, unless the helper's battery or heat
+  backstop already did. It also skips the sleep if the Mac has slept since the loss was noticed
+  (`mach_continuous_time − mach_absolute_time` grew). Both sides react to the same loss within ~200 ms, so this stops
+  a `sleepnow` from reaching powerd after the helper's sleep and putting the Mac back to sleep once the lid opens.
+  A stuck flag left by a loss sleeps when it clears, even while lid mode is still wanted.
+- **Power-off.** After `NSWorkspace.willPowerOffNotification` (logout, restart, shutdown) the quit-time `sleepnow` is
+  skipped, so an overnight update restart with the lid shut isn't put to sleep halfway. The helper can still sleep
+  the Mac if loginwindow kills the app without a release (connection lost), and that is the safe outcome.
+- **Approval after a silent upgrade.** If re-registering a changed helper leaves it waiting for approval, the 2 s
+  approval poll starts, as it does after `install()`.
+- 5 s clamshell poll while engaged as a fallback for a missed interest notification. It re-reads the lid,
+  `AppleClamshellCausesSleep` and the display count, and re-runs the pass.
 - **`sleepNow()`**: release, read back 0, `/usr/bin/pmset sleepnow`.
 - **`.stuck`** (flag still 1 after 2 s, 15 s after a lost helper): danger caption with **Reset with Password…** (an
   osascript admin prompt running `pmset -a disablesleep 0`). Re-checked every 10 s; clears itself when the flag reads 0.
@@ -295,7 +367,17 @@ Pass:
 - While the flag is 1, macOS's own low-battery (and probably thermal) sleep and `pmset sleepnow` are disabled:
   release and read back 0 before sleeping. Releasing with the lid shut doesn't reliably sleep: follow with `sleepnow`.
 - Apple Silicon panel can stay lit with the lid shut → `displaysleepnow`, never with an external display.
-- Clamshell message `0xE0034100` (bit 0 = closed) doesn't import into Swift; missing `AppleClamshellState` = desktop.
+- Clamshell message `0xE0034100` (bit 0 = closed, bit 1 = closing sleeps) doesn't import into Swift; missing
+  `AppleClamshellState` = desktop.
+- `AppleClamshellCausesSleep` is published by `sendClientClamshellNotification()` from xnu's
+  `shouldSleepOnClamshellClosed()`: `!clamshellDisabled && !(desktopMode && acAdaptorConnected) &&
+  !clamshellSleepDisableMask`. It is republished, along with the clamshell message, on lid open/close, AC, desktop mode
+  and clamshell enable/disable changes, but not when the disable mask changes (for example briefly after a dark wake).
+  So it can be stale, and the app uses it only to *add* "shut in" when a display is present. On this Mac it read Yes
+  with `SleepDisabled` = 1 and the lid open, and stayed Yes with a `CGVirtualDisplay` attached. Still to check (see
+  Verify): with the lid closed, in clamshell mode on AC and on battery, and with DisplayLink, Sidecar and AirPlay.
+- `SecStaticCodeCreateWithPath` on `/dev/fd/N` reads the signature of the already-open file (checked on this Mac: the
+  same cdhash as `codesign -dvvv`). The installed-app pin depends on it.
 - Run-loop timers count uptime: re-arm from wall-clock deadlines on wake/clock change; `.common` mode.
 - IOPS callback is a C pointer; source on the main run loop in `.commonModes`. Thermal notes arrive on any thread.
 - Quit: `.terminateLater`, release, reply; ignore a second quit while pending; SIGTERM through the same path;
@@ -315,14 +397,107 @@ Pass:
 - `Package.swift` links IOKit, ServiceManagement and Security only (no Carbon, no UserNotifications).
 - **Upgrading with lid mode engaged:** `make install` quits the running app, which releases the flag and, with the lid
   shut, sleeps the Mac. Install with the lid open.
+- **v1 leftovers.** `make install` and `make uninstall` remove v1's sudoers rule and safety daemon if they are present,
+  after the running app has quit (see Security).
 
 ### Verify
 
-`swift build`, `swift test`, `make snapshot` (every panel state and the Settings window, light + dark), helper cdhash
-= `414e57d4…`, `make install`, then: on/off → `pmset -g assertions`; lid mode on →
-`ioreg -r -c IOPMrootDomain | grep SleepDisabled` = Yes; quit → No; `kill -9` → No within a second.
+`swift build`, `swift test`, `make snapshot` (every panel state and the Settings window, light + dark), the helper
+cdhash build.sh prints, `make install`, then:
+- on/off → `pmset -g assertions`
+- lid mode on → `ioreg -r -c IOPMrootDomain | grep SleepDisabled` = Yes; quit → No; `kill -9` → No within a second
+- with the lid shut and no display: `kill -9` the app, and the Mac sleeps; `kill -STOP` it, and within ~45 s the flag
+  is No and the Mac sleeps
+- the pin: `/Applications/Insomnia.app/Contents/MacOS/Insomnia --helper-status` prints "helper answered" with its
+  cdhash. A *different* signed build (`ditto build/Insomnia.app` into a scratch folder, change one byte of a resource,
+  re-sign with `codesign -f -s "Apple Development: …" -o runtime`), run with `--helper-status`, prints "helper didn't
+  answer". The helper logs "serving" with the pinned app cdhash
+  (`log show --predicate 'subsystem == "com.gdeml.Insomnia.helper"' --last 5m`).
+- the kernel's answer: lid mode engaged and no display, close the lid and read `AppleClamshellCausesSleep` over ssh
+  (`ioreg -r -c IOPMrootDomain -d 1`): expect Yes. A real display in clamshell mode on AC: expect No. Also record the
+  value on battery, and with DisplayLink, Sidecar and a BetterDisplay virtual screen.
+
+## Security
+
+The lid helper runs as root and is the only privileged code. The attacker that matters is other code running as the
+user, with no admin password. That code can already run `caffeinate`, but it can't set `SleepDisabled`, which needs
+root. So the helper must not let it hold that flag, and a flag it does hold must stay bounded.
+
+**Who can drive the helper.** The listener's code-signing requirement is set once at start-up, before `resume()`, and
+libxpc checks it against the caller's audit token, so PID reuse and exec races don't apply. It requires:
+- our identifier (`com.gdeml.Insomnia`)
+- an Apple-issued certificate whose OU is our Team ID
+- no `get-task-allow`
+- **the cdhash of the installed app**, `cdhash H"…"`
+
+The helper reads that cdhash once at start-up, after `InstallLocation.check` passes
+(`CodeSignature.installedAppCDHash`). /Applications itself is `root:admin 0775`: any admin process can rename the
+entries in it, so a check by path followed by a read by path could see two different bundles. So the helper never
+uses the path twice:
+1. It opens `/Applications/Insomnia.app` once with `O_DIRECTORY | O_NOFOLLOW`. /Applications itself isn't checked;
+   it is the system's own directory.
+2. It opens `Contents` and then `MacOS` relative to that descriptor (`openat`, `O_NOFOLLOW`).
+3. From the MacOS descriptor it opens both `Insomnia` and `InsomniaHelper`.
+4. Each of the five must be root-owned, not group/other-writable and carry no ACL (`fstat` and `acl_get_fd_np`), and
+   the two binaries must be regular files.
+5. It reads both signatures through the open descriptors (`/dev/fd/N`).
+6. The helper file's cdhash must equal the cdhash the kernel is running for this process. That ties the pinned app to
+   the very bundle this helper was launched from.
+
+If any step fails, or the cdhash isn't 40 hex digits, the helper runs reset-only. The cdhash goes into the requirement
+text only after all that. What this proves is the content of a root-owned, non-writable file. That is all the pin needs.
+Nothing but root can change such a file, and no other root-owned Insomnia bundle exists: `make install` deletes the
+previous one.
+
+Why it pins the cdhash: the Team ID isn't a secret on the developer's Mac. build.sh signs with the Apple Development
+identity in the login keychain, which signs without a prompt. So any process running as the user could sign its own
+client as `com.gdeml.Insomnia`, call `engage` and heartbeat forever, holding `SleepDisabled = 1` with none of the
+app's overheat, bag, battery or unplug rules. With the pin, only the exact root-owned app `make install` put in place
+can engage. That shuts out older signed builds too. Running the same code from somewhere else is the same code.
+Consequences:
+- A build that isn't the installed one can't talk to the helper. It couldn't use lid mode anyway (`.notInApplications`),
+  and its launch check of a set flag now gets no answer, which it treats as unknown.
+- The helper must restart to pin a newly installed app. `make install` already runs `launchctl kickstart -k`, and the
+  silent upgrade re-registers a changed helper. If neither happens, engage fails until the helper restarts. Engage
+  already failed in that case, because the old helper's code was no longer on disk.
+
+**Bounded even for a client that passes.** A session holds the flag only while it heartbeats (45 s deadline). The
+helper's battery and heat backstops run on their own events, not on client messages. Its sleep after a lost session or
+a hang doesn't depend on the client either. One thing does: following an explicit *release* with a sleep is the app's
+job, because only the app can tell a bag from someone at an external display. A release that skips it leaves the flag
+at 0, so the Mac is back to ordinary keep-awake, which any process can do with `caffeinate`.
+
+**What this doesn't cover.** Running `make install` from a tree other same-user code can write is the same as handing
+that code root. The Makefile, the scripts it runs with sudo warm on the same terminal, and the `build/` bundle it
+copies are all owned by the user. The pin protects only between installs. If that matters:
+- build and install from a clean checkout, or from a separate account
+- check `git status` before installing
+
+`make install` copies with `ditto --noacl` and strips ACLs (`chmod -RN`), and `InstallLocation.check` and lid-verify
+reject any item that carries one. Otherwise an ACL added to `build/` would survive into a root-owned bundle and leave
+it writable by the user while every mode-bit check passed. A separate locked signing keychain
+(`INSOMNIA_SIGN_KEYCHAIN`) stops other code from signing a client silently. build.sh unlocks it only around the
+`codesign` steps.
+
+**Files the helper writes.** The ownership file and boot marker live in /var/run, which is `root:daemon 0775`, not
+root-only. Each write goes to `<name>.tmp`: any leftover is unlinked, then the file is created with
+`O_CREAT | O_EXCL | O_NOFOLLOW`, fsynced and renamed over the real name. rename replaces whatever directory entry is
+there (a file, a hard link or a symlink) without following it, and the old file stays in place until the rename, so
+ownership is never missing on disk mid-write. The boot marker is read with `O_NOFOLLOW`. Only root or group `daemon`
+can plant anything there, so this is hardening, not a fix for a reachable attack.
+
+**v1 leftovers.** v1's ad-hoc path installed `/etc/sudoers.d/zz_insomnia`, which grants the user
+`NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1`. It also installed a root safety daemon,
+`/Library/LaunchDaemons/com.gdeml.insomnia.safety.plist`. Left behind, the sudoers rule lets any process running as
+that user set the flag with no session, no heartbeat and no app rules. The helper sees a foreign flag: it never takes
+it over, and only the boot reset and the battery backstop ever clear it. `make install` and `make uninstall` boot the
+daemon out and delete both, plus v1's staging leftovers and boot marker, whenever either file exists. They do it after
+the running app has quit, so a v1 app holding the flag through the rule can release it first. If `SleepDisabled` is
+still 1 afterwards and the helper doesn't own it (no ownership file), they print the `sudo pmset -a disablesleep 0`
+hint.
 
 ## Line budget
 
-2,926 app + 1,222 helper/shared (unchanged) + 967 tests + 761 scripts, Makefile, README and this document ≈
-**5,900** (`wc -l`), down from ~30,400.
+3,048 app + 1,456 helper/shared + 1,311 tests + 978 scripts, Makefile, README and this document ≈ **6,800**
+(`wc -l`), down from ~30,400. The security pass added most of the growth: the pin, the heat backstop, sleeping after
+the helper's own resets, the shut-in and unattended rules, their tests, and this document's Security section.

@@ -64,9 +64,15 @@ struct FlagController {
 
     // MARK: Boot marker
 
+    /// O_NOFOLLOW: a symlink planted in /var/run (root:daemon 0775) reads as no marker, never as its target.
     func readBootMarker() -> String? {
-        guard let data = FileManager.default.contents(atPath: HelperPaths.bootMarker) else { return nil }
-        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let fd = open(HelperPaths.bootMarker, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var buf = [UInt8](repeating: 0, count: 256)
+        let n = Darwin.read(fd, &buf, buf.count)
+        guard n > 0 else { return nil }
+        let text = String(decoding: buf.prefix(n), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
     }
 
@@ -86,20 +92,28 @@ struct FlagController {
         return uuid.isEmpty ? nil : uuid
     }
 
-    /// O_NOFOLLOW (never write through a symlink), 0644, fsync before close.
+    /// Written to `<path>.tmp`, created fresh with O_CREAT | O_EXCL | O_NOFOLLOW (never through a planted link or
+    /// symlink), 0644, fsynced, then renamed over `path`. rename replaces whatever entry is there without following it,
+    /// and the old file stays in place until then, so the ownership file is never missing mid-write.
     private func writeFile(_ path: String, _ contents: String) -> Bool {
-        let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o644)
+        let tmp = path + ".tmp"
+        _ = unlink(tmp)   // a leftover from a crash, or something planted
+        let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
         guard fd >= 0 else { return false }
-        defer { close(fd) }
         let bytes = Array(contents.utf8)
         let written = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
-        guard written == bytes.count else { return false }
-        _ = fchmod(fd, 0o644)
-        return fsync(fd) == 0
+        let durable = written == bytes.count && fchmod(fd, 0o644) == 0 && fsync(fd) == 0
+        close(fd)
+        guard durable, rename(tmp, path) == 0 else {
+            _ = unlink(tmp)
+            return false
+        }
+        return true
     }
 }
 
-/// Puts the Mac to sleep after a backstop reset: IOPMSleepSystem, else `/usr/bin/pmset sleepnow`.
+/// Puts the Mac to sleep after a backstop reset or a reset nobody else can follow up (docs/DESIGN.md "Safety"):
+/// IOPMSleepSystem, else `/usr/bin/pmset sleepnow`.
 enum SystemSleeper {
     static func sleepNow() {
         let port = IOPMFindPowerManagement(mach_port_t(MACH_PORT_NULL))

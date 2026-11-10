@@ -15,6 +15,9 @@ public enum HelperInfo {
     public static let installedAppPath = "/Applications/Insomnia.app"
     /// Bundle-relative paths that must exist for setup (otherwise HelperStatus.notFound).
     public static let bundledHelperPath = "Contents/MacOS/InsomniaHelper"
+    /// The app's own executable (CFBundleExecutable), whose cdhash the helper pins (docs/DESIGN.md "Security").
+    public static let appExecutableName = "Insomnia"
+    public static let helperExecutableName = "InsomniaHelper"
     public static let bundledPlistPath = "Contents/Library/LaunchDaemons/" + plistName
     /// Human-readable, for Diagnostics only. Upgrade detection uses the cdhash, not this string.
     public static let version = "1.0.0"
@@ -32,10 +35,20 @@ public enum HelperInfo {
     /// (catches a foreign setter while the percentage holds steady). No timer above it or on AC.
     public static let backstopPollPercent = 15
     public static let backstopPollInterval: TimeInterval = 60
+    /// Heat backstop: `.serious` this long with the Mac shut in. Twice the app's 60 s rule, so the app acts first.
+    public static let thermalSeriousWindow: TimeInterval = 120
 
-    /// What the helper requires of every client connection (NSXPCListener.setConnectionCodeSigningRequirement).
-    public static func clientRequirement(teamID: String) -> String {
-        requirement(identifier: appBundleID, teamID: teamID)
+    /// What the helper requires of every client connection (NSXPCListener.setConnectionCodeSigningRequirement): our
+    /// identifier, team and no get-task-allow, and exactly the installed app's code (`appCDHash`, read by
+    /// `CodeSignature.installedAppCDHash`). nil unless `appCDHash` is 40 hex digits: it is spliced into the text.
+    public static func clientRequirement(teamID: String, appCDHash: String) -> String? {
+        guard isCDHash(appCDHash) else { return nil }
+        return requirement(identifier: appBundleID, teamID: teamID) + " and cdhash H\"\(appCDHash.lowercased())\""
+    }
+
+    /// 40 ASCII hex digits (a 20-byte cdhash). Character.isHexDigit would also accept fullwidth forms.
+    public static func isCDHash(_ text: String) -> Bool {
+        text.utf8.count == 40 && text.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }
     }
 
     /// What the app requires of the helper's side of the connection (NSXPCConnection.setCodeSigningRequirement).
@@ -102,6 +115,36 @@ public enum CodeSignature {
     /// Convenience for the app's backend choice (PrivilegedBackends.makeDefault). Call off the main thread.
     public static func currentTeamID() -> String? { readSelf().teamID }
 
+    /// The installed app's cdhash, for the helper's client requirement (docs/DESIGN.md "Security"). /Applications is
+    /// admin-writable, so nothing here uses a path twice: `bundle` is opened once (O_DIRECTORY | O_NOFOLLOW), then
+    /// Contents, MacOS and both binaries relative to it (openat, O_NOFOLLOW). Every one must pass `isSafe` (root-owned,
+    /// not group/other-writable, no ACL), the binaries must be regular files, and both signatures are read through the
+    /// open descriptors (/dev/fd/N). The helper binary's cdhash must equal `runningHelperCDHash` (the kernel's, for this
+    /// process), which ties the pinned app to the bundle this helper was launched from. nil if any step fails.
+    public static func installedAppCDHash(bundle: String = HelperInfo.installedAppPath, runningHelperCDHash: String,
+                                          isSafe: (Int32) -> Bool = InstallLocation.isSafe(descriptor:)) -> String? {
+        var open: [Int32] = []
+        defer { open.forEach { close($0) } }
+        func at(_ dir: Int32?, _ name: String, directory: Bool) -> Int32? {
+            let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (directory ? O_DIRECTORY : 0)
+            let fd = dir.map { openat($0, name, flags) } ?? Darwin.open(name, flags)
+            guard fd >= 0 else { return nil }
+            open.append(fd)
+            var st = stat()
+            guard fstat(fd, &st) == 0, isSafe(fd) else { return nil }
+            guard directory ? (st.st_mode & S_IFMT) == S_IFDIR : (st.st_mode & S_IFMT) == S_IFREG else { return nil }
+            return fd
+        }
+        guard let root = at(nil, bundle, directory: true),
+              let contents = at(root, "Contents", directory: true),
+              let macOS = at(contents, "MacOS", directory: true),
+              let app = at(macOS, HelperInfo.appExecutableName, directory: false),
+              let helper = at(macOS, HelperInfo.helperExecutableName, directory: false) else { return nil }
+        guard let helperHash = cdhash(ofFileAt: URL(fileURLWithPath: "/dev/fd/\(helper)")),
+              helperHash == runningHelperCDHash.lowercased() else { return nil }
+        return cdhash(ofFileAt: URL(fileURLWithPath: "/dev/fd/\(app)"))
+    }
+
     /// Hex cdhash of a binary on disk (app → the bundled helper, for versionMismatch).
     public static func cdhash(ofFileAt url: URL) -> String? {
         var staticCode: SecStaticCode?
@@ -137,22 +180,43 @@ public enum InstallLocation {
         case unsafeItem(String)
     }
 
-    /// nil = safe. Walks the whole bundle with lstat (symlinks are not followed).
+    /// nil = safe. Walks the whole bundle with lstat (symlinks are not followed). An ACL counts as unsafe: `ditto` copies
+    /// them and the mode bits don't show them, so one could leave a root-owned 0755 file writable by the user.
     public static func check(bundle: URL) -> Problem? {
         let path = bundle.standardizedFileURL.path
         guard path == HelperInfo.installedAppPath else { return .wrongPath(path) }
         var st = stat()
         guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR else { return .unsafeItem(path) }
-        guard isSafe(st) else { return .unsafeItem(path) }
+        guard isSafe(st), !hasACL(path) else { return .unsafeItem(path) }
         guard let walker = FileManager.default.enumerator(atPath: path) else { return .unsafeItem(path) }
         while let rel = walker.nextObject() as? String {
             let item = path + "/" + rel
-            guard lstat(item, &st) == 0, isSafe(st) else { return .unsafeItem(item) }
+            guard lstat(item, &st) == 0, isSafe(st), !hasACL(item) else { return .unsafeItem(item) }
         }
         return nil
     }
 
-    private static func isSafe(_ st: stat) -> Bool {
+    /// Owned by root, not group/other-writable.
+    public static func isSafe(_ st: stat) -> Bool {
         st.st_uid == 0 && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0
+    }
+
+    /// The same for an open descriptor, plus no ACL (CodeSignature.installedAppCDHash).
+    public static func isSafe(descriptor fd: Int32) -> Bool {
+        var st = stat()
+        guard fstat(fd, &st) == 0, isSafe(st) else { return false }
+        return !hasACL(descriptor: fd)
+    }
+
+    /// An extended ACL on the open file.
+    public static func hasACL(descriptor fd: Int32) -> Bool { hasACL(acl_get_fd_np(fd, ACL_TYPE_EXTENDED)) }
+
+    /// An extended ACL on the item itself (not following a symlink). Unreadable counts as having one, except "none".
+    private static func hasACL(_ path: String) -> Bool { hasACL(acl_get_link_np(path, ACL_TYPE_EXTENDED)) }
+
+    private static func hasACL(_ acl: acl_t?) -> Bool {
+        guard let acl else { return errno != ENOENT }   // ENOENT: no ACL
+        acl_free(UnsafeMutableRawPointer(acl))
+        return true
     }
 }

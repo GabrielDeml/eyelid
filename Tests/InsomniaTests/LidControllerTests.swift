@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import InsomniaShared
 import os
@@ -18,6 +19,8 @@ final class FakeClient: HelperClienting {
         /// The flag after an abandon (the helper's invalidation reset).
         var flagAfterAbandon: Bool? = false
         var answer: HelperAnswer?
+        /// What a fresh read says at a follow-up sleep (shut in, and nobody at an external display).
+        var unattended = false
         var calls: [String] = []
     }
 
@@ -54,6 +57,7 @@ final class FakeClient: HelperClienting {
     func heartbeat() async -> Int32 { state.withLock { $0.heartbeat } }
     func query() async -> HelperAnswer? { state.withLock { $0.answer } }
     func flag() async -> Bool? { state.withLock { $0.flag } }
+    func isUnattendedNow() async -> Bool { state.withLock { $0.unattended } }
     func pmset(_ verb: String) async { log(verb) }
     func resetWithPassword() async -> Bool {
         log("reset")
@@ -94,6 +98,7 @@ struct LidControllerTests {
 
     @Test func releaseWithTheLidShutSleepsTheMac() async {
         let client = FakeClient()
+        client.edit { $0.unattended = true }
         let lid = makeLid(client)
         await lid.start()
         lid.setDesired(true)
@@ -177,9 +182,11 @@ struct LidControllerTests {
         #expect(client.calls.filter { $0 == "engage" }.count == 2)
     }
 
-    /// The helper's reset doesn't sleep the Mac: losing lid mode in a bag must.
+    /// A loss the helper may not follow with its own sleep (its crash or SIGTERM, an override): the app sleeps an
+    /// unattended Mac once the flag reads 0, unless the Mac has slept since the loss.
     @Test func lossWithTheLidShutSleepsTheMac() async {
         let client = FakeClient()
+        client.edit { $0.unattended = true }
         let lid = makeLid(client)
         await lid.start()
         lid.setDesired(true)
@@ -187,6 +194,121 @@ struct LidControllerTests {
         lid.update(closedWithoutDisplay: true)
         client.edit { $0.heartbeat = -1 }
         lid.beat()
+        await settle { client.calls.contains("sleepnow") }
+        #expect(lid.state == .failed(.lost) && client.calls.contains("sleepnow"))
+    }
+
+    /// The follow-up sleep reads fresh: lid shut but someone typing at an external display (or the lid opened since).
+    @Test func releaseDoesNotSleepAnAttendedMac() async {
+        let client = FakeClient()
+        let lid = makeLid(client)
+        await lid.start()
+        lid.setDesired(true)
+        await settle { lid.isEngaged }
+        lid.update(closedWithoutDisplay: true)   // the cached value says "bag"; the fresh read says otherwise
+        lid.setDesired(false)
+        await settle { lid.state == .off }
+        try? await Task.sleep(for: .milliseconds(20))
+        #expect(!client.calls.contains("sleepnow"))
+    }
+
+    /// The cached value says "lid open"; the fresh read at the release says unattended (a dock pulled a moment ago).
+    @Test func releaseSleepsAMacThatJustBecameUnattended() async {
+        let client = FakeClient()
+        client.edit { $0.unattended = true }
+        let lid = makeLid(client)
+        await lid.start()
+        lid.setDesired(true)
+        await settle { lid.isEngaged }
+        lid.setDesired(false)
+        await settle { client.calls.contains("sleepnow") }
+        #expect(client.calls.contains("sleepnow"))
+    }
+
+    /// After a loss, too: the fresh read decides, not the cached value.
+    @Test func lossFollowsTheFreshReadNotTheCachedOne() async {
+        let attended = FakeClient()
+        let lid = makeLid(attended)
+        await lid.start()
+        lid.setDesired(true)
+        await settle { lid.isEngaged }
+        lid.update(closedWithoutDisplay: true)
+        attended.edit { $0.heartbeat = -1 }
+        lid.beat()
+        await settle { lid.state == .failed(.lost) && attended.calls.contains("abandon") }
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(!attended.calls.contains("sleepnow"))
+
+        let unattended = FakeClient()
+        unattended.edit { $0.unattended = true }
+        let lid2 = makeLid(unattended)
+        await lid2.start()
+        lid2.setDesired(true)
+        await settle { lid2.isEngaged }
+        unattended.edit { $0.heartbeat = -1 }
+        lid2.beat()
+        await settle { unattended.calls.contains("sleepnow") }
+        #expect(unattended.calls.contains("sleepnow"))
+    }
+
+    /// A release the helper answers with the drop reason of a backstop has already been reset by the helper.
+    @Test func releaseAnsweredWithADropReasonIsDone() async {
+        let client = FakeClient()
+        let lid = makeLid(client)
+        await lid.start()
+        lid.setDesired(true)
+        await settle { lid.isEngaged }
+        client.edit { $0.release = HelperResult.hot.rawValue; $0.flag = false }
+        lid.setDesired(false)
+        await settle { lid.state == .off }
+        #expect(lid.state == .off && !client.calls.contains("abandon"))
+    }
+
+    @Test func asleepClockNeverTraps() {
+        let a = LidController.asleepNanos()
+        let b = LidController.asleepNanos()
+        #expect(b >= a && b - a < 1_000_000_000)
+    }
+
+    /// The helper's heat backstop dropped us and already slept a shut-in Mac: a sticky failure, no second sleep.
+    @Test func heatBackstopOnHeartbeatIsAStickyFailure() async {
+        let client = FakeClient()
+        client.edit { $0.unattended = true }
+        let lid = makeLid(client)
+        await lid.start()
+        lid.setDesired(true)
+        await settle { lid.isEngaged }
+        client.edit { $0.heartbeat = HelperResult.hot.rawValue }
+        lid.beat()
+        await settle { lid.state == .failed(.hot) }
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(lid.state == .failed(.hot) && !client.calls.contains("sleepnow"))
+        #expect(PanelState.failureCaption(.hot).text == "Your Mac got hot.")
+    }
+
+    @Test func engageRefusedWhileHotIsAFailure() async {
+        let client = FakeClient()
+        client.edit { $0.engage = HelperResult.hot.rawValue }
+        let lid = makeLid(client)
+        await lid.start()
+        lid.setDesired(true)
+        await settle { lid.state == .failed(.hot) }
+        #expect(lid.state == .failed(.hot) && client.calls.filter { $0 == "engage" }.count == 1)
+    }
+
+    /// A flag left stuck by a loss sleeps an unattended Mac once it clears, though lid mode is still wanted.
+    @Test func aStuckFlagLeftByALossSleepsWhenItClears() async {
+        let client = FakeClient()
+        client.edit { $0.flagAfterAbandon = true }
+        let lid = makeLid(client)
+        await lid.start()
+        lid.setDesired(true)
+        await settle { lid.isEngaged }
+        client.edit { $0.heartbeat = -1 }
+        lid.beat()
+        await settle { lid.isStuck }
+        client.edit { $0.flag = false; $0.unattended = true }
+        lid.recheckFlag()
         await settle { client.calls.contains("sleepnow") }
         #expect(lid.state == .failed(.lost) && client.calls.contains("sleepnow"))
     }
@@ -280,6 +402,27 @@ struct LidControllerTests {
         await settle { lid.isEngaged }
         await lid.releaseForQuit()
         #expect(client.calls.suffix(2) == ["release", "abandon"])
+    }
+
+    @Test func quitSleepsAnUnattendedMacUnlessPoweringOff() async {
+        let client = FakeClient()
+        client.edit { $0.unattended = true }
+        let lid = makeLid(client)
+        await lid.start()
+        lid.setDesired(true)
+        await settle { lid.isEngaged }
+        await lid.releaseForQuit()
+        #expect(client.calls.last == "sleepnow")
+
+        let other = FakeClient()
+        other.edit { $0.unattended = true }
+        let lid2 = makeLid(other)
+        await lid2.start()
+        lid2.setDesired(true)
+        await settle { lid2.isEngaged }
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willPowerOffNotification, object: nil)
+        await lid2.releaseForQuit()
+        #expect(!other.calls.contains("sleepnow"))
     }
 
     @Test func serviceStatusMapping() {

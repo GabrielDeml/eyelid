@@ -33,13 +33,11 @@ fi
 IDENTITIES=$(security find-identity -v -p codesigning ${INSOMNIA_SIGN_KEYCHAIN:+"$INSOMNIA_SIGN_KEYCHAIN"} || true)
 grep -Fq -- "$ID" <<<"$IDENTITIES" || die "signing identity '$ID' not found (security find-identity -v -p codesigning)"
 
+# A locked keychain is unlocked only around the codesign steps (6-8), so other code running as you has the shortest
+# window to sign with it (docs/DESIGN.md "Security").
 KEYCHAIN_ARGS=()
-if [[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" ]]; then
-    say "Unlocking signing keychain $INSOMNIA_SIGN_KEYCHAIN"
-    security unlock-keychain "$INSOMNIA_SIGN_KEYCHAIN"
-    trap 'security lock-keychain "$INSOMNIA_SIGN_KEYCHAIN" || true' EXIT
-    KEYCHAIN_ARGS=(--keychain "$INSOMNIA_SIGN_KEYCHAIN")
-fi
+[[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" ]] && KEYCHAIN_ARGS=(--keychain "$INSOMNIA_SIGN_KEYCHAIN")
+lock_keychain() { [[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" ]] && security lock-keychain "$INSOMNIA_SIGN_KEYCHAIN" || true; }
 say "Signing identity: $ID"
 
 # 2. Compile ------------------------------------------------------------------------------------------------------------
@@ -52,7 +50,7 @@ BIN=$(swift build -c release --show-bin-path)
 mkdir -p "$ROOT/build"
 STAGE=$(mktemp -d "$ROOT/build/.stage.XXXXXX")
 cleanup_stage() { rm -rf "$STAGE"; }
-trap 'cleanup_stage; [[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" ]] && security lock-keychain "$INSOMNIA_SIGN_KEYCHAIN" || true' EXIT
+trap 'cleanup_stage; lock_keychain' EXIT
 APP="$STAGE/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 ditto "$BIN/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
@@ -84,6 +82,10 @@ for b in "$APP/Contents/MacOS/$APP_NAME" "$APP/Contents/MacOS/InsomniaHelper"; d
 done
 
 # 6. Sign the helper (explicit identifier: SwiftPM's own signature says "InsomniaHelper") -----------------------------
+if [[ -n "${INSOMNIA_SIGN_KEYCHAIN:-}" ]]; then
+    say "Unlocking signing keychain $INSOMNIA_SIGN_KEYCHAIN"
+    security unlock-keychain "$INSOMNIA_SIGN_KEYCHAIN"
+fi
 say "Signing helper"
 codesign --force --options runtime --timestamp=none --identifier "$HELPER_ID" "${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"}" \
     --sign "$ID" "$APP/Contents/MacOS/InsomniaHelper"
@@ -104,6 +106,7 @@ plutil -lint "$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST_NAME" >/dev/null
 # 8. Sign the app (no --deep; seals Info.plist and the daemon plist) ---------------------------------------------------
 say "Signing app"
 codesign --force --options runtime --timestamp=none "${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"}" --sign "$ID" "$APP"
+lock_keychain
 
 # 9. Verify ---------------------------------------------------------------------------------------------------------------
 say "Verifying"
@@ -124,7 +127,8 @@ HELPER_TEAM=$(sed -n 's/^TeamIdentifier=//p' <<<"$HELPER_INFO")
     || die "TeamIdentifier mismatch (app '$APP_TEAM', helper '$HELPER_TEAM')"
 grep -q 'flags=0x10000(runtime)' <<<"$APP_INFO" || die "app is not signed with the hardened runtime"
 grep -q 'flags=0x10000(runtime)' <<<"$HELPER_INFO" || die "helper is not signed with the hardened runtime"
-# The exact requirements each side pins at runtime (HelperInfo.clientRequirement / helperRequirement).
+# The requirements each side pins at runtime (HelperInfo.clientRequirement / helperRequirement); the helper adds the
+# installed app's cdhash to the client one at start-up.
 req() { echo "identifier \"$1\" and anchor apple generic and certificate leaf[subject.OU] = \"$APP_TEAM\" and !(entitlement[\"com.apple.security.get-task-allow\"] exists)"; }
 codesign --verify -R="$(req "$BUNDLE_ID")" "$APP" || die "app fails the client requirement"
 codesign --verify -R="$(req "$HELPER_ID")" "$APP/Contents/MacOS/InsomniaHelper" || die "helper fails the helper requirement"

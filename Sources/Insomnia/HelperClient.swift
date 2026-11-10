@@ -47,6 +47,9 @@ protocol HelperClienting: Sendable {
     func query() async -> HelperAnswer?
     /// IOPMrootDomain SleepDisabled; nil if unreadable.
     func flag() async -> Bool?
+    /// Read now: the Mac is shut in, with no external display at all or no input for PowerState.unattendedAfter
+    /// (PowerState.isUnattended). Every follow-up `sleepnow` asks this first; a cached lid state can be stale.
+    func isUnattendedNow() async -> Bool
     /// `/usr/bin/pmset sleepnow` / `displaysleepnow` (no root needed).
     func pmset(_ verb: String) async
     /// Admin prompt running `pmset -a disablesleep 0`. true on success.
@@ -212,6 +215,8 @@ final class HelperClient: HelperClienting {
     // MARK: System
 
     func flag() async -> Bool? { RootDomain.sleepDisabled() }
+
+    func isUnattendedNow() async -> Bool { Power.lidSnapshot().isUnattended(idleSeconds: Power.hidIdleSeconds()) }
 
     func pmset(_ verb: String) async {
         let r = Spawn.run("/usr/bin/pmset", [verb], timeout: 5)
