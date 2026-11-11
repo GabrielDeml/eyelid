@@ -264,10 +264,12 @@ struct LidControllerTests {
         #expect(lid.state == .off && !client.calls.contains("abandon"))
     }
 
+    /// Each sample reads two clocks one after the other, so it includes the time between the two reads. A thread
+    /// preempted there makes its sample larger than the next one: compare them in either order.
     @Test func asleepClockNeverTraps() {
         let a = LidController.asleepNanos()
         let b = LidController.asleepNanos()
-        #expect(b >= a && b - a < 1_000_000_000)
+        #expect(max(a, b) - min(a, b) < 1_000_000_000)
     }
 
     /// The helper's heat backstop dropped us and already slept a shut-in Mac: a sticky failure, no second sleep.
